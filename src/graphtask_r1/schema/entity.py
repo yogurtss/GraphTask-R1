@@ -83,3 +83,33 @@ class Witness(BaseModel):
 
     answer: str
     facts: tuple[Triple, ...]
+
+
+class GraphSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    snapshot_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    content_hash: str = Field(min_length=1)
+    backend: Literal["memory", "sqlite", "virtuoso"]
+
+
+class GraphSlice(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    snapshot_id: str
+    triples: tuple[Triple, ...]
+    entities: tuple[EntityInfo, ...] = ()
+    relations: tuple[RelationInfo, ...] = ()
+    complete: bool
+    truncated: bool = False
+    remote_answers: AnswerSet = AnswerSet()
+    detail: str | None = None
+
+
+class MaterializationReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    graph_slice: GraphSlice
+    local_answers: AnswerSet
+    answer_equivalent: bool

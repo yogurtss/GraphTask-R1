@@ -1,88 +1,327 @@
 from __future__ import annotations
 
+import os
 import random
+import subprocess
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
-from graphtask_r1.utils import read_json, write_json, write_manifest, write_records
+import pyarrow as pa
+import pyarrow.parquet as pq
+import yaml
+from pydantic import BaseModel, ConfigDict, Field
+
+from graphtask_r1.archive import TaskArchive
+from graphtask_r1.schema import TaskCertificate
+from graphtask_r1.training.verl_dataset import export_role_dataset
+from graphtask_r1.utils import file_hash, read_json, read_records, write_json
+
+VERL_COMMIT = "bec9ef74768dd201881cd4e54cd0385e87caae27"
 
 
-def run_orchestration_smoke(
+class SelfPlayConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_path: str = "Qwen/Qwen3-4B-Instruct-2507"
+    initial_adapter: str
+    base_tasks: Path
+    val_data: Path
+    questioner_seeds: Path
+    graph_snapshot: str = "freebase-v1"
+    rounds: int = Field(default=3, gt=0)
+    solver_episodes: int = Field(default=256, gt=0)
+    opponent_samples: int = Field(default=8, gt=0)
+    base_ratio: float = 0.35
+    archive_ratio: float = 0.35
+    new_ratio: float = 0.30
+    seed: int = 42
+    actor_gpus: str = "0,1"
+    opponent_gpus: str = "2,3"
+    sglang_port: int = 30000
+    opponent_port: int = 18080
+    train_script: Path = Path("scripts/train_verl.sh")
+    sglang_start_timeout_s: int = 300
+
+
+def load_selfplay_config(path: Path) -> SelfPlayConfig:
+    raw = os.path.expandvars(path.read_text())
+    return SelfPlayConfig.model_validate(yaml.safe_load(raw))
+
+
+def _sample(values: list[TaskCertificate], count: int, rng: random.Random) -> list[TaskCertificate]:
+    if not values or count <= 0:
+        return []
+    if count <= len(values):
+        return rng.sample(values, count)
+    return [rng.choice(values) for _ in range(count)]
+
+
+def _round_tasks(
+    config: SelfPlayConfig, archive_path: Path, *, round_index: int
+) -> list[TaskCertificate]:
+    base = [TaskCertificate.model_validate(value) for value in read_records(config.base_tasks)]
+    with TaskArchive(archive_path) as archive:
+        archived = archive.all()
+    new = [task for task in archived if task.generation.get("round") == round_index - 1]
+    old = [task for task in archived if task not in new]
+    rng = random.Random(config.seed + round_index)
+    base_count = round(config.solver_episodes * config.base_ratio)
+    archive_count = round(config.solver_episodes * config.archive_ratio)
+    new_count = max(0, config.solver_episodes - base_count - archive_count)
+    if not new:
+        base_count += new_count
+        new_count = 0
+    if not old:
+        base_count += archive_count
+        archive_count = 0
+    return [
+        *_sample(base, base_count, rng),
+        *_sample(old, archive_count, rng),
+        *_sample(new, new_count, rng),
+    ]
+
+
+def _assemble_dataset(
+    config: SelfPlayConfig,
+    archive_path: Path,
+    output_path: Path,
+    *,
+    round_index: int,
+    opponent_url: str,
+) -> dict[str, int]:
+    solver_tasks = _round_tasks(config, archive_path, round_index=round_index)
+    solver_path = output_path.with_name("solver.parquet")
+    export_role_dataset(
+        solver_tasks,
+        solver_path,
+        include_questioner=False,
+        include_solver=True,
+    )
+    seed_table = pq.read_table(config.questioner_seeds)
+    seed_rows = seed_table.to_pylist()
+    for row in seed_rows:
+        extra = dict(row["extra_info"])
+        extra.update(
+            {
+                "opponent_url": opponent_url,
+                "opponent_samples": config.opponent_samples,
+                "round": round_index,
+            }
+        )
+        row["extra_info"] = extra
+    questioner_table = pa.Table.from_pylist(seed_rows)
+    solver_table = pq.read_table(solver_path)
+    combined = pa.concat_tables([questioner_table, solver_table], promote_options="default")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(combined, output_path)
+    return {"questioner": len(seed_rows), "solver": len(solver_tasks), "total": len(combined)}
+
+
+def _wait_for(url: str, *, timeout_s: int) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if response.status == 200:
+                    return
+        except (OSError, TimeoutError) as exc:
+            last_error = exc
+        time.sleep(1)
+    raise RuntimeError(f"service did not become healthy: {url}") from last_error
+
+
+def _adapter_from_checkpoint(round_dir: Path) -> Path:
+    candidates = sorted(
+        round_dir.rglob("adapter_model.safetensors"),
+        key=lambda path: path.stat().st_mtime,
+    )
+    if not candidates:
+        raise RuntimeError(f"verl did not emit a LoRA adapter under {round_dir}")
+    return candidates[-1].parent
+
+
+def _stop(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def _commands(
+    config: SelfPlayConfig,
+    *,
+    adapter: Path,
+    archive_path: Path,
+    mixed_data: Path,
+    round_dir: Path,
+) -> dict[str, list[str]]:
+    model_name = "frozen-opponent"
+    sglang = [
+        "python",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        config.model_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(config.sglang_port),
+        "--tp-size",
+        "1",
+        "--dp-size",
+        str(len(config.opponent_gpus.split(","))),
+        "--enable-lora",
+        "--lora-paths",
+        f"{model_name}={adapter}",
+    ]
+    opponent = [
+        "python",
+        "-m",
+        "graphtask_r1.training.opponent",
+        "--model-url",
+        f"http://127.0.0.1:{config.sglang_port}",
+        "--model",
+        model_name,
+        "--archive",
+        str(archive_path),
+        "--port",
+        str(config.opponent_port),
+    ]
+    train = ["bash", str(config.train_script)]
+    return {"sglang": sglang, "opponent": opponent, "train": train}
+
+
+def run_self_play(
+    config_path: Path,
     output_dir: Path,
     *,
-    rounds: int,
-    questioner_groups: int,
-    solver_episodes: int,
-    seed: int,
-    model: str,
     resume: bool,
+    dry_run: bool,
 ) -> dict[str, Any]:
-    """Exercise round/checkpoint contracts without pretending to train a language model."""
+    config = load_selfplay_config(config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
-    start_round = 1
-    state = {"shared_parameter_version": 0, "archive_size": 0}
-    if resume and (output_dir / "manifest.json").exists():
-        manifest = read_json(output_dir / "manifest.json")
-        start_round = int(manifest["last_completed_round"]) + 1
-        state = dict(manifest["state"])
-    rng = random.Random(seed + start_round)
-    for round_index in range(start_round, rounds + 1):
-        round_dir = output_dir / f"round_{round_index}"
-        q_rewards = [rng.random() for _ in range(questioner_groups)]
-        s_rewards = [rng.random() for _ in range(solver_episodes)]
-        q_rows = [
-            {"round": round_index, "role": "questioner", "index": i, "reward": reward}
-            for i, reward in enumerate(q_rewards)
-        ]
-        s_rows = [
-            {"round": round_index, "role": "solver", "index": i, "reward": reward}
-            for i, reward in enumerate(s_rewards)
-        ]
-        write_records(round_dir / "questioner_rollouts.parquet", q_rows)
-        write_records(round_dir / "solver_rollouts.parquet", s_rows)
-        write_records(round_dir / "task_archive.parquet", q_rows)
-        q_mean = sum(q_rewards) / max(1, len(q_rewards))
-        s_mean = sum(s_rewards) / max(1, len(s_rewards))
-        write_json(
-            round_dir / "reward_breakdown.json",
-            {"questioner": {"total": q_mean}, "solver": {"total": s_mean}},
+    archive_path = output_dir / "archive.sqlite"
+    manifest_path = output_dir / "manifest.json"
+    completed = 0
+    adapter = Path(config.initial_adapter)
+    if resume and manifest_path.exists():
+        state = read_json(manifest_path)
+        completed = int(state["last_completed_round"])
+        adapter = Path(state["adapter"])
+        if state["config_hash"] != file_hash(config_path):
+            raise ValueError("cannot resume: self-play config changed")
+    plans: list[dict[str, Any]] = []
+    for round_index in range(completed + 1, config.rounds + 1):
+        round_dir = output_dir / f"round_{round_index:03d}"
+        mixed_data = round_dir / "mixed.parquet"
+        opponent_url = f"http://127.0.0.1:{config.opponent_port}"
+        counts = (
+            {"questioner": 0, "solver": 0, "total": 0}
+            if dry_run
+            else _assemble_dataset(
+                config,
+                archive_path,
+                mixed_data,
+                round_index=round_index,
+                opponent_url=opponent_url,
+            )
         )
-        write_json(
-            round_dir / "gradient_diagnostics.json",
-            {
-                "questioner_norm": 0.0,
-                "solver_norm": 0.0,
-                "cosine_similarity": 0.0,
-                "note": "orchestration smoke only; real gradients are emitted by verl",
-            },
+        commands = _commands(
+            config,
+            adapter=adapter,
+            archive_path=archive_path,
+            mixed_data=mixed_data,
+            round_dir=round_dir,
         )
-        checkpoint = output_dir / f"checkpoints/shared_policy_round_{round_index}"
-        checkpoint.mkdir(parents=True, exist_ok=True)
-        state["shared_parameter_version"] = round_index
-        state["archive_size"] = int(state["archive_size"]) + len(q_rows)
-        write_json(
-            checkpoint / "adapter_manifest.json",
-            {"model": model, "round": round_index, "shared": True},
-        )
+        plan = {
+            "round": round_index,
+            "adapter_in": str(adapter),
+            "dataset": str(mixed_data),
+            "counts": counts,
+            "commands": commands,
+            "actor_gpus": config.actor_gpus,
+            "opponent_gpus": config.opponent_gpus,
+        }
+        plans.append(plan)
+        if dry_run:
+            continue
+        round_dir.mkdir(parents=True, exist_ok=True)
+        write_json(round_dir / "plan.json", plan)
+        logs = round_dir / "logs"
+        logs.mkdir(exist_ok=True)
+        opponent_env = {**os.environ, "CUDA_VISIBLE_DEVICES": config.opponent_gpus}
+        with (logs / "sglang.log").open("w") as sglang_log:
+            sglang_process = subprocess.Popen(
+                commands["sglang"], env=opponent_env, stdout=sglang_log, stderr=subprocess.STDOUT
+            )
+        try:
+            _wait_for(
+                f"http://127.0.0.1:{config.sglang_port}/health",
+                timeout_s=config.sglang_start_timeout_s,
+            )
+            with (logs / "opponent.log").open("w") as opponent_log:
+                opponent_process = subprocess.Popen(
+                    commands["opponent"],
+                    env=opponent_env,
+                    stdout=opponent_log,
+                    stderr=subprocess.STDOUT,
+                )
+            try:
+                _wait_for(opponent_url + "/health", timeout_s=60)
+                train_env = {
+                    **os.environ,
+                    "CUDA_VISIBLE_DEVICES": config.actor_gpus,
+                    "MODEL_PATH": config.model_path,
+                    "LORA_ADAPTER_PATH": str(adapter),
+                    "TRAIN_DATA": str(mixed_data.resolve()),
+                    "VAL_DATA": str(config.val_data.resolve()),
+                    "NUM_GPUS": str(len(config.actor_gpus.split(","))),
+                    "OUTPUT_DIR": str(round_dir.resolve()),
+                    "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
+                    "SAVE_FREQ": "1",
+                }
+                with (logs / "verl.log").open("w") as train_log:
+                    subprocess.run(
+                        commands["train"],
+                        env=train_env,
+                        stdout=train_log,
+                        stderr=subprocess.STDOUT,
+                        check=True,
+                    )
+            finally:
+                _stop(opponent_process)
+        finally:
+            _stop(sglang_process)
+        adapter = _adapter_from_checkpoint(round_dir)
         write_json(
             round_dir / "manifest.json",
-            {"round": round_index, "seed": seed, "state": state, "resumable": True},
+            {
+                "round": round_index,
+                "adapter": str(adapter),
+                "dataset_hash": file_hash(mixed_data),
+                "completed": True,
+            },
         )
         write_json(
-            output_dir / "manifest.json",
-            {"last_completed_round": round_index, "seed": seed, "state": state, "resumable": True},
+            manifest_path,
+            {
+                "last_completed_round": round_index,
+                "adapter": str(adapter),
+                "config_hash": file_hash(config_path),
+                "verl_commit": VERL_COMMIT,
+            },
         )
-    write_manifest(
-        output_dir,
-        {
-            "command": "train mini-self-play",
-            "rounds": rounds,
-            "questioner_groups": questioner_groups,
-            "solver_episodes": solver_episodes,
-            "seed": seed,
-            "model": model,
-            "backend": "orchestration-smoke",
-        },
-        ["round_*/", "checkpoints/"],
-    )
-    return {"rounds_completed": rounds, **state}
+    return {
+        "dry_run": dry_run,
+        "rounds_requested": config.rounds,
+        "rounds_completed": completed if dry_run else config.rounds,
+        "plans": plans,
+        "verl_commit": VERL_COMMIT,
+    }

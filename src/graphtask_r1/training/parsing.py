@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from graphtask_r1.schema import AnswerSet, Program, parse_program
+from graphtask_r1.schema import AnswerSet, Program, TaskProposal, parse_program
 
 
 def _tag(text: str, name: str) -> str:
@@ -21,6 +21,13 @@ def parse_questioner_output(text: str) -> tuple[str, tuple[str, ...], Program]:
         raise ValueError("question is empty")
     topic_entities = tuple(str(value) for value in payload["topic_entities"])
     return question, topic_entities, parse_program(payload["program"])
+
+
+def parse_task_proposal(text: str) -> TaskProposal:
+    payload: dict[str, Any] = json.loads(_tag(text, "task"))
+    if "question" in payload and "paraphrase" not in payload:
+        payload["paraphrase"] = payload.pop("question")
+    return TaskProposal.model_validate(payload)
 
 
 def parse_solver_output(text: str, *, count: bool = False) -> AnswerSet:

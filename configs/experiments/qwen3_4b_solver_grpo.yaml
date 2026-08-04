@@ -1,0 +1,7 @@
+model_path: Qwen/Qwen3-4B-Instruct-2507
+lora_adapter_path: ${SFT_ADAPTER}
+train_data: ${SOLVER_RL_TRAIN_DATA}
+val_data: ${SOLVER_RL_VAL_DATA}
+output_dir: ${SOLVER_GRPO_OUTPUT_DIR}
+num_gpus: 4
+experiment_name: qwen3-4b-solver-grpo

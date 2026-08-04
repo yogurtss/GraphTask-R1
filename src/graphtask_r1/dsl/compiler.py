@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 from graphtask_r1.schema import (
+    AllEntities,
     Count,
     Entity,
     FilterLiteral,
@@ -11,6 +13,7 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    Union,
     program_to_dict,
 )
 
@@ -19,6 +22,20 @@ def escape_iri(value: str) -> str:
     if any(char in value for char in '<>"{}|\\^`\n\r'):
         raise ValueError(f"unsafe IRI token: {value!r}")
     return value
+
+
+def _sparql_literal(program: FilterLiteral) -> str:
+    value = program.value.value
+    if program.value.datatype in {"quantity", "number"} and isinstance(value, int | float):
+        return str(value)
+    if program.value.datatype == "year":
+        return str(int(value))
+    if program.value.datatype == "date":
+        normalized = str(value).replace("/", "-")
+        if not re.fullmatch(r"-?\d{1,6}-\d{1,2}-\d{1,2}", normalized):
+            raise ValueError(f"invalid date literal: {value!r}")
+        return json.dumps(normalized) + "^^<http://www.w3.org/2001/XMLSchema#date>"
+    return json.dumps(value, ensure_ascii=False)
 
 
 class _Builder:
@@ -31,6 +48,9 @@ class _Builder:
         return value
 
     def compile(self, program: Program) -> tuple[str, list[str]]:
+        if isinstance(program, AllEntities):
+            variable = self.var()
+            return variable, [f"{variable} ?allRelation ?allObject ."]
         if isinstance(program, Entity):
             variable = self.var()
             return variable, [f"VALUES {variable} {{ <{escape_iri(program.entity_id)}> }}"]
@@ -52,6 +72,14 @@ class _Builder:
                 intersection_clauses.extend(branch_clauses)
                 intersection_clauses.append(f"BIND({variable} AS {output})")
             return output, intersection_clauses
+        if isinstance(program, Union):
+            compiled = [self.compile(branch) for branch in program.inputs]
+            output = self.var()
+            branches = []
+            for variable, branch_clauses in compiled:
+                body = " ".join([*branch_clauses, f"BIND({variable} AS {output})"])
+                branches.append(f"{{ {body} }}")
+            return output, [" UNION ".join(branches)]
         if isinstance(program, FilterType):
             variable, input_clauses = self.compile(program.input)
             return variable, [
@@ -61,7 +89,7 @@ class _Builder:
         if isinstance(program, FilterLiteral):
             variable, input_clauses = self.compile(program.input)
             literal = self.var()
-            value = json.dumps(program.value, ensure_ascii=False)
+            value = _sparql_literal(program)
             operators = {"eq": "=", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}
             if program.comparator == "contains":
                 expression = f"CONTAINS(LCASE(STR({literal})), LCASE(STR({value})))"

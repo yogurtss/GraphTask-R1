@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test e2e selfplay
+.PHONY: lint typecheck test e2e scripted-selfplay
 
 lint:
 	ruff check src tests
@@ -12,6 +12,5 @@ test:
 e2e:
 	PYTHONPATH=src python -m graphtask_r1.cli e2e mini-pipeline --graph toy --num-programs 100 --seed 42 --output-dir outputs/e2e-mini
 
-selfplay:
-	PYTHONPATH=src python -m graphtask_r1.cli train mini-self-play --graph toy --model deterministic-shared-policy --shared-policy true --rounds 3 --questioner-groups 16 --solver-episodes 64 --seed 42 --output-dir outputs/mini-self-play
-
+scripted-selfplay:
+	PYTHONPATH=src python -m graphtask_r1.cli e2e scripted-self-play --rounds 3 --candidates-per-round 16 --seed 42 --output-dir outputs/scripted-self-play

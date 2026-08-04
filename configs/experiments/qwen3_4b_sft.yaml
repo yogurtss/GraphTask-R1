@@ -1,0 +1,6 @@
+model_path: Qwen/Qwen3-4B-Instruct-2507
+train_data: ${SFT_TRAIN_DATA}
+val_data: ${SFT_VAL_DATA}
+output_dir: ${SFT_OUTPUT_DIR}
+num_gpus: 4
+experiment_name: qwen3-4b-shared-sft

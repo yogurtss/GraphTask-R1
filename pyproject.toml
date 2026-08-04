@@ -23,7 +23,7 @@ dev = [
   "pytest>=8,<9",
   "ruff>=0.5,<1",
 ]
-training = ["torch>=2.2"]
+training = ["aiohttp>=3.10,<4", "torch>=2.2"]
 
 [project.scripts]
 graphtask-r1 = "graphtask_r1.cli:main"
@@ -50,5 +50,5 @@ mypy_path = "src"
 warn_unused_ignores = false
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*", "verl", "verl.*"]
+module = ["pyarrow", "pyarrow.*", "verl", "verl.*", "yaml"]
 ignore_missing_imports = true

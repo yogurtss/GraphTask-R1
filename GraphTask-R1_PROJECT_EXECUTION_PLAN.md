@@ -4,6 +4,10 @@
 > **论文题目候选**：*Learning to Challenge Graph Agents: Verifiable Task Evolution for Knowledge-Graph Reasoning*  
 > **文档用途**：研究方案定稿、工程规格、实验协议，以及后续交给 Codex 的实现依据。  
 > **版本**：v1.1，2026-08-04（首版调整为单模型共享策略 self-play）  
+>
+> **实现状态**：工程入口已推进到 KQA Pro 冷启动、Freebase/Virtuoso、候选级 frozen-Solver
+> reward 和可恢复 mixed-role verl self-play；实际 GPU 结果仍需服务器实验验证。操作说明见
+> `docs/DATA_PREPARATION.md` 与 `docs/TRAINING.md`。
 
 ---
 

@@ -64,17 +64,15 @@ Questioner batch + Solver batch
   -> one shared backbone + one shared LoRA update
 ```
 
-仓库中的 ToyGraph 路径可离线检查 DSL、verifier、工具和 Parquet 契约。`verl_tools.py`
-实现有生命周期的 per-trajectory 工具 session；`verl_reward.py` 是 verl 的自定义 reward
-入口；`scripts/train_verl.sh` 启动共享策略 GRPO。生产图只需替换 backend factory，不应
-修改 reward 或 agent loop。
+仓库中的 ToyGraph 路径可离线检查 DSL、verifier、工具和 Parquet 契约；KQA Pro SQLite 和
+Freebase Virtuoso 路径负责真实数据。`verl_tools.py` 实现有生命周期的 per-trajectory tool
+session；异步 reward 通过冻结 Solver 服务计算候选级 frontier；round orchestrator 管理
+共享 adapter、archive、mixed-role 数据和恢复。
 
 ## 3. 模型选择
 
-第一轮建议 `Qwen/Qwen2.5-3B-Instruct + LoRA rank 32`，原因是体量小、Hermes 风格工具
-调用成熟，并且 verl 官方示例覆盖 Qwen2.5-3B 多轮工具训练。Qwen3-4B 可以作为第二个
-配置，但当前 verl 文档明确提醒 Qwen3 chat template 会删除历史 reasoning 内容，需要
-严格检查 multi-turn tokenization；不要在第一轮同时引入这个变量。
+固定首轮模型为 `Qwen/Qwen3-4B-Instruct-2507 + LoRA rank 32`。该 checkpoint 仅使用
+non-thinking 模式，避免多轮工具历史中的 reasoning 清理问题；工具格式采用 Hermes 风格。
 
 建议从 4×A100/H100 开始：TP=1，每卡 rollout worker，SGLang async rollout。显存不足时
 先降低 `TRAIN_BATCH_SIZE`、`MAX_RESPONSE_LENGTH` 和 `ROLLOUT_N`，再启用 parameter / optimizer
@@ -82,7 +80,7 @@ offload。不要先降低图验证强度。
 
 ## 4. 环境安装
 
-推荐把 verl 固定到一次确认过的 commit，避免它快速演进的 multi-turn API 造成配置漂移：
+verl 固定为 `v0.7.1` / `bec9ef74768dd201881cd4e54cd0385e87caae27`：
 
 ```bash
 conda create -n graphtask python=3.11 -y
@@ -90,7 +88,7 @@ conda activate graphtask
 
 git clone --recursive https://github.com/verl-project/verl.git third_party/verl
 cd third_party/verl
-git checkout <VERIFIED_COMMIT>
+git checkout bec9ef74768dd201881cd4e54cd0385e87caae27
 pip install -e .
 cd ../..
 
@@ -98,9 +96,8 @@ pip install -e '.[dev,training]'
 pip install "sglang[all]" flash-attn --no-build-isolation
 ```
 
-先运行 verl 自带的 Qwen2.5-3B GSM8K multi-turn smoke example，确认 CUDA、Ray、SGLang、
-tool calling 和 LoRA 能协同，再运行本项目。训练命令中的字段依据 2026-05 的 verl
-multi-turn 文档；若所固定 commit 较旧，应以该 commit 自带 config schema 为准。
+先运行该 commit 自带的 Qwen3-4B multi-turn 示例，确认 CUDA、Ray、SGLang、tool calling
+和 LoRA 能协同，再运行本项目。升级 verl 时必须重新校验 Hydra 与数据 schema。
 
 ## 5. 数据下载
 
@@ -165,7 +162,7 @@ PYTHONPATH=src python -m graphtask_r1.cli data export-verl \
   --input outputs/toy/tasks.parquet \
   --output outputs/verl/solver.parquet --roles solver
 
-MODEL_PATH=/models/Qwen2.5-3B-Instruct \
+MODEL_PATH=/models/Qwen3-4B-Instruct-2507 \
 TRAIN_DATA=$PWD/outputs/verl/solver.parquet \
 NUM_GPUS=4 EXPERIMENT_NAME=solver-grpo \
 bash scripts/train_verl.sh
@@ -190,16 +187,15 @@ EXPERIMENT_NAME=selfplay-round-01 \
 bash scripts/train_verl.sh
 ```
 
-当前代码的 ToyGraph reward 从 `extra_info.opponent_pass_rate` 读取 frontier 信号。生产轮次必须
-由冻结 Solver rollout 写入真实通过率，不能用固定 0.5。建议外层 round orchestrator 管理
-snapshot、候选生成、Solver 评测、archive 混样和下一次 verl job；不要在 reward 函数内同步
-启动另一个大模型，以免 Ray worker 阻塞。
+当前实现由异步 reward 调用独立冻结 Solver 服务，对每个有效候选执行 K 次真实 graph-tool
+rollout；不存在固定 `opponent_pass_rate`。外层 orchestrator 使用 2 卡 actor + 2 卡 frozen
+opponent，管理 snapshot、archive 混样和下一轮 verl job。
 
 ## 7. 建议首轮超参数
 
 | 参数 | 初值 |
 |---|---:|
-| backbone | Qwen2.5-3B-Instruct |
+| backbone | Qwen3-4B-Instruct-2507 |
 | LoRA rank / alpha | 32 / 64 |
 | rollout N | 8 |
 | learning rate | 2e-6 |
@@ -227,4 +223,3 @@ full self-play。必做消融：无 necessity、无 shortcut、闭卷 Solver、�
 - 相同 token/rollout 预算下，至少一个 held-out compositional bucket 优于 random-walk；
 - 外部冻结 Solver 仍能回答，排除共享模型私有协议；
 - Questioner/Solver 格式有效率不连续两轮下降。
-

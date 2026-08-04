@@ -1,7 +1,9 @@
 backend: virtuoso
+snapshot_id: freebase-v1
 endpoint: ${FREEBASE_ENDPOINT}
 timeout_s: 20
 retries: 2
 cache_dir: data/cache/freebase
 max_neighbors: 100
-
+materialize_max_nodes: 10000
+materialize_max_edges: 50000

@@ -1,5 +1,9 @@
 # Codex Implementation Brief：GraphTask-R1
 
+> 历史说明：本文保留最初的 issue 拆分。ToyGraph `mini-self-play` 验收已被真实 KQA/Freebase、
+> frozen-Solver reward 与 verl round orchestrator 取代。当前命令以 `README.md`、
+> `docs/DATA_PREPARATION.md` 和 `docs/TRAINING.md` 为准。
+
 ## Mission
 
 实现一个可重放、可测试的研究代码库，用于：

@@ -1,25 +1,27 @@
 # GraphTask-R1
 
-GraphTask-R1 is an offline-first research baseline for constructing, verifying, and replaying
-knowledge-graph reasoning tasks. Every accepted task carries an executable program certificate;
-gold answers are always obtained by executing that program.
+GraphTask-R1 trains one shared LoRA policy as both a privileged graph Questioner and a
+tool-limited Solver. Questioner proposals are accepted only after program execution, bounded
+witness materialization, counterfactual necessity checks, shortcut detection, and evaluation by
+a frozen Solver snapshot. Gold answers always come from the certified program.
 
-The repository implements the complete ToyGraph milestone:
+The repository now provides:
 
-- typed Pydantic schemas and a JSON-serializable query DSL;
-- deterministic in-memory execution and SPARQL compilation;
-- program/graph interventions, necessity scoring, and bounded shortcut search;
-- constrained seeded program sampling with structured rejection records;
-- deterministic verbalization, task certificates, canonical Solver traces, and replay;
-- a serializable tool environment and task archive;
-- a CPU-friendly shared-parameter Questioner/Solver mini self-play harness with resumable rounds;
-- Parquet artifacts, manifests, CLI commands, tests, linting, typing, and CI.
+- a typed core DSL with entity roots, bounded scans, hops, intersection/union, type and typed
+  literal filters, and count;
+- deterministic in-memory, indexed KQA Pro SQLite, and Freebase Virtuoso backends;
+- KQA Pro KoPL conversion with answer reconciliation and structured rejection records;
+- WebQSP, ComplexWebQuestions, and GrailQA normalization with held-out entity denylists;
+- verl v0.7.1 multi-turn SFT/RL data exporters and Qwen3-4B-Instruct-2507 LoRA launchers;
+- candidate-specific asynchronous frontier rewards from a frozen tool-using Solver;
+- a resumable 4-GPU mixed-role self-play orchestrator and benchmark evaluator;
+- CPU fixtures, replay tests, manifests, audit commands, linting, typing, and CI.
 
-The mini self-play harness verifies orchestration and parameter-sharing semantics. It is not a
-claim that a 3B model was trained. Production `verl`/LoRA and remote graph execution are explicit
-extension boundaries and require external models, GPUs, and graph snapshots.
+No GPU result is claimed in this repository. Training and Freebase ingestion are intentionally
+left for the user's server because they require model weights, licensed datasets, large storage,
+and 4×80GB GPUs.
 
-## Quick start
+## Local verification
 
 ```bash
 python -m pip install -e '.[dev,training]'
@@ -27,23 +29,28 @@ make lint
 make typecheck
 make test
 make e2e
-make selfplay
+make scripted-selfplay
 ```
 
-Without installation, prefix commands with `PYTHONPATH=src`.
-
-## Main acceptance commands
+## Data and training entry points
 
 ```bash
-python -m graphtask_r1.cli e2e mini-pipeline \
-  --graph toy --num-programs 100 --seed 42 --output-dir outputs/e2e-mini
+# KQA Pro cold-start data
+graphtask-r1 data fetch --dataset kqapro
+graphtask-r1 data prepare --dataset kqapro \
+  --raw-dir data/raw/kqa_pro --output-dir data/processed/kqapro/kqapro-v1
 
-python -m graphtask_r1.cli train mini-self-play \
-  --graph toy --model deterministic-shared-policy --shared-policy true \
-  --rounds 3 --questioner-groups 16 --solver-episodes 64 \
-  --seed 42 --output-dir outputs/mini-self-play
+# Freebase endpoint check and leakage-safe Questioner seeds
+graphtask-r1 graph preflight --snapshot freebase-v1
+graphtask-r1 data sample-seeds --snapshot freebase-v1 \
+  --exclude data/processed/freebase_heldout_entities.json \
+  --output data/verl/freebase_questioner_seeds.parquet
+
+# Inspect the exact 4-GPU self-play launch without starting GPUs
+graphtask-r1 train self-play --config configs/training/selfplay.yaml \
+  --output-dir outputs/selfplay --dry-run
 ```
 
-Generated manifests record the exact configuration, source revision, Python version, and lock
-hash. See `GraphTask-R1_PROJECT_EXECUTION_PLAN.md` for the research roadmap.
-
+Read [Data preparation](docs/DATA_PREPARATION.md) before downloading anything and
+[Training](docs/TRAINING.md) before starting verl. Research motivation and experiment design are
+in [RESEARCH_AND_TRAINING_GUIDE.md](docs/RESEARCH_AND_TRAINING_GUIDE.md).

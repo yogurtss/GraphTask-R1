@@ -1,17 +1,36 @@
-from graphtask_r1.schema.entity import Answer, AnswerSet, EntityInfo, RelationInfo, Triple, Witness
+from graphtask_r1.schema.entity import (
+    Answer,
+    AnswerSet,
+    EntityInfo,
+    GraphSlice,
+    GraphSnapshot,
+    MaterializationReport,
+    RelationInfo,
+    Triple,
+    Witness,
+)
 from graphtask_r1.schema.program import (
+    AllEntities,
     Count,
     Entity,
     FilterLiteral,
     FilterType,
     Hop,
     Intersect,
+    LiteralValue,
     Program,
+    Union,
     parse_program,
     program_to_dict,
 )
 from graphtask_r1.schema.reward import RewardBreakdown, VerifierResult
-from graphtask_r1.schema.task import TaskCertificate, VerificationSummary
+from graphtask_r1.schema.task import (
+    BenchmarkExample,
+    TaskCertificate,
+    TaskProposal,
+    TaskProvenance,
+    VerificationSummary,
+)
 from graphtask_r1.schema.trajectory import (
     EpisodeInput,
     Observation,
@@ -23,6 +42,8 @@ from graphtask_r1.schema.trajectory import (
 __all__ = [
     "Answer",
     "AnswerSet",
+    "AllEntities",
+    "BenchmarkExample",
     "Count",
     "Entity",
     "EntityInfo",
@@ -30,16 +51,23 @@ __all__ = [
     "FilterLiteral",
     "FilterType",
     "Hop",
+    "GraphSlice",
+    "GraphSnapshot",
     "Intersect",
+    "LiteralValue",
+    "MaterializationReport",
     "Observation",
     "Program",
     "RelationInfo",
     "RewardBreakdown",
     "StepResult",
     "TaskCertificate",
+    "TaskProposal",
+    "TaskProvenance",
     "ToolCall",
     "Trajectory",
     "Triple",
+    "Union",
     "VerificationSummary",
     "VerifierResult",
     "Witness",

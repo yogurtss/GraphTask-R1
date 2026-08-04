@@ -122,6 +122,8 @@ def run_mini_pipeline(
 def _topic_ids(program: dict[str, Any]) -> set[str]:
     if program["op"] == "entity":
         return {str(program["entity_id"])}
-    if program["op"] == "intersect":
+    if program["op"] == "all_entities":
+        return set()
+    if program["op"] in {"intersect", "union"}:
         return {entity for branch in program["inputs"] for entity in _topic_ids(branch)}
     return _topic_ids(program["input"])

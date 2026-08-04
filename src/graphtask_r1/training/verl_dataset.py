@@ -15,11 +15,15 @@ def export_role_dataset(
     *,
     include_questioner: bool = True,
     include_solver: bool = True,
+    opponent_url: str | None = None,
+    opponent_samples: int = 8,
+    questioner_weight: float = 0.35,
+    solver_weight: float = 0.65,
 ) -> int:
     """Export verl RLHFDataset rows with role-specific prompts and tool session kwargs."""
     rows: list[dict[str, object]] = []
     for index, task in enumerate(tasks):
-        graph_snapshot = str(task.generation.get("graph_snapshot", "toy-v1"))
+        graph_snapshot = task.graph_snapshot
         topic_ids = [entity.entity_id for entity in task.topic_entities]
         common = {
             "graph_snapshot": graph_snapshot,
@@ -38,7 +42,14 @@ def export_role_dataset(
                     "prompt": role_prompt("questioner", payload),
                     "ability": "graph_task_generation",
                     "reward_model": {"style": "rule", "ground_truth": "{}"},
-                    "extra_info": {**common, "role": "questioner", "opponent_pass_rate": 0.5},
+                    "extra_info": {
+                        **common,
+                        "role": "questioner",
+                        "role_weight": questioner_weight,
+                        "opponent_url": opponent_url,
+                        "opponent_samples": opponent_samples,
+                    },
+                    "uid": f"questioner:{task.task_id}",
                     "agent_name": "tool_agent",
                     "tools_kwargs": {
                         name: {"create_kwargs": {**common, "role": "questioner"}}
@@ -59,7 +70,8 @@ def export_role_dataset(
                         "style": "rule",
                         "ground_truth": task.gold_answers.model_dump_json(),
                     },
-                    "extra_info": {**common, "role": "solver"},
+                    "extra_info": {**common, "role": "solver", "role_weight": solver_weight},
+                    "uid": f"solver:{task.task_id}",
                     "agent_name": "tool_agent",
                     "tools_kwargs": {
                         name: {"create_kwargs": {**common, "role": "solver"}}

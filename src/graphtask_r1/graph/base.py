@@ -4,10 +4,20 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from graphtask_r1.graph.overlay import GraphOverlay
-from graphtask_r1.schema import AnswerSet, EntityInfo, Program, RelationInfo, Triple, Witness
+from graphtask_r1.schema import (
+    AnswerSet,
+    EntityInfo,
+    GraphSlice,
+    Program,
+    RelationInfo,
+    Triple,
+    Witness,
+)
 
 
 class GraphBackend(Protocol):
+    def all_entities(self, *, limit: int) -> tuple[str, ...]: ...
+
     def neighbors(
         self,
         entity_ids: Sequence[str],
@@ -27,5 +37,9 @@ class GraphBackend(Protocol):
     def relation_info(self, relation_id: str) -> RelationInfo: ...
 
     def extract_witness(self, program: Program, answers: AnswerSet) -> list[Witness]: ...
+
+    def materialize(
+        self, program: Program, *, max_nodes: int = 10_000, max_edges: int = 50_000
+    ) -> GraphSlice: ...
 
     def with_overlay(self, overlay: GraphOverlay) -> GraphBackend: ...

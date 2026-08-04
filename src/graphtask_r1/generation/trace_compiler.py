@@ -5,6 +5,7 @@ import hashlib
 from graphtask_r1.envs import SolverEnv
 from graphtask_r1.graph import GraphBackend
 from graphtask_r1.schema import (
+    AllEntities,
     AnswerSet,
     Count,
     Entity,
@@ -16,6 +17,7 @@ from graphtask_r1.schema import (
     Program,
     ToolCall,
     Trajectory,
+    Union,
 )
 
 
@@ -28,6 +30,8 @@ def _compile_searches(
 ) -> AnswerSet:
     if isinstance(program, Entity):
         return AnswerSet.entities([program.entity_id])
+    if isinstance(program, AllEntities):
+        return AnswerSet.entities(backend.all_entities(limit=program.max_results))
     if isinstance(program, Hop):
         inputs = _compile_searches(program.input, backend, task_id, calls)
         calls.append(
@@ -43,6 +47,10 @@ def _compile_searches(
         )
         return backend.execute_program(program)
     if isinstance(program, Intersect):
+        for branch in program.inputs:
+            _compile_searches(branch, backend, task_id, calls)
+        return backend.execute_program(program)
+    if isinstance(program, Union):
         for branch in program.inputs:
             _compile_searches(branch, backend, task_id, calls)
         return backend.execute_program(program)
@@ -118,7 +126,9 @@ def compile_trace(
 def _topic_entities(program: Program) -> tuple[str, ...]:
     if isinstance(program, Entity):
         return (program.entity_id,)
-    if isinstance(program, Intersect):
+    if isinstance(program, AllEntities):
+        return ()
+    if isinstance(program, Intersect | Union):
         return tuple(
             sorted({entity for branch in program.inputs for entity in _topic_entities(branch)})
         )

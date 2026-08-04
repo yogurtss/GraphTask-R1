@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from graphtask_r1.dsl import necessity_scores
-from graphtask_r1.graph import GraphBackend
+from graphtask_r1.graph import GraphBackend, InMemoryGraphBackend, SQLiteGraphBackend
 from graphtask_r1.schema import Program, VerifierResult
 from graphtask_r1.verification.lexical import answer_leak
 from graphtask_r1.verification.shortcut import bounded_shortcut_search
@@ -23,9 +23,21 @@ def verify_task(
     started = time.perf_counter()
     reasons: list[str] = []
     try:
-        answers = backend.execute_program(program)
+        remote_answers = backend.execute_program(program)
+        working_backend = backend
+        if not isinstance(backend, InMemoryGraphBackend | SQLiteGraphBackend):
+            graph_slice = backend.materialize(program)
+            if not graph_slice.complete:
+                reasons.append("INCOMPLETE_SLICE")
+            working_backend = InMemoryGraphBackend(
+                graph_slice.triples, graph_slice.entities, graph_slice.relations
+            )
+            local_answers = working_backend.execute_program(program)
+            if local_answers != remote_answers:
+                reasons.append("INCOMPLETE_SLICE")
+        answers = remote_answers
         executable = True
-    except (TypeError, ValueError, KeyError):
+    except (TypeError, ValueError, KeyError, RuntimeError):
         answers = None
         executable = False
         reasons.append("EXECUTION_ERROR")
@@ -54,18 +66,18 @@ def verify_task(
     if not cardinality_valid:
         reasons.append("INVALID_CARDINALITY")
     necessity_started = time.perf_counter()
-    necessity_mean, necessity_min, _ = necessity_scores(program, backend)
+    necessity_mean, necessity_min, _ = necessity_scores(program, working_backend)
     necessity_ms = (time.perf_counter() - necessity_started) * 1000
     if necessity_min < necessity_min_threshold:
         reasons.append("REDUNDANT_CONDITION")
     shortcut_started = time.perf_counter()
-    shortcut = bounded_shortcut_search(program, backend, max_candidates=shortcut_budget)
+    shortcut = bounded_shortcut_search(program, working_backend, max_candidates=shortcut_budget)
     shortcut_ms = (time.perf_counter() - shortcut_started) * 1000
     if shortcut.found is True and reject_shortcuts:
         reasons.append("SHORTCUT_FOUND")
     if shortcut.found is None:
         reasons.append("SHORTCUT_UNKNOWN")
-    leaked = answer_leak(question, answers, backend)
+    leaked = answer_leak(question, answers, working_backend)
     if leaked:
         reasons.append("ANSWER_LEAK")
     return VerifierResult(

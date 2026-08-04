@@ -1,0 +1,7 @@
+policy_name_or_path: ${MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}
+parameter_sharing: full
+tuning: lora
+lora_rank: 32
+lora_alpha: 64
+thinking: false
+roles: [questioner, solver]

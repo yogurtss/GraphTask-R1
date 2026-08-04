@@ -5,7 +5,16 @@ from dataclasses import dataclass
 
 from graphtask_r1.dsl import canonical_signature
 from graphtask_r1.graph import InMemoryGraphBackend
-from graphtask_r1.schema import Count, Entity, FilterLiteral, FilterType, Hop, Intersect, Program
+from graphtask_r1.schema import (
+    Count,
+    Entity,
+    FilterLiteral,
+    FilterType,
+    Hop,
+    Intersect,
+    LiteralValue,
+    Program,
+)
 
 
 @dataclass(frozen=True)
@@ -79,7 +88,7 @@ class ProgramSampler:
                         input=base,
                         relation=edge.relation,
                         comparator="ge",
-                        value=float(edge.object),
+                        value=LiteralValue(value=float(edge.object), datatype="number"),
                     )
                 else:
                     program = None

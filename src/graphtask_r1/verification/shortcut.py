@@ -4,7 +4,17 @@ from dataclasses import dataclass
 
 from graphtask_r1.dsl import canonical_signature, program_cost
 from graphtask_r1.graph import GraphBackend
-from graphtask_r1.schema import Count, Entity, FilterLiteral, FilterType, Hop, Intersect, Program
+from graphtask_r1.schema import (
+    AllEntities,
+    Count,
+    Entity,
+    FilterLiteral,
+    FilterType,
+    Hop,
+    Intersect,
+    Program,
+    Union,
+)
 
 
 @dataclass(frozen=True)
@@ -18,12 +28,14 @@ class ShortcutResult:
 def topic_entities(program: Program) -> tuple[str, ...]:
     if isinstance(program, Entity):
         return (program.entity_id,)
-    if isinstance(program, Intersect):
+    if isinstance(program, Intersect | Union):
         return tuple(
             sorted({entity for branch in program.inputs for entity in topic_entities(branch)})
         )
     if isinstance(program, Hop | FilterType | FilterLiteral | Count):
         return topic_entities(program.input)
+    if isinstance(program, AllEntities):
+        return ()
     raise TypeError(type(program).__name__)
 
 

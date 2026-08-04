@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from graphtask_r1.graph import GraphBackend, GraphOverlay
 from graphtask_r1.schema import (
+    AllEntities,
     AnswerSet,
     Count,
     Entity,
@@ -13,6 +14,7 @@ from graphtask_r1.schema import (
     Intersect,
     Program,
     Triple,
+    Union,
 )
 
 
@@ -35,13 +37,18 @@ def atomic_interventions(program: Program) -> list[ProgramIntervention]:
             results.append(
                 ProgramIntervention(child.code, program.model_copy(update={"input": child.program}))
             )
-    elif isinstance(program, Intersect):
+    elif isinstance(program, Intersect | Union):
         for index in range(len(program.inputs)):
             remaining = tuple(branch for i, branch in enumerate(program.inputs) if i != index)
-            replacement: Program = (
-                remaining[0] if len(remaining) == 1 else Intersect(inputs=remaining)
-            )
-            results.append(ProgramIntervention(f"drop_intersection_branch_{index}", replacement))
+            replacement: Program
+            if len(remaining) == 1:
+                replacement = remaining[0]
+            elif isinstance(program, Intersect):
+                replacement = Intersect(inputs=remaining)
+            else:
+                replacement = Union(inputs=remaining)
+            family = "intersection" if isinstance(program, Intersect) else "union"
+            results.append(ProgramIntervention(f"drop_{family}_branch_{index}", replacement))
         for index, branch in enumerate(program.inputs):
             for child in atomic_interventions(branch):
                 branches = list(program.inputs)
@@ -51,7 +58,7 @@ def atomic_interventions(program: Program) -> list[ProgramIntervention]:
                         child.code, program.model_copy(update={"inputs": tuple(branches)})
                     )
                 )
-    elif not isinstance(program, Entity):
+    elif not isinstance(program, Entity | AllEntities):
         raise TypeError(type(program).__name__)
     return results
 

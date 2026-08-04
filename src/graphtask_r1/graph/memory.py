@@ -6,17 +6,20 @@ from collections.abc import Sequence
 
 from graphtask_r1.graph.overlay import GraphOverlay
 from graphtask_r1.schema import (
+    AllEntities,
     AnswerSet,
     Count,
     Entity,
     EntityInfo,
     FilterLiteral,
     FilterType,
+    GraphSlice,
     Hop,
     Intersect,
     Program,
     RelationInfo,
     Triple,
+    Union,
     Witness,
     parse_program,
 )
@@ -74,6 +77,13 @@ class InMemoryGraphBackend:
     def triples(self) -> tuple[Triple, ...]:
         return self._triples
 
+    def all_entities(self, *, limit: int) -> tuple[str, ...]:
+        values = set(self._entities)
+        if not values:
+            values.update(triple.subject for triple in self._triples)
+            values.update(triple.object for triple in self._triples)
+        return tuple(sorted(values)[: max(0, limit)])
+
     def neighbors(
         self,
         entity_ids: Sequence[str],
@@ -100,6 +110,8 @@ class InMemoryGraphBackend:
         return selected[: max(0, limit)]
 
     def _execute_entities(self, program: Program) -> set[str]:
+        if isinstance(program, AllEntities):
+            return set(self.all_entities(limit=program.max_results))
         if isinstance(program, Entity):
             return {program.entity_id}
         if isinstance(program, Hop):
@@ -113,6 +125,8 @@ class InMemoryGraphBackend:
         if isinstance(program, Intersect):
             branches = [self._execute_entities(branch) for branch in program.inputs]
             return set.intersection(*branches)
+        if isinstance(program, Union):
+            return set().union(*(self._execute_entities(branch) for branch in program.inputs))
         if isinstance(program, FilterType):
             return {
                 entity_id
@@ -126,7 +140,7 @@ class InMemoryGraphBackend:
                     [entity_id], direction="out", relation_ids=[program.relation]
                 )
                 if any(
-                    _compare(_literal(triple.object), program.comparator, program.value)
+                    _compare(_literal(triple.object), program.comparator, program.value.value)
                     for triple in values
                 ):
                     result.add(entity_id)
@@ -168,7 +182,7 @@ class InMemoryGraphBackend:
         return [Witness(answer=str(answer.value), facts=facts) for answer in answers.answers]
 
     def _program_facts(self, program: Program) -> tuple[Triple, ...]:
-        if isinstance(program, Entity):
+        if isinstance(program, Entity | AllEntities):
             return ()
         if isinstance(program, FilterType | Count):
             return self._program_facts(program.input)
@@ -186,10 +200,35 @@ class InMemoryGraphBackend:
             return tuple(
                 sorted(set(self._program_facts(program.input)) | set(own), key=Triple.sort_key)
             )
-        if isinstance(program, Intersect):
+        if isinstance(program, Intersect | Union):
             facts = {fact for branch in program.inputs for fact in self._program_facts(branch)}
             return tuple(sorted(facts, key=Triple.sort_key))
         return ()
+
+    def materialize(
+        self, program: Program, *, max_nodes: int = 10_000, max_edges: int = 50_000
+    ) -> GraphSlice:
+        answers = self.execute_program(program)
+        facts = self._program_facts(program)
+        node_ids = sorted(
+            {value for fact in facts for value in (fact.subject, fact.object)}
+            | set(answers.entity_ids())
+        )
+        truncated = len(facts) > max_edges or len(node_ids) > max_nodes
+        selected_facts = facts[:max_edges]
+        selected_ids = set(node_ids[:max_nodes])
+        return GraphSlice(
+            snapshot_id="memory",
+            triples=selected_facts,
+            entities=tuple(self.entity_info(entity_id) for entity_id in sorted(selected_ids)),
+            relations=tuple(
+                self.relation_info(relation_id)
+                for relation_id in sorted({fact.relation for fact in selected_facts})
+            ),
+            complete=not truncated,
+            truncated=truncated,
+            remote_answers=answers,
+        )
 
     def with_overlay(self, overlay: GraphOverlay) -> InMemoryGraphBackend:
         return InMemoryGraphBackend(
