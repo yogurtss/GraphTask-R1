@@ -1,0 +1,12 @@
+experiment:
+  name: toy-smoke
+  seed: 42
+graph: toy
+program:
+  max_cost: 4.5
+  max_hops: 4
+verification:
+  necessity_min_threshold: 0.0
+  necessity_mean_threshold: 0.0
+  bounded_shortcut_search: true
+

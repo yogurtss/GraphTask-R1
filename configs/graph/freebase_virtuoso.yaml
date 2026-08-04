@@ -1,0 +1,7 @@
+backend: virtuoso
+endpoint: ${FREEBASE_ENDPOINT}
+timeout_s: 20
+retries: 2
+cache_dir: data/cache/freebase
+max_neighbors: 100
+

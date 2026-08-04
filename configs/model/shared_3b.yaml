@@ -1,0 +1,6 @@
+policy_name_or_path: ${MODEL_PATH}
+parameter_sharing: full
+tuning: lora
+lora_rank: 32
+roles: [questioner, solver]
+

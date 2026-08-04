@@ -1,0 +1,5 @@
+backend: memory
+name: toy-v1
+timeout_s: 2
+max_neighbors: 100
+
