@@ -54,6 +54,8 @@ async def evaluate_benchmark(
             "entity_f1": sum(float(value["mean_f1"]) for value in values) / count,
             "exact_match": sum(float(value["pass_rate"]) for value in values) / count,
             "mean_tool_calls": sum(float(value["mean_tool_calls"]) for value in values) / count,
+            "mean_edge_visits": sum(float(value.get("mean_edge_visits", 0.0)) for value in values)
+            / count,
             "mean_latency_ms": sum(float(value["mean_latency_ms"]) for value in values) / count,
         }
 

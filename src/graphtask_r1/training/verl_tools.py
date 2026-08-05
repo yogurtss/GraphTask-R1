@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from graphtask_r1.graph import backend_from_snapshot
+from graphtask_r1.graphscript import execute_graphscript, program_to_graphscript
 from graphtask_r1.schema import parse_program
 
 try:
@@ -38,7 +39,15 @@ class _SessionTool(BaseTool):  # type: ignore[misc]
             "role": role,
             "backend": backend_from_snapshot(snapshot),
             "calls": 0,
+            "edge_visits": 0,
             "task_id": kwargs.get("task_id"),
+            "allowed_relations": frozenset(
+                str(value) for value in kwargs.get("allowed_relations", [])
+            ),
+            "max_follow_limit": int(kwargs.get("max_follow_limit", 100)),
+            "max_edge_visits": int(kwargs.get("max_edge_visits", 200)),
+            "max_returned_entities": int(kwargs.get("max_returned_entities", 1_000)),
+            "program_profile": str(kwargs.get("program_profile", "full")),
         }
         return instance_id, response
 
@@ -62,15 +71,45 @@ class GraphSearchTool(_SessionTool):
     ) -> tuple[Any, float, dict[str, float]]:
         del kwargs
         session = self._session(instance_id)
+        requested_relations = [str(value) for value in parameters.get("relation_ids", [])]
+        allowed_relations = session["allowed_relations"]
+        if session["program_profile"] == "graphscript_v0_1" and allowed_relations:
+            if requested_relations and not set(requested_relations).issubset(allowed_relations):
+                raise ValueError("requested relation is outside the comparison catalog")
+            requested_relations = requested_relations or sorted(allowed_relations)
+        limit = min(int(parameters.get("limit", 50)), int(self.config.get("max_results", 100)))
+        if session["program_profile"] == "graphscript_v0_1":
+            role = str(session["role"])
+            max_calls = 7 if role == "questioner" else 8
+            if int(session["calls"]) > max_calls:
+                raise ValueError("graph-search call budget exceeded")
+            search_budget = int(session["max_edge_visits"])
+            if role == "questioner":
+                search_budget //= 2
+            remaining = search_budget - int(session["edge_visits"])
+            if remaining <= 0:
+                raise ValueError("graph-search edge budget exhausted")
+            limit = min(limit, remaining + 1)
         triples = session["backend"].neighbors(
             [str(value) for value in parameters["entity_ids"]],
             direction=str(parameters.get("direction", "both")),
-            relation_ids=[str(value) for value in parameters.get("relation_ids", [])] or None,
-            limit=min(int(parameters.get("limit", 50)), int(self.config.get("max_results", 100))),
+            relation_ids=requested_relations or None,
+            limit=limit,
             trace_id=f"{session['task_id']}:{session['calls']}",
         )
+        if session["program_profile"] == "graphscript_v0_1":
+            session["edge_visits"] += len(triples)
+            role = str(session["role"])
+            search_budget = int(session["max_edge_visits"])
+            if role == "questioner":
+                search_budget //= 2
+            if int(session["edge_visits"]) > search_budget:
+                raise ValueError("graph-search edge budget exceeded")
         payload = [triple.model_dump(mode="json") for triple in triples]
-        return ToolResponse(text=json.dumps(payload, ensure_ascii=False)), 0.0, {"graph_calls": 1.0}
+        return ToolResponse(text=json.dumps(payload, ensure_ascii=False)), 0.0, {
+            "graph_calls": 1.0,
+            "edge_visits": float(len(triples)),
+        }
 
 
 class InspectEntityTool(_SessionTool):
@@ -94,11 +133,46 @@ class ExecuteProgramTool(_SessionTool):
         del kwargs
         session = self._session(instance_id)
         program = parse_program(parameters["program"])
-        answers = session["backend"].execute_program(program)
+        usage = {"program_executions": 1.0}
+        if session["program_profile"] == "graphscript_v0_1":
+            if int(session["calls"]) > 1:
+                raise ValueError("comparison profile permits one candidate program execution")
+            script = program_to_graphscript(
+                program, follow_limit=int(session["max_follow_limit"])
+            )
+            execution = execute_graphscript(
+                script,
+                session["backend"],
+                seed_entity=next(iter(_program_seed(program))),
+                allowed_relations=session["allowed_relations"],
+                max_edge_visits=max(1, int(session["max_edge_visits"]) // 2),
+                max_returned_entities=int(session["max_returned_entities"]),
+                trace_id=f"{session['task_id']}:{session['calls']}",
+            )
+            answers = execution.answers
+            usage.update(
+                {
+                    "edge_visits": float(execution.usage.edge_visits),
+                    "graph_calls": float(execution.usage.graph_calls),
+                }
+            )
+        else:
+            answers = session["backend"].execute_program(program)
         response = {
             "cardinality": len(answers.answers),
             "answer_type": "count"
             if answers.answers and answers.answers[0].kind == "count"
             else "entity_set",
         }
-        return ToolResponse(text=json.dumps(response)), 0.0, {"program_executions": 1.0}
+        return ToolResponse(text=json.dumps(response)), 0.0, usage
+
+
+def _program_seed(program: Any) -> frozenset[str]:
+    from graphtask_r1.schema import Entity, Hop
+
+    node = program
+    while isinstance(node, Hop):
+        node = node.input
+    if not isinstance(node, Entity):
+        raise ValueError("comparison programs must have one entity root")
+    return frozenset({node.entity_id})

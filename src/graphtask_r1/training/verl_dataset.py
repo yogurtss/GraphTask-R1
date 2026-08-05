@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from graphtask_r1.schema import TaskCertificate
-from graphtask_r1.training.prompts import role_prompt
+from graphtask_r1.schema import RelationInfo, TaskCertificate
+from graphtask_r1.training.prompts import InteractionMode, role_prompt
 
 
 def export_role_dataset(
@@ -19,17 +20,35 @@ def export_role_dataset(
     opponent_samples: int = 8,
     questioner_weight: float = 0.35,
     solver_weight: float = 0.65,
+    interaction_mode: InteractionMode = "tool",
+    relation_catalog: tuple[RelationInfo, ...] = (),
+    relation_catalogs: Mapping[str, tuple[RelationInfo, ...]] | None = None,
+    max_follow_limit: int = 100,
+    max_edge_visits: int = 200,
+    max_returned_entities: int = 1_000,
+    program_profile: str = "full",
 ) -> int:
     """Export verl RLHFDataset rows with role-specific prompts and tool session kwargs."""
     rows: list[dict[str, object]] = []
     for index, task in enumerate(tasks):
         graph_snapshot = task.graph_snapshot
+        task_catalog = (relation_catalogs or {}).get(graph_snapshot, relation_catalog)
+        if interaction_mode == "graphscript" and not task_catalog:
+            raise ValueError(
+                f"graphscript verl export requires a relation catalog for {graph_snapshot}"
+            )
         topic_ids = [entity.entity_id for entity in task.topic_entities]
         common = {
             "graph_snapshot": graph_snapshot,
             "topic_entity_ids": topic_ids,
             "task_id": task.task_id,
             "index": index,
+            "interaction_mode": interaction_mode,
+            "allowed_relations": [value.relation_id for value in task_catalog],
+            "max_follow_limit": max_follow_limit,
+            "max_edge_visits": max_edge_visits,
+            "max_returned_entities": max_returned_entities,
+            "program_profile": program_profile,
         }
         if include_questioner:
             payload = (
@@ -39,7 +58,12 @@ def export_role_dataset(
             rows.append(
                 {
                     "data_source": "graphtask/questioner",
-                    "prompt": role_prompt("questioner", payload),
+                    "prompt": role_prompt(
+                        "questioner",
+                        payload,
+                        interaction_mode=interaction_mode,
+                        relation_catalog=task_catalog,
+                    ),
                     "ability": "graph_task_generation",
                     "reward_model": {"style": "rule", "ground_truth": "{}"},
                     "extra_info": {
@@ -50,11 +74,21 @@ def export_role_dataset(
                         "opponent_samples": opponent_samples,
                     },
                     "uid": f"questioner:{task.task_id}",
-                    "agent_name": "tool_agent",
-                    "tools_kwargs": {
-                        name: {"create_kwargs": {**common, "role": "questioner"}}
-                        for name in ("graph_search", "inspect_entity", "execute_program")
-                    },
+                    **(
+                        {
+                            "agent_name": "tool_agent",
+                            "tools_kwargs": {
+                                name: {"create_kwargs": {**common, "role": "questioner"}}
+                                for name in (
+                                    "graph_search",
+                                    "inspect_entity",
+                                    "execute_program",
+                                )
+                            },
+                        }
+                        if interaction_mode == "tool"
+                        else {}
+                    ),
                 }
             )
         if include_solver:
@@ -64,6 +98,8 @@ def export_role_dataset(
                     "prompt": role_prompt(
                         "solver",
                         f"Question: {task.question}\nTopic entities: {', '.join(topic_ids)}",
+                        interaction_mode=interaction_mode,
+                        relation_catalog=task_catalog,
                     ),
                     "ability": "graph_search_qa",
                     "reward_model": {
@@ -72,11 +108,17 @@ def export_role_dataset(
                     },
                     "extra_info": {**common, "role": "solver", "role_weight": solver_weight},
                     "uid": f"solver:{task.task_id}",
-                    "agent_name": "tool_agent",
-                    "tools_kwargs": {
-                        name: {"create_kwargs": {**common, "role": "solver"}}
-                        for name in ("graph_search", "inspect_entity")
-                    },
+                    **(
+                        {
+                            "agent_name": "tool_agent",
+                            "tools_kwargs": {
+                                name: {"create_kwargs": {**common, "role": "solver"}}
+                                for name in ("graph_search", "inspect_entity")
+                            },
+                        }
+                        if interaction_mode == "tool"
+                        else {}
+                    ),
                 }
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)

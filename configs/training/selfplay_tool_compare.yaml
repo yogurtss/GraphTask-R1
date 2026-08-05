@@ -18,7 +18,11 @@ opponent_port: 18080
 train_script: scripts/train_verl.sh
 sglang_start_timeout_s: 300
 interaction_mode: tool
+relation_catalog: ${RELATION_CATALOG}
+relation_catalogs:
+  kqapro-v1: ${KQAPRO_RELATION_CATALOG}
+  freebase-v1: ${RELATION_CATALOG}
 max_follow_limit: 100
 max_edge_visits: 200
 max_returned_entities: 1000
-program_profile: full
+program_profile: graphscript_v0_1

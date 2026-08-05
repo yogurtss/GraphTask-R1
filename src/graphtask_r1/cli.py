@@ -12,22 +12,25 @@ from typing import Any
 
 import yaml
 
+from graphtask_r1.archive import TaskArchive
 from graphtask_r1.data import (
     audit_records,
     merge_denylists,
     prepare_benchmark,
     prepare_kqapro,
     sample_questioner_seeds,
+    select_graphscript_tasks,
 )
 from graphtask_r1.evaluation import evaluate_benchmark
 from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.pipeline import run_mini_pipeline
 from graphtask_r1.schema import TaskCertificate
+from graphtask_r1.training.relations import build_relation_catalog, load_relation_catalog
 from graphtask_r1.training.scripted import run_scripted_selfplay
 from graphtask_r1.training.selfplay import run_self_play
 from graphtask_r1.training.sft_dataset import export_sft_dataset
 from graphtask_r1.training.verl_dataset import export_role_dataset
-from graphtask_r1.utils import read_records
+from graphtask_r1.utils import read_records, write_records
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -87,12 +90,18 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--roles", choices=["both", "questioner", "solver"], default="both")
     export.add_argument("--opponent-url")
     export.add_argument("--opponent-samples", type=int, default=8)
+    export.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
+    export.add_argument("--relation-catalog", type=Path)
     _add_common(export)
 
     export_sft = data_actions.add_parser("export-sft")
     export_sft.add_argument("--input", type=Path, required=True)
     export_sft.add_argument("--output", type=Path, required=True)
     export_sft.add_argument("--roles", choices=["both", "questioner", "solver"], default="both")
+    export_sft.add_argument(
+        "--interaction-mode", choices=["tool", "graphscript"], default="tool"
+    )
+    export_sft.add_argument("--relation-catalog", type=Path)
     _add_common(export_sft)
 
     seeds = data_actions.add_parser("sample-seeds")
@@ -104,6 +113,22 @@ def build_parser() -> argparse.ArgumentParser:
     seeds.add_argument("--opponent-url")
     seeds.add_argument("--opponent-samples", type=int, default=8)
     seeds.add_argument("--seed", type=int, default=42)
+    seeds.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
+    seeds.add_argument("--relation-catalog", type=Path)
+
+    select_interaction = data_actions.add_parser("select-interaction-tasks")
+    select_interaction.add_argument("--input", type=Path, required=True)
+    select_interaction.add_argument("--output", type=Path, required=True)
+    select_interaction.add_argument("--limit", type=int)
+
+    catalog = data_actions.add_parser("build-relation-catalog")
+    catalog.add_argument("--input", type=Path, required=True)
+    catalog.add_argument("--output", type=Path, required=True)
+    catalog.add_argument("--snapshot")
+    catalog.add_argument("--limit", type=int)
+    export_archive = data_actions.add_parser("export-archive")
+    export_archive.add_argument("--archive", type=Path, required=True)
+    export_archive.add_argument("--output", type=Path, required=True)
     denylist = data_actions.add_parser("merge-denylists")
     denylist.add_argument("--inputs", type=Path, nargs="+", required=True)
     denylist.add_argument("--output", type=Path, required=True)
@@ -222,6 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 include_solver=args.roles in {"both", "solver"},
                 opponent_url=args.opponent_url,
                 opponent_samples=args.opponent_samples,
+                interaction_mode=args.interaction_mode,
+                relation_catalog=load_relation_catalog(args.relation_catalog),
             )
             result = {"rows": rows, "output": str(args.output)}
     elif args.group == "data" and args.action == "export-sft":
@@ -235,6 +262,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 include_questioner=args.roles in {"both", "questioner"},
                 include_solver=args.roles in {"both", "solver"},
                 seed=args.seed,
+                interaction_mode=args.interaction_mode,
+                relation_catalog=load_relation_catalog(args.relation_catalog),
             )
             result = {"rows": rows, "output": str(args.output)}
     elif args.group == "data" and args.action == "sample-seeds":
@@ -247,7 +276,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             pool_limit=args.pool_limit,
             opponent_url=args.opponent_url,
             opponent_samples=args.opponent_samples,
+            interaction_mode=args.interaction_mode,
+            relation_catalog=load_relation_catalog(args.relation_catalog),
         )
+    elif args.group == "data" and args.action == "select-interaction-tasks":
+        result = select_graphscript_tasks(_load_tasks(args.input, args.limit), args.output)
+    elif args.group == "data" and args.action == "build-relation-catalog":
+        tasks = _load_tasks(args.input, args.limit)
+        if not tasks:
+            raise ValueError("cannot build a relation catalog from an empty task set")
+        snapshot = args.snapshot or tasks[0].graph_snapshot
+        relations = build_relation_catalog(tasks, backend_from_snapshot(snapshot), args.output)
+        result = {"relations": len(relations), "output": str(args.output), "snapshot": snapshot}
+    elif args.group == "data" and args.action == "export-archive":
+        if not args.archive.exists():
+            raise FileNotFoundError(args.archive)
+        with TaskArchive(args.archive) as archive:
+            tasks = archive.all()
+        write_records(args.output, (task.model_dump(mode="json") for task in tasks))
+        result = {"tasks": len(tasks), "output": str(args.output)}
     elif args.group == "data" and args.action == "merge-denylists":
         result = merge_denylists(args.inputs, args.output)
     elif args.group == "train" and args.action in {"sft", "solver-grpo"}:

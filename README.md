@@ -53,4 +53,6 @@ graphtask-r1 train self-play --config configs/training/selfplay.yaml \
 
 Read [Data preparation](docs/DATA_PREPARATION.md) before downloading anything and
 [Training](docs/TRAINING.md) before starting verl. Research motivation and experiment design are
-in [RESEARCH_AND_TRAINING_GUIDE.md](docs/RESEARCH_AND_TRAINING_GUIDE.md).
+in [RESEARCH_AND_TRAINING_GUIDE.md](docs/RESEARCH_AND_TRAINING_GUIDE.md). The optional end-to-end
+comparison between the existing multi-turn tool path and the restricted one-shot GraphScript path
+is documented in [Interaction modes](docs/INTERACTION_MODES.md); the default remains tool use.

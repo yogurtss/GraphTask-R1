@@ -6,15 +6,17 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from graphtask_r1.archive import TaskArchive
 from graphtask_r1.schema import TaskCertificate
+from graphtask_r1.training.prompts import role_prompt
+from graphtask_r1.training.relations import load_relation_catalog
 from graphtask_r1.training.verl_dataset import export_role_dataset
 from graphtask_r1.utils import file_hash, read_json, read_records, write_json
 
@@ -43,6 +45,21 @@ class SelfPlayConfig(BaseModel):
     opponent_port: int = 18080
     train_script: Path = Path("scripts/train_verl.sh")
     sglang_start_timeout_s: int = 300
+    interaction_mode: Literal["tool", "graphscript"] = "tool"
+    relation_catalog: Path | None = None
+    relation_catalogs: dict[str, Path] = Field(default_factory=dict)
+    max_follow_limit: int = Field(default=100, gt=0, le=1_000)
+    max_edge_visits: int = Field(default=200, gt=0)
+    max_returned_entities: int = Field(default=1_000, gt=0)
+    program_profile: Literal["full", "graphscript_v0_1"] = "full"
+
+    @model_validator(mode="after")
+    def validate_interaction_contract(self) -> SelfPlayConfig:
+        if self.interaction_mode == "graphscript" and self.relation_catalog is None:
+            raise ValueError("graphscript mode requires relation_catalog")
+        if self.interaction_mode == "graphscript" and self.program_profile != "graphscript_v0_1":
+            raise ValueError("graphscript mode requires program_profile=graphscript_v0_1")
+        return self
 
 
 def load_selfplay_config(path: Path) -> SelfPlayConfig:
@@ -91,6 +108,10 @@ def _assemble_dataset(
     round_index: int,
     opponent_url: str,
 ) -> dict[str, int]:
+    relation_catalog = load_relation_catalog(config.relation_catalog)
+    relation_catalogs = {
+        snapshot: load_relation_catalog(path) for snapshot, path in config.relation_catalogs.items()
+    }
     solver_tasks = _round_tasks(config, archive_path, round_index=round_index)
     solver_path = output_path.with_name("solver.parquet")
     export_role_dataset(
@@ -98,19 +119,56 @@ def _assemble_dataset(
         solver_path,
         include_questioner=False,
         include_solver=True,
+        interaction_mode=config.interaction_mode,
+        relation_catalog=relation_catalog,
+        relation_catalogs=relation_catalogs,
+        max_follow_limit=config.max_follow_limit,
+        max_edge_visits=config.max_edge_visits,
+        max_returned_entities=config.max_returned_entities,
+        program_profile=config.program_profile,
     )
     seed_table = pq.read_table(config.questioner_seeds)
     seed_rows = seed_table.to_pylist()
     for row in seed_rows:
         extra = dict(row["extra_info"])
+        topic_ids = [str(value) for value in extra.get("topic_entity_ids", [])]
         extra.update(
             {
                 "opponent_url": opponent_url,
                 "opponent_samples": config.opponent_samples,
                 "round": round_index,
+                "interaction_mode": config.interaction_mode,
+                "allowed_relations": [value.relation_id for value in relation_catalog],
+                "max_follow_limit": config.max_follow_limit,
+                "max_edge_visits": config.max_edge_visits,
+                "max_returned_entities": config.max_returned_entities,
+                "program_profile": config.program_profile,
             }
         )
         row["extra_info"] = extra
+        legacy_tool_mode = (
+            config.interaction_mode == "tool"
+            and config.program_profile == "full"
+            and not relation_catalog
+        )
+        if legacy_tool_mode:
+            continue
+        row["prompt"] = role_prompt(
+            "questioner",
+            "Explore from these seed entities and construct one certified task: "
+            + ", ".join(topic_ids),
+            interaction_mode=config.interaction_mode,
+            relation_catalog=relation_catalog,
+        )
+        if config.interaction_mode == "tool":
+            row["agent_name"] = "tool_agent"
+            row["tools_kwargs"] = {
+                name: {"create_kwargs": {**extra, "role": "questioner"}}
+                for name in ("graph_search", "inspect_entity", "execute_program")
+            }
+        else:
+            row.pop("agent_name", None)
+            row.pop("tools_kwargs", None)
     questioner_table = pa.Table.from_pylist(seed_rows)
     solver_table = pq.read_table(solver_path)
     combined = pa.concat_tables([questioner_table, solver_table], promote_options="default")
@@ -193,7 +251,15 @@ def _commands(
         str(archive_path),
         "--port",
         str(config.opponent_port),
+        "--interaction-mode",
+        config.interaction_mode,
+        "--max-follow-limit",
+        str(config.max_follow_limit),
     ]
+    if config.interaction_mode == "graphscript" or config.program_profile == "graphscript_v0_1":
+        opponent.extend(["--max-edge-visits", str(config.max_edge_visits)])
+    if config.relation_catalog is not None:
+        opponent.extend(["--relation-catalog", str(config.relation_catalog)])
     train = ["bash", str(config.train_script)]
     return {"sglang": sglang, "opponent": opponent, "train": train}
 
@@ -248,6 +314,11 @@ def run_self_play(
             "commands": commands,
             "actor_gpus": config.actor_gpus,
             "opponent_gpus": config.opponent_gpus,
+            "interaction_mode": config.interaction_mode,
+            "relation_catalog": str(config.relation_catalog)
+            if config.relation_catalog is not None
+            else None,
+            "program_profile": config.program_profile,
         }
         plans.append(plan)
         if dry_run:

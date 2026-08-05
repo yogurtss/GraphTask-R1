@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import pyarrow as pa
@@ -8,11 +9,17 @@ import pyarrow.parquet as pq
 
 from graphtask_r1.generation import compile_trace
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
-from graphtask_r1.schema import TaskCertificate, TaskProposal
-from graphtask_r1.training.prompts import role_prompt
+from graphtask_r1.graphscript import program_to_graphscript
+from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal
+from graphtask_r1.training.prompts import InteractionMode, role_prompt
 
 
-def _questioner_messages(task: TaskCertificate) -> list[dict[str, object]]:
+def _questioner_messages(
+    task: TaskCertificate,
+    *,
+    interaction_mode: InteractionMode,
+    relation_catalog: tuple[RelationInfo, ...],
+) -> list[dict[str, object]]:
     topic_ids = tuple(entity.entity_id for entity in task.topic_entities)
     proposal = TaskProposal(topic_entities=topic_ids, program=task.program)
     messages: list[dict[str, object]] = [
@@ -21,8 +28,18 @@ def _questioner_messages(task: TaskCertificate) -> list[dict[str, object]]:
             "questioner",
             "Explore from these seed entities and construct one certified task: "
             + ", ".join(topic_ids),
+            interaction_mode=interaction_mode,
+            relation_catalog=relation_catalog,
         )
     ]
+    if interaction_mode == "graphscript":
+        if len(topic_ids) != 1:
+            raise ValueError("GraphScript v0.1 SFT requires exactly one topic entity")
+        script = program_to_graphscript(task.program)
+        messages.append(
+            {"role": "assistant", "content": script.model_dump_json(by_alias=True)}
+        )
+        return messages
     messages.append(
         {
             "role": "assistant",
@@ -40,7 +57,12 @@ def _observation_content(observation: object) -> str:
 
 
 def _solver_messages(
-    task: TaskCertificate, backend: GraphBackend, *, seed: int
+    task: TaskCertificate,
+    backend: GraphBackend,
+    *,
+    seed: int,
+    interaction_mode: InteractionMode,
+    relation_catalog: tuple[RelationInfo, ...],
 ) -> list[dict[str, object]]:
     topic_ids = tuple(entity.entity_id for entity in task.topic_entities)
     messages: list[dict[str, object]] = [
@@ -48,8 +70,18 @@ def _solver_messages(
         for value in role_prompt(
             "solver",
             f"Question: {task.question}\nTopic entities: {', '.join(topic_ids)}",
+            interaction_mode=interaction_mode,
+            relation_catalog=relation_catalog,
         )
     ]
+    if interaction_mode == "graphscript":
+        if len(topic_ids) != 1:
+            raise ValueError("GraphScript v0.1 SFT requires exactly one topic entity")
+        script = program_to_graphscript(task.program)
+        messages.append(
+            {"role": "assistant", "content": script.model_dump_json(by_alias=True)}
+        )
+        return messages
     trace = compile_trace(task.task_id, task.question, task.program, backend, seed=seed)
     for index, call in enumerate(trace.calls):
         if call.name == "final_answer":
@@ -95,16 +127,29 @@ def export_sft_dataset(
     include_questioner: bool = True,
     include_solver: bool = True,
     seed: int = 42,
+    interaction_mode: InteractionMode = "tool",
+    relation_catalog: tuple[RelationInfo, ...] = (),
+    relation_catalogs: Mapping[str, tuple[RelationInfo, ...]] | None = None,
 ) -> int:
     rows: list[dict[str, object]] = []
     backends: dict[str, GraphBackend] = {}
     for index, task in enumerate(tasks):
+        task_catalog = (relation_catalogs or {}).get(task.graph_snapshot, relation_catalog)
+        if interaction_mode == "graphscript" and not task_catalog:
+            raise ValueError(
+                f"graphscript SFT export requires a relation catalog for {task.graph_snapshot}"
+            )
         if include_questioner and task.topic_entities:
             rows.append(
                 {
-                    "messages": _questioner_messages(task),
+                    "messages": _questioner_messages(
+                        task,
+                        interaction_mode=interaction_mode,
+                        relation_catalog=task_catalog,
+                    ),
                     "role": "questioner",
                     "task_id": task.task_id,
+                    "interaction_mode": interaction_mode,
                 }
             )
         if include_solver:
@@ -113,9 +158,16 @@ def export_sft_dataset(
             backend = backends[task.graph_snapshot]
             rows.append(
                 {
-                    "messages": _solver_messages(task, backend, seed=seed + index),
+                    "messages": _solver_messages(
+                        task,
+                        backend,
+                        seed=seed + index,
+                        interaction_mode=interaction_mode,
+                        relation_catalog=task_catalog,
+                    ),
                     "role": "solver",
                     "task_id": task.task_id,
+                    "interaction_mode": interaction_mode,
                 }
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)

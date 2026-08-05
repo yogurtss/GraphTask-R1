@@ -8,7 +8,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from graphtask_r1.graph import backend_from_snapshot
-from graphtask_r1.training.prompts import role_prompt
+from graphtask_r1.schema import RelationInfo
+from graphtask_r1.training.prompts import InteractionMode, role_prompt
 from graphtask_r1.utils import write_json
 
 
@@ -30,7 +31,14 @@ def sample_questioner_seeds(
     max_degree: int = 100,
     opponent_url: str | None = None,
     opponent_samples: int = 8,
+    interaction_mode: InteractionMode = "tool",
+    relation_catalog: tuple[RelationInfo, ...] = (),
+    max_follow_limit: int = 100,
+    max_edge_visits: int = 200,
+    max_returned_entities: int = 1_000,
 ) -> dict[str, int | str]:
+    if interaction_mode == "graphscript" and not relation_catalog:
+        raise ValueError("graphscript seed export requires a non-empty relation catalog")
     backend = backend_from_snapshot(snapshot)
     excluded = set(json.loads(exclude_path.read_text())) if exclude_path else set()
     candidates = [
@@ -58,6 +66,11 @@ def sample_questioner_seeds(
             "role_weight": 0.35,
             "opponent_url": opponent_url,
             "opponent_samples": opponent_samples,
+            "interaction_mode": interaction_mode,
+            "allowed_relations": [value.relation_id for value in relation_catalog],
+            "max_follow_limit": max_follow_limit,
+            "max_edge_visits": max_edge_visits,
+            "max_returned_entities": max_returned_entities,
         }
         rows.append(
             {
@@ -65,16 +78,24 @@ def sample_questioner_seeds(
                 "prompt": role_prompt(
                     "questioner",
                     f"Explore from this seed entity and construct one certified task: {entity_id}",
+                    interaction_mode=interaction_mode,
+                    relation_catalog=relation_catalog,
                 ),
                 "ability": "graph_task_generation",
                 "reward_model": {"style": "rule", "ground_truth": "{}"},
                 "extra_info": common,
                 "uid": f"questioner:{common['task_id']}",
-                "agent_name": "tool_agent",
-                "tools_kwargs": {
-                    name: {"create_kwargs": common}
-                    for name in ("graph_search", "inspect_entity", "execute_program")
-                },
+                **(
+                    {
+                        "agent_name": "tool_agent",
+                        "tools_kwargs": {
+                            name: {"create_kwargs": common}
+                            for name in ("graph_search", "inspect_entity", "execute_program")
+                        },
+                    }
+                    if interaction_mode == "tool"
+                    else {}
+                ),
             }
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +107,7 @@ def sample_questioner_seeds(
         "requested": count,
         "selected": len(selected),
         "seed": seed,
+        "interaction_mode": interaction_mode,
     }
     write_json(output_path.with_suffix(".metrics.json"), metrics)
     return metrics
