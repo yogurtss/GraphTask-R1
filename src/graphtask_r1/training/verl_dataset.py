@@ -6,8 +6,10 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from graphtask_r1.schema import RelationInfo, TaskCertificate
+from graphtask_r1.generation import validate_proposal
+from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal
 from graphtask_r1.training.prompts import InteractionMode, role_prompt
+from graphtask_r1.training.relations import require_catalog_covers_program
 
 
 def export_role_dataset(
@@ -36,6 +38,24 @@ def export_role_dataset(
         if interaction_mode == "graphscript" and not task_catalog:
             raise ValueError(
                 f"graphscript verl export requires a relation catalog for {graph_snapshot}"
+            )
+        if program_profile == "graphscript_v0_1":
+            if not task_catalog:
+                raise ValueError(
+                    f"comparison verl export requires a relation catalog for {graph_snapshot}"
+                )
+            validate_proposal(
+                TaskProposal(
+                    topic_entities=tuple(
+                        entity.entity_id for entity in task.topic_entities
+                    ),
+                    program=task.program,
+                )
+            )
+            require_catalog_covers_program(
+                task.program,
+                task_catalog,
+                context=f"task {task.task_id}",
             )
         topic_ids = [entity.entity_id for entity in task.topic_entities]
         common = {

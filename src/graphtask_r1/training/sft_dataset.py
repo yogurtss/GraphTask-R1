@@ -7,11 +7,12 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from graphtask_r1.generation import compile_trace
+from graphtask_r1.generation import compile_trace, validate_proposal
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import program_to_graphscript
 from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal
 from graphtask_r1.training.prompts import InteractionMode, role_prompt
+from graphtask_r1.training.relations import require_catalog_covers_program
 
 
 def _questioner_messages(
@@ -138,6 +139,20 @@ def export_sft_dataset(
         if interaction_mode == "graphscript" and not task_catalog:
             raise ValueError(
                 f"graphscript SFT export requires a relation catalog for {task.graph_snapshot}"
+            )
+        if interaction_mode == "graphscript":
+            validate_proposal(
+                TaskProposal(
+                    topic_entities=tuple(
+                        entity.entity_id for entity in task.topic_entities
+                    ),
+                    program=task.program,
+                )
+            )
+            require_catalog_covers_program(
+                task.program,
+                task_catalog,
+                context=f"task {task.task_id}",
             )
         if include_questioner and task.topic_entities:
             rows.append(

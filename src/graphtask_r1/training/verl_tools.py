@@ -35,6 +35,9 @@ class _SessionTool(BaseTool):  # type: ignore[misc]
         if role not in self.allowed_roles:
             raise ValueError(f"tool {self.name} is not available to role {role!r}")
         snapshot = str(kwargs.get("graph_snapshot", "toy-v1"))
+        topic_entity_ids = frozenset(
+            str(value) for value in kwargs.get("topic_entity_ids", [])
+        )
         self._sessions[instance_id] = {
             "role": role,
             "backend": backend_from_snapshot(snapshot),
@@ -48,6 +51,8 @@ class _SessionTool(BaseTool):  # type: ignore[misc]
             "max_edge_visits": int(kwargs.get("max_edge_visits", 200)),
             "max_returned_entities": int(kwargs.get("max_returned_entities", 1_000)),
             "program_profile": str(kwargs.get("program_profile", "full")),
+            "topic_entity_ids": topic_entity_ids,
+            "visible_entities": set(topic_entity_ids),
         }
         return instance_id, response
 
@@ -71,14 +76,20 @@ class GraphSearchTool(_SessionTool):
     ) -> tuple[Any, float, dict[str, float]]:
         del kwargs
         session = self._session(instance_id)
+        entity_ids = [str(value) for value in parameters["entity_ids"]]
         requested_relations = [str(value) for value in parameters.get("relation_ids", [])]
         allowed_relations = session["allowed_relations"]
-        if session["program_profile"] == "graphscript_v0_1" and allowed_relations:
+        restricted = session["program_profile"] == "graphscript_v0_1"
+        if restricted and (
+            not entity_ids or not set(entity_ids).issubset(session["visible_entities"])
+        ):
+            raise ValueError("graph search must expand the seed or an observed entity")
+        if restricted and allowed_relations:
             if requested_relations and not set(requested_relations).issubset(allowed_relations):
                 raise ValueError("requested relation is outside the comparison catalog")
             requested_relations = requested_relations or sorted(allowed_relations)
         limit = min(int(parameters.get("limit", 50)), int(self.config.get("max_results", 100)))
-        if session["program_profile"] == "graphscript_v0_1":
+        if restricted:
             role = str(session["role"])
             max_calls = 7 if role == "questioner" else 8
             if int(session["calls"]) > max_calls:
@@ -91,14 +102,19 @@ class GraphSearchTool(_SessionTool):
                 raise ValueError("graph-search edge budget exhausted")
             limit = min(limit, remaining + 1)
         triples = session["backend"].neighbors(
-            [str(value) for value in parameters["entity_ids"]],
+            entity_ids,
             direction=str(parameters.get("direction", "both")),
             relation_ids=requested_relations or None,
             limit=limit,
             trace_id=f"{session['task_id']}:{session['calls']}",
         )
-        if session["program_profile"] == "graphscript_v0_1":
+        if restricted:
             session["edge_visits"] += len(triples)
+            session["visible_entities"].update(
+                value
+                for triple in triples
+                for value in (triple.subject, triple.object)
+            )
             role = str(session["role"])
             search_budget = int(session["max_edge_visits"])
             if role == "questioner":
@@ -137,13 +153,15 @@ class ExecuteProgramTool(_SessionTool):
         if session["program_profile"] == "graphscript_v0_1":
             if int(session["calls"]) > 1:
                 raise ValueError("comparison profile permits one candidate program execution")
+            if _program_seed(program) != session["topic_entity_ids"]:
+                raise ValueError("comparison program must be rooted at the episode topic entity")
             script = program_to_graphscript(
                 program, follow_limit=int(session["max_follow_limit"])
             )
             execution = execute_graphscript(
                 script,
                 session["backend"],
-                seed_entity=next(iter(_program_seed(program))),
+                seed_entity=next(iter(session["topic_entity_ids"])),
                 allowed_relations=session["allowed_relations"],
                 max_edge_visits=max(1, int(session["max_edge_visits"]) // 2),
                 max_returned_entities=int(session["max_returned_entities"]),

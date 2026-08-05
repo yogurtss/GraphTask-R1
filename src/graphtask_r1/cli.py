@@ -120,6 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
     select_interaction.add_argument("--input", type=Path, required=True)
     select_interaction.add_argument("--output", type=Path, required=True)
     select_interaction.add_argument("--limit", type=int)
+    select_interaction.add_argument("--snapshot")
+    select_interaction.add_argument("--max-follow-limit", type=int, default=100)
+    select_interaction.add_argument("--max-edge-visits", type=int, default=200)
+    select_interaction.add_argument("--max-returned-entities", type=int, default=1_000)
 
     catalog = data_actions.add_parser("build-relation-catalog")
     catalog.add_argument("--input", type=Path, required=True)
@@ -280,12 +284,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             relation_catalog=load_relation_catalog(args.relation_catalog),
         )
     elif args.group == "data" and args.action == "select-interaction-tasks":
-        result = select_graphscript_tasks(_load_tasks(args.input, args.limit), args.output)
+        tasks = _load_tasks(args.input, args.limit)
+        if not tasks:
+            raise ValueError("cannot select interaction tasks from an empty task set")
+        snapshot = args.snapshot or tasks[0].graph_snapshot
+        mismatched = sorted(
+            {task.graph_snapshot for task in tasks if task.graph_snapshot != snapshot}
+        )
+        if mismatched:
+            raise ValueError(
+                "interaction task input contains snapshots other than "
+                f"{snapshot}: {', '.join(mismatched)}"
+            )
+        result = select_graphscript_tasks(
+            tasks,
+            args.output,
+            backend=backend_from_snapshot(snapshot),
+            max_follow_limit=args.max_follow_limit,
+            max_edge_visits=args.max_edge_visits,
+            max_returned_entities=args.max_returned_entities,
+        )
     elif args.group == "data" and args.action == "build-relation-catalog":
         tasks = _load_tasks(args.input, args.limit)
         if not tasks:
             raise ValueError("cannot build a relation catalog from an empty task set")
         snapshot = args.snapshot or tasks[0].graph_snapshot
+        mismatched = sorted(
+            {task.graph_snapshot for task in tasks if task.graph_snapshot != snapshot}
+        )
+        if mismatched:
+            raise ValueError(
+                "relation catalog input contains snapshots other than "
+                f"{snapshot}: {', '.join(mismatched)}"
+            )
         relations = build_relation_catalog(tasks, backend_from_snapshot(snapshot), args.output)
         result = {"relations": len(relations), "output": str(args.output), "snapshot": snapshot}
     elif args.group == "data" and args.action == "export-archive":

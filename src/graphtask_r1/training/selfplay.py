@@ -55,8 +55,8 @@ class SelfPlayConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_interaction_contract(self) -> SelfPlayConfig:
-        if self.interaction_mode == "graphscript" and self.relation_catalog is None:
-            raise ValueError("graphscript mode requires relation_catalog")
+        if self.program_profile == "graphscript_v0_1" and self.relation_catalog is None:
+            raise ValueError("comparison profile requires relation_catalog")
         if self.interaction_mode == "graphscript" and self.program_profile != "graphscript_v0_1":
             raise ValueError("graphscript mode requires program_profile=graphscript_v0_1")
         return self

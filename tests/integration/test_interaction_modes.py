@@ -1,13 +1,24 @@
+import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pyarrow.parquet as pq
+import pytest
 
 from graphtask_r1.data import select_graphscript_tasks
 from graphtask_r1.data.seeds import sample_questioner_seeds
 from graphtask_r1.generation import certify_proposal
-from graphtask_r1.graph import toy_graph
-from graphtask_r1.schema import Entity, Hop, RelationInfo, TaskCertificate, TaskProposal
+from graphtask_r1.graph import InMemoryGraphBackend, toy_graph
+from graphtask_r1.schema import (
+    Entity,
+    Hop,
+    RelationInfo,
+    TaskCertificate,
+    TaskProposal,
+    Triple,
+)
+from graphtask_r1.training.opponent import FrozenSolverService
 from graphtask_r1.training.relations import build_relation_catalog, load_relation_catalog
 from graphtask_r1.training.selfplay import SelfPlayConfig, _assemble_dataset, run_self_play
 from graphtask_r1.training.sft_dataset import export_sft_dataset
@@ -101,7 +112,9 @@ def test_interaction_task_selection_and_catalog_are_deterministic(tmp_path: Path
         graph_snapshot="toy-v1",
     )
     output = tmp_path / "interaction.parquet"
-    metrics = select_graphscript_tasks([selected_task, one_hop], output)
+    metrics = select_graphscript_tasks(
+        [selected_task, one_hop], output, backend=toy_graph()
+    )
     assert metrics == {"input": 2, "selected": 1, "rejected": 1}
     rows = pq.read_table(output)["record_json"].to_pylist()
     restored = [TaskCertificate.model_validate(json.loads(value)) for value in rows]
@@ -122,6 +135,145 @@ def test_selfplay_defaults_preserve_legacy_tool_profile() -> None:
     )
     assert config.interaction_mode == "tool"
     assert config.program_profile == "full"
+
+
+def test_comparison_profile_requires_relation_catalog() -> None:
+    with pytest.raises(ValueError, match="comparison profile requires relation_catalog"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "interaction_mode": "tool",
+                "program_profile": "graphscript_v0_1",
+            }
+        )
+
+
+def test_selection_rejects_task_that_only_full_execution_can_answer(tmp_path: Path) -> None:
+    backend = InMemoryGraphBackend(
+        [
+            Triple(subject="seed", relation="r1", object="a"),
+            Triple(subject="seed", relation="r1", object="b"),
+            Triple(subject="b", relation="r2", object="gold"),
+        ]
+    )
+    program = Hop(
+        input=Hop(input=Entity(entity_id="seed"), relation="r1"),
+        relation="r2",
+    )
+    task = certify_proposal(
+        TaskProposal(topic_entities=("seed",), program=program),
+        backend,
+        graph_snapshot="bounded-test-v1",
+    )
+    output = tmp_path / "bounded.parquet"
+    metrics = select_graphscript_tasks(
+        [task],
+        output,
+        backend=backend,
+        max_follow_limit=1,
+        max_edge_visits=2,
+    )
+    assert metrics == {"input": 1, "selected": 0, "rejected": 1}
+    rejection = json.loads(
+        pq.read_table(output.with_name("bounded_rejections.parquet"))["record_json"][0].as_py()
+    )
+    assert rejection["reason_code"] == "EMPTY_RESULT"
+
+
+def test_graphscript_export_rejects_incomplete_catalog(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="missing program relations: located_in"):
+        export_sft_dataset(
+            [_task()],
+            tmp_path / "bad.parquet",
+            interaction_mode="graphscript",
+            relation_catalog=(RelationInfo(relation_id="works_at", label="works at"),),
+        )
+
+
+class _ScriptedOpponent(FrozenSolverService):
+    def __init__(self, tmp_path: Path, responses: list[dict[str, Any]]) -> None:
+        super().__init__(
+            model_url="http://unused",
+            model="scripted",
+            archive_path=tmp_path / "opponent.sqlite",
+            relation_catalog=_catalog(),
+            max_edge_visits=10,
+        )
+        self.responses = iter(responses)
+
+    async def _completion(
+        self, messages: list[dict[str, Any]], *, use_tools: bool
+    ) -> dict[str, Any]:
+        del messages, use_tools
+        return next(self.responses)
+
+
+def _tool_call(name: str, arguments: dict[str, Any], index: int) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": f"call-{index}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        ],
+    }
+
+
+def test_tool_opponent_is_confined_to_observed_frontier(tmp_path: Path) -> None:
+    invalid = _ScriptedOpponent(
+        tmp_path,
+        [_tool_call("graph_search", {"entity_ids": ["cara"]}, 0)],
+    )
+    rejected = asyncio.run(
+        invalid.rollout(
+            _task(),
+            toy_graph(),
+            allowed_relations=("works_at", "located_in"),
+            max_edge_visits=10,
+        )
+    )
+    assert rejected["passed"] == 0.0
+    assert rejected["edge_visits"] == 0.0
+
+    valid = _ScriptedOpponent(
+        tmp_path,
+        [
+            _tool_call(
+                "graph_search",
+                {
+                    "entity_ids": ["alice"],
+                    "direction": "out",
+                    "relation_ids": ["works_at"],
+                },
+                0,
+            ),
+            _tool_call(
+                "graph_search",
+                {
+                    "entity_ids": ["acme"],
+                    "direction": "out",
+                    "relation_ids": ["located_in"],
+                },
+                1,
+            ),
+            {"role": "assistant", "content": '<answer>["paris"]</answer>'},
+        ],
+    )
+    accepted = asyncio.run(
+        valid.rollout(
+            _task(),
+            toy_graph(),
+            allowed_relations=("works_at", "located_in"),
+            max_edge_visits=10,
+        )
+    )
+    assert accepted["passed"] == 1.0
+    assert accepted["edge_visits"] == 2.0
 
 
 def test_graphscript_selfplay_assembles_mixed_single_turn_dataset(tmp_path: Path) -> None:

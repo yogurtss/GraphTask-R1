@@ -139,3 +139,29 @@ def test_graphscript_solver_reward_executes_program() -> None:
 def test_program_converter_rejects_non_chain_program() -> None:
     with pytest.raises(GraphScriptError, match="INVALID_SHAPE"):
         program_to_graphscript(Hop(input=Entity(entity_id="alice"), relation="friend"))
+
+
+def test_tool_comparison_questioner_cannot_change_episode_seed() -> None:
+    solution = (
+        '<task>{"topic_entities":["bob"],"program":'
+        '{"op":"hop","input":{"op":"hop","input":{"op":"entity",'
+        '"entity_id":"bob"},"relation":"works_at","direction":"out"},'
+        '"relation":"located_in","direction":"out"}}</task>'
+    )
+    score = asyncio.run(
+        compute_score(
+            "graphtask/questioner",
+            solution,
+            "{}",
+            {
+                "interaction_mode": "tool",
+                "program_profile": "graphscript_v0_1",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+                "allowed_relations": ["works_at", "located_in"],
+                "max_edge_visits": 10,
+            },
+        )
+    )
+    assert score["score"] == -1.0
+    assert score["reject_seed_mismatch"] == 1.0

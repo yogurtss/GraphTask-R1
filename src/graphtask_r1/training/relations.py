@@ -30,6 +30,20 @@ def program_relations(program: Program) -> frozenset[str]:
     return frozenset()
 
 
+def require_catalog_covers_program(
+    program: Program,
+    relations: tuple[RelationInfo, ...],
+    *,
+    context: str,
+) -> None:
+    catalog_ids = {relation.relation_id for relation in relations}
+    missing = sorted(program_relations(program) - catalog_ids)
+    if missing:
+        raise ValueError(
+            f"{context} relation catalog is missing program relations: {', '.join(missing)}"
+        )
+
+
 def build_relation_catalog(
     tasks: list[TaskCertificate], backend: GraphBackend, output_path: Path
 ) -> tuple[RelationInfo, ...]:

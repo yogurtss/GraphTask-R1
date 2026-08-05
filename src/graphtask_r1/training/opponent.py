@@ -172,8 +172,15 @@ class FrozenSolverService:
         *,
         allowed_relations: frozenset[str],
         remaining_edge_visits: int | None,
+        visible_entities: set[str],
+        restrict_frontier: bool,
     ) -> tuple[str, int]:
         if name == "graph_search":
+            entity_ids = [str(value) for value in arguments["entity_ids"]]
+            if restrict_frontier and (
+                not entity_ids or not set(entity_ids).issubset(visible_entities)
+            ):
+                raise ValueError("opponent must expand the seed or an observed entity")
             relation_ids = [str(value) for value in arguments.get("relation_ids", [])]
             if allowed_relations:
                 if relation_ids and not set(relation_ids).issubset(allowed_relations):
@@ -183,14 +190,23 @@ class FrozenSolverService:
             if remaining_edge_visits is not None:
                 limit = min(limit, remaining_edge_visits + 1)
             triples = backend.neighbors(
-                [str(value) for value in arguments["entity_ids"]],
+                entity_ids,
                 direction=str(arguments.get("direction", "both")),
                 relation_ids=relation_ids or None,
                 limit=limit,
             )
+            if restrict_frontier:
+                visible_entities.update(
+                    value
+                    for triple in triples
+                    for value in (triple.subject, triple.object)
+                )
             return json.dumps([value.model_dump(mode="json") for value in triples]), len(triples)
         if name == "inspect_entity":
-            return backend.entity_info(str(arguments["entity_id"])).model_dump_json(), 0
+            entity_id = str(arguments["entity_id"])
+            if restrict_frontier and entity_id not in visible_entities:
+                raise ValueError("opponent may inspect only the seed or an observed entity")
+            return backend.entity_info(entity_id).model_dump_json(), 0
         raise ValueError(f"opponent requested unsupported tool: {name}")
 
     async def rollout(
@@ -205,10 +221,18 @@ class FrozenSolverService:
     ) -> dict[str, float]:
         mode = interaction_mode or self.interaction_mode
         catalog = self.relation_catalog
+        configured_relations = {value.relation_id for value in self.relation_catalog}
         if allowed_relations:
+            unknown = sorted(set(allowed_relations) - configured_relations)
+            if configured_relations and unknown:
+                raise ValueError(
+                    "requested relations are outside the opponent catalog: "
+                    + ", ".join(unknown)
+                )
             labels = {value.relation_id: value for value in catalog}
             catalog = tuple(
-                labels.get(value, backend.relation_info(value)) for value in allowed_relations
+                labels[value] if value in labels else backend.relation_info(value)
+                for value in allowed_relations
             )
         topic_ids = [entity.entity_id for entity in task.topic_entities]
         messages: list[dict[str, Any]] = list(
@@ -221,6 +245,7 @@ class FrozenSolverService:
         )
         tool_calls = 0
         edge_visits = 0
+        visible_entities = set(topic_ids)
         started = time.perf_counter()
         if mode == "graphscript":
             if len(topic_ids) != 1:
@@ -266,20 +291,33 @@ class FrozenSolverService:
             calls = message.get("tool_calls") or []
             if calls:
                 for call in calls:
-                    name = str(call["function"]["name"])
-                    edge_budget = max_edge_visits or self.max_edge_visits
-                    result, visited = self._execute_tool(
-                        backend,
-                        name,
-                        self._arguments(call),
-                        allowed_relations=frozenset(
+                    try:
+                        name = str(call["function"]["name"])
+                        edge_budget = max_edge_visits or self.max_edge_visits
+                        effective_relations = frozenset(
                             allowed_relations
                             or (value.relation_id for value in self.relation_catalog)
-                        ),
-                        remaining_edge_visits=edge_budget - edge_visits
-                        if edge_budget is not None
-                        else None,
-                    )
+                        )
+                        result, visited = self._execute_tool(
+                            backend,
+                            name,
+                            self._arguments(call),
+                            allowed_relations=effective_relations,
+                            remaining_edge_visits=edge_budget - edge_visits
+                            if edge_budget is not None
+                            else None,
+                            visible_entities=visible_entities,
+                            restrict_frontier=edge_budget is not None
+                            and bool(effective_relations),
+                        )
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        return {
+                            "passed": 0.0,
+                            "f1": 0.0,
+                            "tool_calls": float(tool_calls),
+                            "edge_visits": float(edge_visits),
+                            "latency_ms": (time.perf_counter() - started) * 1000,
+                        }
                     edge_visits += visited
                     if edge_budget is not None and edge_visits > edge_budget:
                         return {

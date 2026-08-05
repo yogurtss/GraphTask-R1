@@ -72,19 +72,26 @@ async def compute_score(
             else:
                 proposal = parse_task_proposal(solution_str)
                 if info.get("program_profile") == "graphscript_v0_1":
+                    episode_topics = tuple(
+                        sorted(str(value) for value in info.get("topic_entity_ids", []))
+                    )
+                    if tuple(sorted(proposal.topic_entities)) != episode_topics:
+                        raise GraphScriptError(
+                            "SEED_MISMATCH",
+                            "comparison proposal must be rooted at the episode topic entity",
+                        )
                     script = program_to_graphscript(
                         proposal.program,
                         follow_limit=int(info.get("max_follow_limit", 100)),
                     )
-                    topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
-                    if len(topic_ids) != 1:
+                    if len(episode_topics) != 1:
                         raise GraphScriptError(
                             "INVALID_SEED", "comparison profile requires exactly one topic entity"
                         )
                     execution = execute_graphscript(
                         script,
                         backend,
-                        seed_entity=topic_ids[0],
+                        seed_entity=episode_topics[0],
                         allowed_relations=frozenset(
                             str(value) for value in info.get("allowed_relations", [])
                         ),
@@ -92,6 +99,11 @@ async def compute_score(
                         max_returned_entities=int(info.get("max_returned_entities", 1_000)),
                         trace_id=str(info.get("task_id", "questioner")),
                     )
+                    if backend.execute_program(execution.program) != execution.answers:
+                        raise GraphScriptError(
+                            "BOUNDED_UNBOUNDED_MISMATCH",
+                            "bounded comparison result differs from certified Program execution",
+                        )
                     graph_usage = {
                         "edge_visits": float(execution.usage.edge_visits),
                         "graph_calls": float(execution.usage.graph_calls),

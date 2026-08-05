@@ -43,6 +43,9 @@ graphtask-r1 data build-relation-catalog \
 ```
 
 命令会保留结构化 rejection records 和 metrics。不要用 val/test 任务扩充训练 relation catalog。
+筛选会在任务对应的 graph backend 上同时执行认证 Program 与有界 GraphScript；只有 seed、gold 和
+有界结果一致，且满足默认 `max_follow_limit=100`、`max_edge_visits=200` 的任务才会进入共同子集。
+输入必须属于同一 graph snapshot；如实验预算不同，使用同名命令行参数显式覆盖默认值。
 
 ## 2. 导出两组 SFT 数据
 
