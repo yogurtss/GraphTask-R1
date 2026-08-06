@@ -6,6 +6,8 @@ set -euo pipefail
 : "${VAL_DATA:=$TRAIN_DATA}"
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 NUM_GPUS="${NUM_GPUS:-4}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-graphtask-r1-shared-lora}"
 : "${OUTPUT_DIR:=outputs/verl/$EXPERIMENT_NAME}"
@@ -48,7 +50,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.multi_turn.format=hermes \
   actor_rollout_ref.rollout.multi_turn.max_assistant_turns="${MAX_TURNS:-8}" \
   actor_rollout_ref.rollout.multi_turn.tool_config_path="$PROJECT_ROOT/configs/training/verl_tools.yaml" \
-  custom_reward_function.path="$PROJECT_ROOT/src/graphtask_r1/training/verl_reward.py" \
+  custom_reward_function.path="$PROJECT_ROOT/graphtask_r1/training/verl_reward.py" \
   custom_reward_function.name=compute_score \
   trainer.use_legacy_worker_impl=disable \
   trainer.default_local_dir="$OUTPUT_DIR" \

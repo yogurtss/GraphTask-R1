@@ -1069,7 +1069,7 @@ graphtask_r1/
 │       ├── static_synthetic.yaml
 │       ├── adaptive_no_rl.yaml
 │       └── full.yaml
-├── src/graphtask_r1/
+├── graphtask_r1/
 │   ├── cli.py
 │   ├── schema/
 │   │   ├── entity.py

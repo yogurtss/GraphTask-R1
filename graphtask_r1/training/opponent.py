@@ -72,7 +72,9 @@ async def request_opponent(
     try:
         import aiohttp
     except ImportError as exc:  # pragma: no cover - training extra
-        raise ImportError("install graphtask-r1[training] for async opponent rewards") from exc
+        raise ImportError(
+            "install aiohttp from requirements.txt for async opponent rewards"
+        ) from exc
     payload = {
         "proposal": proposal.model_dump(mode="json"),
         "graph_snapshot": graph_snapshot,

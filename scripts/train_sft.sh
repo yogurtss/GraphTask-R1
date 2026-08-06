@@ -6,6 +6,9 @@ set -euo pipefail
 : "${VAL_DATA:=$TRAIN_DATA}"
 : "${OUTPUT_DIR:=outputs/sft-qwen3-4b}"
 
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 NUM_GPUS="${NUM_GPUS:-4}"
 
 torchrun --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \

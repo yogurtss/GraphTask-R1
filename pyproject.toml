@@ -1,35 +1,5 @@
-[build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
-
-[project]
-name = "graphtask-r1"
-version = "0.1.0"
-description = "Verifiable task evolution for knowledge-graph reasoning agents"
-readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
-authors = [{ name = "GraphTask-R1 contributors" }]
-dependencies = [
-  "pydantic>=2.7,<3",
-  "pyyaml>=6,<7",
-  "pyarrow>=15,<22",
-]
-
-[project.optional-dependencies]
-dev = [
-  "hypothesis>=6.100,<7",
-  "mypy>=1.10,<2",
-  "pytest>=8,<9",
-  "ruff>=0.5,<1",
-]
-training = ["aiohttp>=3.10,<4", "torch>=2.2"]
-
-[project.scripts]
-graphtask-r1 = "graphtask_r1.cli:main"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/graphtask_r1"]
+# Runtime and development dependencies live in requirements*.txt.  This file
+# contains tool configuration only; GraphTask-R1 is run directly from a clone.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -46,7 +16,6 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.11"
 strict = true
 packages = ["graphtask_r1"]
-mypy_path = "src"
 warn_unused_ignores = false
 
 [[tool.mypy.overrides]]

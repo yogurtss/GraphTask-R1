@@ -214,7 +214,7 @@ Do not introduce global singletons for graph backends, RNGs, configs, models, or
 ## Initial Repository Tree
 
 ```text
-src/graphtask_r1/
+graphtask_r1/
   schema/
   graph/
   dsl/

@@ -21,7 +21,7 @@ async def evaluate_benchmark(
     try:
         import aiohttp
     except ImportError as exc:  # pragma: no cover - training extra
-        raise ImportError("install graphtask-r1[training] for benchmark evaluation") from exc
+        raise ImportError("install aiohttp from requirements.txt for benchmark evaluation") from exc
     examples = [BenchmarkExample.model_validate(value) for value in read_records(input_path)]
     semaphore = asyncio.Semaphore(concurrency)
 

@@ -34,7 +34,7 @@ snapshot 目录，不要覆盖已用于实验的 snapshot。
 
 ```bash
 python -m pip install huggingface_hub
-graphtask-r1 data fetch --dataset kqapro --raw-dir data/raw
+python -m graphtask_r1.cli data fetch --dataset kqapro --raw-dir data/raw
 
 find data/raw/kqa_pro -maxdepth 2 -type f
 ```
@@ -56,7 +56,7 @@ data/raw/kqa_pro/test.json
 先用小样本检查环境：
 
 ```bash
-graphtask-r1 data prepare --dataset kqapro \
+python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
   --output-dir data/processed/kqapro/kqapro-v1 \
   --splits train,val --limit 100 --seed 42
@@ -65,7 +65,7 @@ graphtask-r1 data prepare --dataset kqapro \
 确认无系统性错误后，删除这个临时输出目录并运行全量转换：
 
 ```bash
-graphtask-r1 data prepare --dataset kqapro \
+python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
   --output-dir data/processed/kqapro/kqapro-v1 \
   --splits train,val --seed 42
@@ -86,14 +86,14 @@ Qualifier、属性查询、Verify、极值选择等不属于首版研究核心�
 ### 2.3 产物审计
 
 ```bash
-graphtask-r1 data audit \
+python -m graphtask_r1.cli data audit \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task
 
-graphtask-r1 data export-sft \
+python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
   --output data/verl/kqapro_sft_train.parquet --roles both
 
-graphtask-r1 data export-sft \
+python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
   --output data/verl/kqapro_sft_val.parquet --roles both
 ```
@@ -107,7 +107,7 @@ graphtask-r1 data export-sft \
 数据和 Virtuoso 索引通常需要数百 GB；开始前根据官方 dump 的实际大小预留充足磁盘。
 
 ```bash
-graphtask-r1 data fetch --dataset freebase --raw-dir data/raw
+python -m graphtask_r1.cli data fetch --dataset freebase --raw-dir data/raw
 cd data/raw/freebase_setup
 ```
 
@@ -120,7 +120,7 @@ export GRAPHTASK_GRAPH_TIMEOUT=20
 export GRAPHTASK_GRAPH_RETRIES=2
 export GRAPHTASK_GRAPH_CACHE=$PWD/data/cache/freebase.sqlite
 
-graphtask-r1 graph preflight --snapshot freebase-v1 --limit 5
+python -m graphtask_r1.cli graph preflight --snapshot freebase-v1 --limit 5
 ```
 
 快照在数据中只记录 `freebase-v1`；endpoint 和凭证只通过环境变量传入。
@@ -134,13 +134,13 @@ graphtask-r1 graph preflight --snapshot freebase-v1 --limit 5
 下载脚本对需要点击许可或人工下载的数据只打印官方地址。把 JSON/JSONL 放到对应目录后运行：
 
 ```bash
-graphtask-r1 data prepare --dataset webqsp \
+python -m graphtask_r1.cli data prepare --dataset webqsp \
   --raw-dir data/raw/webqsp --output-dir data/processed/webqsp
 
-graphtask-r1 data prepare --dataset cwq \
+python -m graphtask_r1.cli data prepare --dataset cwq \
   --raw-dir data/raw/complexwebquestions --output-dir data/processed/cwq
 
-graphtask-r1 data prepare --dataset grailqa \
+python -m graphtask_r1.cli data prepare --dataset grailqa \
   --raw-dir data/raw/grailqa --output-dir data/processed/grailqa
 ```
 
@@ -150,14 +150,14 @@ graphtask-r1 data prepare --dataset grailqa \
 ### 4.1 防止 self-play 使用 held-out seeds
 
 ```bash
-graphtask-r1 data merge-denylists \
+python -m graphtask_r1.cli data merge-denylists \
   --inputs \
     data/processed/webqsp/heldout_topic_entities.json \
     data/processed/cwq/heldout_topic_entities.json \
     data/processed/grailqa/heldout_topic_entities.json \
   --output data/processed/freebase_heldout_entities.json
 
-graphtask-r1 data sample-seeds --snapshot freebase-v1 \
+python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 \
   --exclude data/processed/freebase_heldout_entities.json \
   --count 4096 --pool-limit 100000 --seed 42 \
   --output data/verl/freebase_questioner_seeds.parquet

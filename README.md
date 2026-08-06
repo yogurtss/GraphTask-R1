@@ -21,10 +21,43 @@ No GPU result is claimed in this repository. Training and Freebase ingestion are
 left for the user's server because they require model weights, licensed datasets, large storage,
 and 4×80GB GPUs.
 
+## Clone and run
+
+GraphTask-R1 is a source repository rather than an installable Python package. The
+`graphtask_r1/` package lives at the repository root, so after cloning you can run it directly;
+do **not** run `pip install -e .` or install GraphTask-R1 into the environment.
+
+Use Python 3.11 or newer. On a server where the Python dependencies, PyTorch, and verl are
+already available, setup is only:
+
+```bash
+git clone <repository-url> GraphTask
+cd GraphTask
+python -m graphtask_r1.cli --help
+```
+
+For a new CPU/development environment, install the small project-level dependency set:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+`requirements.txt` deliberately excludes `torch`, `verl`, CUDA libraries, SGLang, and
+FlashAttention. Install those separately using versions that match the server's CUDA stack;
+cloning or updating this repository will therefore not replace a working GPU environment. The
+training code is validated against verl v0.7.1 at commit
+`bec9ef74768dd201881cd4e54cd0385e87caae27`.
+
+The external verl checkout can live anywhere on the server. It does not need to be cloned into a
+`third_party/` directory in this repository; it only needs to be importable from the active Python
+environment.
+
+All commands below assume the current directory is the repository root.
+
 ## Local verification
 
 ```bash
-python -m pip install -e '.[dev,training]'
+python -m pip install -r requirements-dev.txt
 make lint
 make typecheck
 make test
@@ -36,18 +69,18 @@ make scripted-selfplay
 
 ```bash
 # KQA Pro cold-start data
-graphtask-r1 data fetch --dataset kqapro
-graphtask-r1 data prepare --dataset kqapro \
+python -m graphtask_r1.cli data fetch --dataset kqapro
+python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro --output-dir data/processed/kqapro/kqapro-v1
 
 # Freebase endpoint check and leakage-safe Questioner seeds
-graphtask-r1 graph preflight --snapshot freebase-v1
-graphtask-r1 data sample-seeds --snapshot freebase-v1 \
+python -m graphtask_r1.cli graph preflight --snapshot freebase-v1
+python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 \
   --exclude data/processed/freebase_heldout_entities.json \
   --output data/verl/freebase_questioner_seeds.parquet
 
 # Inspect the exact 4-GPU self-play launch without starting GPUs
-graphtask-r1 train self-play --config configs/training/selfplay.yaml \
+python -m graphtask_r1.cli train self-play --config configs/training/selfplay.yaml \
   --output-dir outputs/selfplay --dry-run
 ```
 

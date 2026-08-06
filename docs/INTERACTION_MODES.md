@@ -29,15 +29,15 @@ GraphScript 不是 Python。v0.1 只接受严格 JSON，形状固定为
 ## 1. 从现有 KQA Pro 任务选出共同子集
 
 ```bash
-graphtask-r1 data select-interaction-tasks \
+python -m graphtask_r1.cli data select-interaction-tasks \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
   --output data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet
 
-graphtask-r1 data select-interaction-tasks \
+python -m graphtask_r1.cli data select-interaction-tasks \
   --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
   --output data/processed/kqapro/kqapro-v1/val/interaction_tasks.parquet
 
-graphtask-r1 data build-relation-catalog \
+python -m graphtask_r1.cli data build-relation-catalog \
   --input data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet \
   --output data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
@@ -50,13 +50,13 @@ graphtask-r1 data build-relation-catalog \
 ## 2. 导出两组 SFT 数据
 
 ```bash
-graphtask-r1 data export-sft \
+python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet \
   --output data/verl/kqapro_tool_sft.parquet \
   --interaction-mode tool \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 
-graphtask-r1 data export-sft \
+python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet \
   --output data/verl/kqapro_graphscript_sft.parquet \
   --interaction-mode graphscript \
@@ -71,11 +71,11 @@ arm 的 adapter 继续训练。
 Freebase catalog 必须来自训练侧任务。可从已有 legacy tool self-play archive 导出，再构建 catalog：
 
 ```bash
-graphtask-r1 data export-archive \
+python -m graphtask_r1.cli data export-archive \
   --archive outputs/selfplay-qwen3-4b/archive.sqlite \
   --output data/processed/freebase_train_tasks.parquet
 
-graphtask-r1 data build-relation-catalog \
+python -m graphtask_r1.cli data build-relation-catalog \
   --input data/processed/freebase_train_tasks.parquet \
   --output data/processed/freebase_relation_catalog.json \
   --snapshot freebase-v1
@@ -84,12 +84,12 @@ graphtask-r1 data build-relation-catalog \
 随后为两个 arm 用相同 seed、denylist 和 catalog 分别导出 seed rows：
 
 ```bash
-graphtask-r1 data sample-seeds --snapshot freebase-v1 --seed 42 \
+python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 --seed 42 \
   --exclude data/processed/freebase_heldout_entities.json \
   --relation-catalog data/processed/freebase_relation_catalog.json \
   --interaction-mode tool --output data/verl/freebase_tool_seeds.parquet
 
-graphtask-r1 data sample-seeds --snapshot freebase-v1 --seed 42 \
+python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 --seed 42 \
   --exclude data/processed/freebase_heldout_entities.json \
   --relation-catalog data/processed/freebase_relation_catalog.json \
   --interaction-mode graphscript --output data/verl/freebase_graphscript_seeds.parquet
@@ -105,11 +105,11 @@ Tool comparison arm 使用 `configs/training/selfplay_tool_compare.yaml`；Graph
 export RELATION_CATALOG=$PWD/data/processed/freebase_relation_catalog.json
 export KQAPRO_RELATION_CATALOG=$PWD/data/processed/kqapro/kqapro-v1/relation_catalog.json
 
-graphtask-r1 train self-play \
+python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay_tool_compare.yaml \
   --output-dir outputs/interaction-tool --dry-run
 
-graphtask-r1 train self-play \
+python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay_graphscript.yaml \
   --output-dir outputs/interaction-graphscript --dry-run
 ```

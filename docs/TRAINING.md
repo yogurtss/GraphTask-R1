@@ -6,22 +6,25 @@
 
 ## 1. 环境
 
+PyTorch、verl、SGLang、Ray、FlashAttention 和 CUDA 栈均由服务器环境独立管理，本仓库不会
+安装或升级它们。verl 的源码目录可以放在服务器任意位置，不需要复制或 clone 到本仓库的
+`third_party/` 下；只需确保当前 Python 环境可以 `import verl`。项目验证版本为 verl `v0.7.1`
+及上述 commit。
+
+clone GraphTask-R1 后进入仓库根目录。服务器若还缺少本项目的轻量运行依赖，再执行：
+
 ```bash
-conda create -n graphtask python=3.11 -y
-conda activate graphtask
+python -m pip install -r requirements.txt
+```
 
-git clone --recursive https://github.com/verl-project/verl.git third_party/verl
-cd third_party/verl
-git checkout bec9ef74768dd201881cd4e54cd0385e87caae27
-pip install -e .
-cd ../..
+GraphTask-R1 本身无需安装。可在训练前检查当前服务器环境是否可见：
 
-pip install -e '.[dev,training]'
-pip install 'sglang[all]' flash-attn --no-build-isolation
+```bash
+python -c "import torch, verl, sglang; print(torch.__version__, verl.__file__, sglang.__file__)"
 ```
 
 先运行 verl 自带的 Qwen3-4B multi-turn 示例，确认 CUDA、Ray、SGLang 和 tool-call template
-正常。项目只支持上述固定提交；升级 verl 后必须重新检查 Hydra 字段和 Parquet contract。
+正常。升级 verl 后必须重新检查 Hydra 字段和 Parquet contract。
 
 ## 2. 双角色 SFT
 
@@ -39,9 +42,9 @@ export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
 export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/sft-qwen3-4b
 
-graphtask-r1 train sft \
+python -m graphtask_r1.cli train sft \
   --config configs/experiments/qwen3_4b_sft.yaml --dry-run
-graphtask-r1 train sft \
+python -m graphtask_r1.cli train sft \
   --config configs/experiments/qwen3_4b_sft.yaml
 ```
 
@@ -51,7 +54,7 @@ SFT 数据使用 verl `messages` contract。Questioner 学习输出结构化 Tas
 ## 3. Solver-only GRPO
 
 ```bash
-graphtask-r1 data export-verl \
+python -m graphtask_r1.cli data export-verl \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
   --output data/verl/kqapro_solver_rl.parquet --roles solver
 
@@ -60,9 +63,9 @@ export SOLVER_RL_TRAIN_DATA=$PWD/data/verl/kqapro_solver_rl.parquet
 export SOLVER_RL_VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
 export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/solver-grpo
 
-graphtask-r1 train solver-grpo \
+python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo.yaml --dry-run
-graphtask-r1 train solver-grpo \
+python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo.yaml
 ```
 
@@ -92,7 +95,7 @@ export GRAPHTASK_GRAPH_CACHE=$PWD/data/cache/freebase.sqlite
 先检查完整进程计划：
 
 ```bash
-graphtask-r1 train self-play \
+python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
   --output-dir outputs/selfplay-qwen3-4b --dry-run
 ```
@@ -100,7 +103,7 @@ graphtask-r1 train self-play \
 确认路径后启动：
 
 ```bash
-graphtask-r1 train self-play \
+python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
   --output-dir outputs/selfplay-qwen3-4b
 ```
@@ -113,7 +116,7 @@ graphtask-r1 train self-play \
 恢复：
 
 ```bash
-graphtask-r1 train self-play \
+python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
   --output-dir outputs/selfplay-qwen3-4b --resume
 ```
@@ -126,7 +129,7 @@ resume 会核对 config hash，并从最后完成 round 的 adapter 继续。不
 中的 `sglang`、`opponent` 一致。服务健康后：
 
 ```bash
-graphtask-r1 evaluate benchmark \
+python -m graphtask_r1.cli evaluate benchmark \
   --input data/processed/grailqa/dev/examples.parquet \
   --output-dir outputs/eval/grailqa-dev \
   --solver-url http://127.0.0.1:18080 \

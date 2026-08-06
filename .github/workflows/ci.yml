@@ -11,8 +11,7 @@ jobs:
         with:
           python-version: '3.11'
           enable-cache: true
-      - run: uv sync --all-extras
-      - run: uv run make lint
-      - run: uv run make typecheck
-      - run: uv run make test
-
+      - run: uv pip install --system -r requirements-dev.txt
+      - run: make lint
+      - run: make typecheck
+      - run: make test

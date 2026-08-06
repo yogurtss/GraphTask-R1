@@ -78,22 +78,20 @@ non-thinking 模式，避免多轮工具历史中的 reasoning 清理问题；�
 先降低 `TRAIN_BATCH_SIZE`、`MAX_RESPONSE_LENGTH` 和 `ROLLOUT_N`，再启用 parameter / optimizer
 offload。不要先降低图验证强度。
 
-## 4. 环境安装
+## 4. 服务器环境
 
 verl 固定为 `v0.7.1` / `bec9ef74768dd201881cd4e54cd0385e87caae27`：
 
+PyTorch、verl、SGLang、Ray、FlashAttention 与 CUDA 栈由服务器环境独立安装和维护。verl
+源码可位于服务器任意位置，不需要放入本仓库的 `third_party/`；当前 Python 环境能够
+`import verl` 即可。
+
+GraphTask-R1 采用 clone 后直接运行的根目录包布局，不需要安装本项目。服务器缺少轻量运行依赖
+时才需要在仓库根目录执行：
+
 ```bash
-conda create -n graphtask python=3.11 -y
-conda activate graphtask
-
-git clone --recursive https://github.com/verl-project/verl.git third_party/verl
-cd third_party/verl
-git checkout bec9ef74768dd201881cd4e54cd0385e87caae27
-pip install -e .
-cd ../..
-
-pip install -e '.[dev,training]'
-pip install "sglang[all]" flash-attn --no-build-isolation
+python -m pip install -r requirements.txt
+python -c "import torch, verl, sglang; print(torch.__version__, verl.__file__, sglang.__file__)"
 ```
 
 先运行该 commit 自带的 Qwen3-4B multi-turn 示例，确认 CUDA、Ray、SGLang、tool calling
@@ -136,7 +134,7 @@ Freebase dump 很大，建议使用本地 Virtuoso；将 snapshot/version hash �
 ### Stage A：确定性证书管线
 
 ```bash
-PYTHONPATH=src python -m graphtask_r1.cli e2e mini-pipeline \
+python -m graphtask_r1.cli e2e mini-pipeline \
   --graph toy --num-programs 1000 --seed 42 --output-dir outputs/toy
 ```
 
@@ -158,7 +156,7 @@ PYTHONPATH=src python -m graphtask_r1.cli e2e mini-pipeline \
 先把 `--roles solver` 导出并训练，验证真实 Search 工具闭环：
 
 ```bash
-PYTHONPATH=src python -m graphtask_r1.cli data export-verl \
+python -m graphtask_r1.cli data export-verl \
   --input outputs/toy/tasks.parquet \
   --output outputs/verl/solver.parquet --roles solver
 
@@ -176,7 +174,7 @@ Solver batch 混合 base/archive/new 任务。随后把两个角色的 prompts �
 在一次 GRPO job 中更新同一个 LoRA：
 
 ```bash
-PYTHONPATH=src python -m graphtask_r1.cli data export-verl \
+python -m graphtask_r1.cli data export-verl \
   --input outputs/toy/tasks.parquet \
   --output outputs/verl/mixed.parquet --roles both
 
