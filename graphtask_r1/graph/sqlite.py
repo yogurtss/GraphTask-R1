@@ -28,6 +28,12 @@ from graphtask_r1.schema import (
     parse_program,
 )
 
+_PREFERRED_SQL_VARIABLE_LIMIT = 900
+
+
+def _chunks(values: Sequence[str], size: int) -> list[Sequence[str]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
 
 def _compare(left: str, datatype: str, comparator: str, right: str | int | float) -> bool:
     if comparator == "contains":
@@ -75,6 +81,10 @@ class SQLiteGraphBackend:
             check_same_thread=not allow_cross_thread,
         )
 
+    def _sql_variable_limit(self) -> int:
+        runtime_limit = self.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+        return max(2, min(_PREFERRED_SQL_VARIABLE_LIMIT, runtime_limit))
+
     def all_entities(self, *, limit: int) -> tuple[str, ...]:
         rows = self.connection.execute(
             "SELECT entity_id FROM entities ORDER BY entity_id LIMIT ?", (max(0, limit),)
@@ -95,29 +105,41 @@ class SQLiteGraphBackend:
             raise ValueError(f"invalid direction: {direction}")
         if not entity_ids or limit <= 0:
             return []
-        placeholders = ",".join("?" for _ in entity_ids)
-        relation_clause = ""
-        relation_args: list[str] = []
-        if relation_ids:
-            relation_clause = f" AND relation IN ({','.join('?' for _ in relation_ids)})"
-            relation_args = list(relation_ids)
-        branches: list[tuple[str, list[str]]] = []
+        entities = sorted(set(entity_ids))
+        relations = sorted(set(relation_ids or ()))
+        bind_budget = self._sql_variable_limit() - 1  # reserve one variable for LIMIT
+        if relations:
+            entity_batch_size = max(1, bind_budget // 2)
+            relation_batch_size = max(1, bind_budget - entity_batch_size)
+            relation_batches: list[Sequence[str]] = _chunks(relations, relation_batch_size)
+        else:
+            entity_batch_size = bind_budget
+            relation_batches = [()]
+        columns = []
         if direction in {"out", "both"}:
-            branches.append(
-                (f"subject IN ({placeholders}){relation_clause}", [*entity_ids, *relation_args])
-            )
+            columns.append("subject")
         if direction in {"in", "both"}:
-            branches.append(
-                (f"object IN ({placeholders}){relation_clause}", [*entity_ids, *relation_args])
-            )
-        where = " OR ".join(f"({clause})" for clause, _ in branches)
-        args = [value for _, values in branches for value in values]
-        rows = self.connection.execute(
-            f"SELECT subject, relation, object FROM triples WHERE {where} "
-            "ORDER BY subject, relation, object LIMIT ?",
-            (*args, limit),
-        ).fetchall()
-        return [Triple(subject=row[0], relation=row[1], object=row[2]) for row in rows]
+            columns.append("object")
+
+        found: dict[tuple[str, str, str], Triple] = {}
+        for column in columns:
+            for entity_batch in _chunks(entities, entity_batch_size):
+                entity_placeholders = ",".join("?" for _ in entity_batch)
+                for relation_batch in relation_batches:
+                    relation_clause = ""
+                    if relation_batch:
+                        relation_placeholders = ",".join("?" for _ in relation_batch)
+                        relation_clause = f" AND relation IN ({relation_placeholders})"
+                    rows = self.connection.execute(
+                        "SELECT subject, relation, object FROM triples "
+                        f"WHERE {column} IN ({entity_placeholders}){relation_clause} "
+                        "ORDER BY subject, relation, object LIMIT ?",
+                        (*entity_batch, *relation_batch, limit),
+                    ).fetchall()
+                    for row in rows:
+                        triple = Triple(subject=row[0], relation=row[1], object=row[2])
+                        found[triple.sort_key()] = triple
+        return sorted(found.values(), key=Triple.sort_key)[:limit]
 
     def _execute_entities(self, program: Program) -> set[str]:
         if isinstance(program, AllEntities):
@@ -141,28 +163,41 @@ class SQLiteGraphBackend:
             candidates = self._execute_entities(program.input)
             if not candidates:
                 return set()
-            placeholders = ",".join("?" for _ in candidates)
-            rows = self.connection.execute(
-                f"SELECT entity_id FROM entity_types WHERE entity_id IN ({placeholders}) "
-                "AND type_id = ?",
-                (*sorted(candidates), program.type_id),
-            ).fetchall()
-            return {str(row[0]) for row in rows}
+            found: set[str] = set()
+            batch_size = self._sql_variable_limit() - 1
+            for batch in _chunks(sorted(candidates), batch_size):
+                placeholders = ",".join("?" for _ in batch)
+                rows = self.connection.execute(
+                    f"SELECT entity_id FROM entity_types WHERE entity_id IN ({placeholders}) "
+                    "AND type_id = ?",
+                    (*batch, program.type_id),
+                ).fetchall()
+                found.update(str(row[0]) for row in rows)
+            return found
         if isinstance(program, FilterLiteral):
             candidates = self._execute_entities(program.input)
             if not candidates:
                 return set()
-            placeholders = ",".join("?" for _ in candidates)
-            rows = self.connection.execute(
-                f"SELECT entity_id, value, datatype FROM attributes "
-                f"WHERE entity_id IN ({placeholders}) AND key = ?",
-                (*sorted(candidates), program.relation),
-            ).fetchall()
-            return {
-                str(entity_id)
-                for entity_id, value, datatype in rows
-                if _compare(str(value), str(datatype), program.comparator, program.value.value)
-            }
+            found = set()
+            batch_size = self._sql_variable_limit() - 1
+            for batch in _chunks(sorted(candidates), batch_size):
+                placeholders = ",".join("?" for _ in batch)
+                rows = self.connection.execute(
+                    f"SELECT entity_id, value, datatype FROM attributes "
+                    f"WHERE entity_id IN ({placeholders}) AND key = ?",
+                    (*batch, program.relation),
+                ).fetchall()
+                found.update(
+                    str(entity_id)
+                    for entity_id, value, datatype in rows
+                    if _compare(
+                        str(value),
+                        str(datatype),
+                        program.comparator,
+                        program.value.value,
+                    )
+                )
+            return found
         if isinstance(program, Count):
             raise TypeError("Count produces a scalar")
         raise TypeError(type(program).__name__)

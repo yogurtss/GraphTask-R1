@@ -1,12 +1,21 @@
 import json
 import logging
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from graphtask_r1.data.kqapro import KoPLConversionError, KoPLMapper, prepare_kqapro
 from graphtask_r1.graph import SQLiteGraphBackend
-from graphtask_r1.schema import FilterLiteral, LiteralValue, Union, parse_program, program_to_dict
+from graphtask_r1.schema import (
+    Entity,
+    FilterLiteral,
+    FilterType,
+    LiteralValue,
+    Union,
+    parse_program,
+    program_to_dict,
+)
 from graphtask_r1.utils import read_records
 
 
@@ -109,6 +118,39 @@ def test_mapper_rejects_non_core_kopl(tmp_path: Path) -> None:
         assert exc.reason_code == "UNSUPPORTED_KOPL_OPERATOR"
     else:
         raise AssertionError("unsupported KoPL must be rejected")
+
+
+def test_sqlite_backend_batches_queries_below_runtime_variable_limit(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    backend.connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 12)
+    candidate_ids = ["e_alice", "e_bob", *(f"missing_{index}" for index in range(30))]
+    program = Union(inputs=tuple(Entity(entity_id=value) for value in candidate_ids))
+    try:
+        edges = backend.neighbors(
+            candidate_ids,
+            direction="both",
+            relation_ids=["friend", *(f"missing_relation_{index}" for index in range(20))],
+            limit=100,
+        )
+        assert [edge.sort_key() for edge in edges] == [("e_alice", "friend", "e_bob")]
+        assert backend.execute_program(FilterType(input=program, type_id="c_person")).values() == (
+            "e_alice",
+            "e_bob",
+        )
+        assert backend.execute_program(
+            FilterLiteral(
+                input=program,
+                relation="age",
+                comparator="ge",
+                value=LiteralValue(value=18, datatype="quantity", unit="year"),
+            )
+        ).values() == ("e_bob",)
+    finally:
+        backend.close()
 
 
 def test_union_and_typed_literal_round_trip() -> None:
