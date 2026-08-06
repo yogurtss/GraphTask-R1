@@ -194,6 +194,36 @@ python -m graphtask_r1.cli train self-play --config configs/training/selfplay.ya
   --output-dir outputs/selfplay --dry-run
 ```
 
+### KQA Pro preparation performance
+
+The SQLite backend automatically batches bound variables below the runtime SQLite limit, including
+older builds with the common 999-variable limit; upgrading the system SQLite is not required.
+Preparation also caches repeated graph reads within each task, pushes `FindAll` type/literal filters
+into SQLite joins, and bulk-loads entity metadata. These optimizations preserve task, rejection, and
+trace ordering and contents.
+
+Use one worker first. Multiple Python threads reading the same SQLite file often increase page-cache
+and GIL contention, so a larger value should only be used after benchmarking the same `--limit` on
+the target server:
+
+```bash
+# Recommended full run
+python -m graphtask_r1.cli data prepare --dataset kqapro \
+  --raw-dir data/raw/kqa_pro \
+  --output-dir data/processed/kqapro/kqapro-v1 \
+  --splits train,val --seed 42 --workers 1
+
+# Comparable bounded benchmark before changing worker count
+python -m graphtask_r1.cli data prepare --dataset kqapro \
+  --raw-dir data/raw/kqa_pro \
+  --output-dir data/processed/kqapro/kqapro-v1 \
+  --splits train --limit 1000 --seed 42 --workers 1
+```
+
+On reruns, `graph.sqlite` is reused when the `kb.json` hash, converter version, and snapshot match.
+Use `--rebuild-graph` only to force reconstruction. The progress operation names distinguish the
+single-writer graph build from per-split conversion, making it clear which phase is taking time.
+
 Read [Data preparation](docs/DATA_PREPARATION.md) before downloading anything and
 [Training](docs/TRAINING.md) before starting verl. Research motivation and experiment design are
 in [RESEARCH_AND_TRAINING_GUIDE.md](docs/RESEARCH_AND_TRAINING_GUIDE.md). The optional end-to-end
