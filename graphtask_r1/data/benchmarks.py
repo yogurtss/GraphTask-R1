@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from graphtask_r1.schema import Answer, AnswerSet, BenchmarkExample
-from graphtask_r1.utils import file_hash, write_json, write_manifest, write_records
+from graphtask_r1.utils import ProgressLogger, file_hash, write_json, write_manifest, write_records
 
 _MID = re.compile(r"(?:ns:|/ns/|rdf\.freebase\.com/ns/)([mg]\.[A-Za-z0-9_]+)")
 
@@ -56,19 +56,25 @@ def _topics(sparql: str | None, explicit: Any = None) -> tuple[str, ...]:
 def _load_json_files(raw_dir: Path) -> list[tuple[Path, Any]]:
     files = sorted([*raw_dir.glob("*.json"), *raw_dir.glob("*.jsonl")])
     loaded: list[tuple[Path, Any]] = []
-    for path in files:
+    progress = ProgressLogger("data.prepare.benchmark.load_files", total=len(files))
+    progress.start(raw_dir=str(raw_dir))
+    for index, path in enumerate(files):
         if path.suffix == ".jsonl":
             loaded.append(
                 (path, [json.loads(line) for line in path.read_text().splitlines() if line])
             )
         else:
             loaded.append((path, json.loads(path.read_text())))
+        progress.update(index + 1, file=path.name)
+    progress.finish(len(files), raw_dir=str(raw_dir))
     return loaded
 
 
 def _webqsp_rows(payload: Any, split: str) -> list[BenchmarkExample]:
     rows = payload.get("Questions", payload) if isinstance(payload, dict) else payload
     examples: list[BenchmarkExample] = []
+    progress = ProgressLogger(f"data.prepare.webqsp.parse.{split}", total=len(rows))
+    progress.start()
     for index, row in enumerate(rows):
         parses = row.get("Parses", [])
         parse = next(
@@ -89,12 +95,16 @@ def _webqsp_rows(payload: Any, split: str) -> list[BenchmarkExample]:
                 metadata={"parse_count": len(parses)},
             )
         )
+        progress.update(index + 1)
+    progress.finish(len(rows), examples=len(examples))
     return examples
 
 
 def _cwq_rows(payload: Any, split: str) -> list[BenchmarkExample]:
     rows = payload.get("questions", payload) if isinstance(payload, dict) else payload
     examples: list[BenchmarkExample] = []
+    progress = ProgressLogger(f"data.prepare.cwq.parse.{split}", total=len(rows))
+    progress.start()
     for index, row in enumerate(rows):
         sparql = row.get("sparql") or row.get("SPARQL")
         examples.append(
@@ -109,12 +119,16 @@ def _cwq_rows(payload: Any, split: str) -> list[BenchmarkExample]:
                 sparql=sparql,
             )
         )
+        progress.update(index + 1)
+    progress.finish(len(rows), examples=len(examples))
     return examples
 
 
 def _grailqa_rows(payload: Any, split: str) -> list[BenchmarkExample]:
     rows = payload.get("questions", payload) if isinstance(payload, dict) else payload
     examples: list[BenchmarkExample] = []
+    progress = ProgressLogger(f"data.prepare.grailqa.parse.{split}", total=len(rows))
+    progress.start()
     for index, row in enumerate(rows):
         graph_query = row.get("graph_query", {})
         nodes = graph_query.get("nodes", []) if isinstance(graph_query, dict) else []
@@ -135,6 +149,8 @@ def _grailqa_rows(payload: Any, split: str) -> list[BenchmarkExample]:
                 metadata={"function": row.get("function")},
             )
         )
+        progress.update(index + 1)
+    progress.finish(len(rows), examples=len(examples))
     return examples
 
 

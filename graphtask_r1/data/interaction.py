@@ -11,7 +11,7 @@ from graphtask_r1.graphscript import (
 )
 from graphtask_r1.schema import TaskCertificate
 from graphtask_r1.training.relations import program_relations
-from graphtask_r1.utils import write_json, write_records
+from graphtask_r1.utils import ProgressLogger, write_json, write_records
 
 
 def select_graphscript_tasks(
@@ -25,7 +25,9 @@ def select_graphscript_tasks(
 ) -> dict[str, int]:
     selected: list[TaskCertificate] = []
     rejections: list[dict[str, object]] = []
-    for task in tasks:
+    progress = ProgressLogger("data.select_interaction_tasks", total=len(tasks))
+    progress.start()
+    for index, task in enumerate(tasks):
         reason: str | None = None
         if len(task.topic_entities) != 1:
             reason = "MULTIPLE_TOPICS"
@@ -66,8 +68,15 @@ def select_graphscript_tasks(
             selected.append(task)
         else:
             rejections.append({"task_id": task.task_id, "reason_code": reason})
+        progress.update(index + 1, selected=len(selected), rejected=len(rejections))
     write_records(output_path, (task.model_dump(mode="json") for task in selected))
     write_records(output_path.with_name(output_path.stem + "_rejections.parquet"), rejections)
+    progress.finish(
+        len(tasks),
+        selected=len(selected),
+        rejected=len(rejections),
+        output=str(output_path),
+    )
     metrics = {"input": len(tasks), "selected": len(selected), "rejected": len(rejections)}
     write_json(output_path.with_suffix(".metrics.json"), metrics)
     return metrics

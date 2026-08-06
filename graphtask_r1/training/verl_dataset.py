@@ -10,6 +10,7 @@ from graphtask_r1.generation import validate_proposal
 from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal
 from graphtask_r1.training.prompts import InteractionMode, role_prompt
 from graphtask_r1.training.relations import require_catalog_covers_program
+from graphtask_r1.utils import ProgressLogger
 
 
 def export_role_dataset(
@@ -32,6 +33,8 @@ def export_role_dataset(
 ) -> int:
     """Export verl RLHFDataset rows with role-specific prompts and tool session kwargs."""
     rows: list[dict[str, object]] = []
+    progress = ProgressLogger("data.export_verl", total=len(tasks))
+    progress.start(interaction_mode=interaction_mode, program_profile=program_profile)
     for index, task in enumerate(tasks):
         graph_snapshot = task.graph_snapshot
         task_catalog = (relation_catalogs or {}).get(graph_snapshot, relation_catalog)
@@ -141,6 +144,8 @@ def export_role_dataset(
                     ),
                 }
             )
+        progress.update(index + 1, rows=len(rows))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows), output_path)
+    progress.finish(len(tasks), rows=len(rows), output=str(output_path))
     return len(rows)

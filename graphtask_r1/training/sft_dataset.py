@@ -13,6 +13,7 @@ from graphtask_r1.graphscript import program_to_graphscript
 from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal
 from graphtask_r1.training.prompts import InteractionMode, role_prompt
 from graphtask_r1.training.relations import require_catalog_covers_program
+from graphtask_r1.utils import ProgressLogger
 
 
 def _questioner_messages(
@@ -134,6 +135,8 @@ def export_sft_dataset(
 ) -> int:
     rows: list[dict[str, object]] = []
     backends: dict[str, GraphBackend] = {}
+    progress = ProgressLogger("data.export_sft", total=len(tasks))
+    progress.start(interaction_mode=interaction_mode)
     for index, task in enumerate(tasks):
         task_catalog = (relation_catalogs or {}).get(task.graph_snapshot, relation_catalog)
         if interaction_mode == "graphscript" and not task_catalog:
@@ -185,6 +188,8 @@ def export_sft_dataset(
                     "interaction_mode": interaction_mode,
                 }
             )
+        progress.update(index + 1, rows=len(rows))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows), output_path)
+    progress.finish(len(tasks), rows=len(rows), output=str(output_path))
     return len(rows)

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from graphtask_r1.schema import BenchmarkExample, TaskCertificate
-from graphtask_r1.utils import read_records
+from graphtask_r1.utils import ProgressLogger, read_records
 
 
 def audit_records(path: Path, *, kind: str = "auto") -> dict[str, Any]:
@@ -14,6 +14,8 @@ def audit_records(path: Path, *, kind: str = "auto") -> dict[str, Any]:
     ids: list[str] = []
     splits: Counter[str] = Counter()
     accepted = 0
+    progress = ProgressLogger("data.audit.records", total=len(records))
+    progress.start(path=str(path), kind=kind)
     for index, record in enumerate(records):
         try:
             selected = kind
@@ -36,6 +38,8 @@ def audit_records(path: Path, *, kind: str = "auto") -> dict[str, Any]:
             accepted += 1
         except (TypeError, ValueError, KeyError) as exc:
             errors.append({"index": index, "detail": str(exc)})
+        progress.update(index + 1, valid=accepted, invalid=len(errors))
+    progress.finish(len(records), valid=accepted, invalid=len(errors))
     duplicates = sorted(value for value, count in Counter(ids).items() if count > 1)
     return {
         "path": str(path),

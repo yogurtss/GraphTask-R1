@@ -26,7 +26,14 @@ from graphtask_r1.schema import (
     Union,
     VerificationSummary,
 )
-from graphtask_r1.utils import file_hash, stable_hash, write_json, write_manifest, write_records
+from graphtask_r1.utils import (
+    ProgressLogger,
+    file_hash,
+    stable_hash,
+    write_json,
+    write_manifest,
+    write_records,
+)
 from graphtask_r1.verification import verify_task
 
 CONVERTER_VERSION = "kqapro-core-v1"
@@ -97,6 +104,11 @@ def build_kqapro_database(kb_path: Path, output_path: Path) -> dict[str, Any]:
         CREATE INDEX idx_attributes_entity_key ON attributes(entity_id, key);
         """
     )
+    progress = ProgressLogger(
+        "data.prepare.kqapro.build_graph", total=len(concepts) + len(entities)
+    )
+    progress.start(concepts=len(concepts), entities=len(entities))
+    completed = 0
     relation_ids: set[str] = set()
     for concept_id, info in concepts.items():
         connection.execute(
@@ -107,6 +119,8 @@ def build_kqapro_database(kb_path: Path, output_path: Path) -> dict[str, Any]:
             connection.execute(
                 "INSERT OR IGNORE INTO entity_types VALUES (?, ?)", (concept_id, type_id)
             )
+        completed += 1
+        progress.update(completed, stage="concepts")
     for entity_id, info in entities.items():
         aliases = info.get("aliases", [])
         connection.execute(
@@ -146,6 +160,8 @@ def build_kqapro_database(kb_path: Path, output_path: Path) -> dict[str, Any]:
             connection.execute(
                 "INSERT OR IGNORE INTO triples VALUES (?, ?, ?)", (entity_id, key, value)
             )
+        completed += 1
+        progress.update(completed, stage="entities", relations=len(relation_ids))
     connection.executemany(
         "INSERT INTO relation_labels VALUES (?, ?)", ((value, value) for value in relation_ids)
     )
@@ -164,6 +180,7 @@ def build_kqapro_database(kb_path: Path, output_path: Path) -> dict[str, Any]:
     connection.execute("PRAGMA optimize")
     connection.close()
     temporary.replace(output_path)
+    progress.finish(completed, relations=len(relation_ids), output=str(output_path))
     return metadata
 
 
@@ -315,6 +332,8 @@ def prepare_kqapro(
         tasks: list[dict[str, Any]] = []
         traces: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
+        progress = ProgressLogger(f"data.prepare.kqapro.split.{split}", total=len(rows))
+        progress.start(source=str(source_path))
         for index, row in enumerate(rows):
             try:
                 program = mapper.convert(row["program"])
@@ -396,10 +415,21 @@ def prepare_kqapro(
                         "detail": str(exc),
                     }
                 )
+            progress.update(
+                index + 1,
+                accepted=len(tasks),
+                rejected=len(rejections),
+            )
         split_dir = output_dir / split
         write_records(split_dir / "tasks.parquet", tasks)
         write_records(split_dir / "traces.parquet", traces)
         write_records(split_dir / "rejections.parquet", rejections)
+        progress.finish(
+            len(rows),
+            accepted=len(tasks),
+            rejected=len(rejections),
+            output=str(split_dir),
+        )
         split_metrics[split] = {
             "input": len(rows),
             "accepted": len(tasks),

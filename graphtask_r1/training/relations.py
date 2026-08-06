@@ -15,7 +15,7 @@ from graphtask_r1.schema import (
     TaskCertificate,
     Union,
 )
-from graphtask_r1.utils import write_json
+from graphtask_r1.utils import ProgressLogger, write_json
 
 
 def program_relations(program: Program) -> frozenset[str]:
@@ -48,8 +48,15 @@ def build_relation_catalog(
     tasks: list[TaskCertificate], backend: GraphBackend, output_path: Path
 ) -> tuple[RelationInfo, ...]:
     relation_ids = sorted({value for task in tasks for value in program_relations(task.program)})
-    relations = tuple(backend.relation_info(relation_id) for relation_id in relation_ids)
+    progress = ProgressLogger("data.build_relation_catalog", total=len(relation_ids))
+    progress.start(tasks=len(tasks))
+    relations_list: list[RelationInfo] = []
+    for index, relation_id in enumerate(relation_ids):
+        relations_list.append(backend.relation_info(relation_id))
+        progress.update(index + 1)
+    relations = tuple(relations_list)
     write_json(output_path, [relation.model_dump(mode="json") for relation in relations])
+    progress.finish(len(relation_ids), output=str(output_path))
     return relations
 
 

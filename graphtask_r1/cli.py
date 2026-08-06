@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import subprocess
 from collections.abc import Sequence
@@ -30,7 +31,9 @@ from graphtask_r1.training.scripted import run_scripted_selfplay
 from graphtask_r1.training.selfplay import run_self_play
 from graphtask_r1.training.sft_dataset import export_sft_dataset
 from graphtask_r1.training.verl_dataset import export_role_dataset
-from graphtask_r1.utils import read_records, write_records
+from graphtask_r1.utils import ProgressLogger, read_records, write_records
+
+LOGGER = logging.getLogger("graphtask_r1.cli")
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -41,6 +44,12 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="graphtask-r1")
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="stderr log level (default: INFO)",
+    )
     groups = parser.add_subparsers(dest="group", required=True)
 
     graph = groups.add_parser("graph")
@@ -165,7 +174,14 @@ def _load_tasks(path: Path, limit: int | None) -> list[TaskCertificate]:
     values = read_records(path)
     if limit is not None:
         values = values[:limit]
-    return [TaskCertificate.model_validate(value) for value in values]
+    progress = ProgressLogger("data.load_tasks", total=len(values))
+    progress.start(path=str(path))
+    tasks: list[TaskCertificate] = []
+    for index, value in enumerate(values):
+        tasks.append(TaskCertificate.model_validate(value))
+        progress.update(index + 1)
+    progress.finish(len(tasks), path=str(path))
+    return tasks
 
 
 def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, Any]:
@@ -191,6 +207,12 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    command_started = perf_counter()
+    LOGGER.info("command_started group=%s action=%s", args.group, args.action)
     result: object
     if args.group == "graph":
         started = perf_counter()
@@ -345,6 +367,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 concurrency=args.concurrency,
             )
         )
+    LOGGER.info(
+        "command_completed group=%s action=%s elapsed_s=%.1f",
+        args.group,
+        args.action,
+        perf_counter() - command_started,
+    )
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     return 0
 

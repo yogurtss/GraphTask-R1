@@ -167,6 +167,12 @@ make scripted-selfplay
 
 ## Data and training entry points
 
+Long-running commands emit timestamped progress logs to stderr at `INFO` level while keeping the
+final machine-readable result on stdout. Progress records include the operation, phase,
+`completed`, `total`, percentage, elapsed time, and action-specific accepted/rejected counts.
+Use the global option before the command group to change verbosity, for example
+`python -m graphtask_r1.cli --log-level WARNING data prepare ...`.
+
 ```bash
 # KQA Pro cold-start data
 python -m graphtask_r1.cli data fetch --dataset kqapro

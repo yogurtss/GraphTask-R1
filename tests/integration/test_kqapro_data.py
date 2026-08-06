@@ -1,5 +1,8 @@
 import json
+import logging
 from pathlib import Path
+
+import pytest
 
 from graphtask_r1.data.kqapro import KoPLConversionError, KoPLMapper, prepare_kqapro
 from graphtask_r1.graph import SQLiteGraphBackend
@@ -57,7 +60,10 @@ def _write_fixture(raw_dir: Path) -> None:
     (raw_dir / "test.json").write_text(json.dumps([{"question": "test"}]))
 
 
-def test_kqapro_prepare_executes_and_replays(tmp_path: Path) -> None:
+def test_kqapro_prepare_executes_and_replays(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="graphtask_r1.progress")
     raw_dir = tmp_path / "raw"
     _write_fixture(raw_dir)
     output_dir = tmp_path / "processed"
@@ -69,6 +75,10 @@ def test_kqapro_prepare_executes_and_replays(tmp_path: Path) -> None:
         read_records(output_dir / "train" / "traces.parquet")[0]["final_answers"]
         == tasks[0]["gold_answers"]
     )
+    messages = [record.message for record in caplog.records]
+    assert any('operation="data.prepare.kqapro.build_graph"' in value for value in messages)
+    assert any('operation="data.prepare.kqapro.split.train"' in value for value in messages)
+    assert any('phase="completed"' in value and 'accepted=1' in value for value in messages)
 
 
 def test_mapper_rejects_non_core_kopl(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.schema import RelationInfo
 from graphtask_r1.training.prompts import InteractionMode, role_prompt
-from graphtask_r1.utils import write_json
+from graphtask_r1.utils import ProgressLogger, write_json
 
 
 def merge_denylists(inputs: list[Path], output: Path) -> dict[str, int]:
@@ -49,12 +49,17 @@ def sample_questioner_seeds(
     rng = random.Random(seed)
     rng.shuffle(candidates)
     selected: list[str] = []
-    for entity_id in candidates:
+    progress = ProgressLogger("data.sample_seeds.filter", total=len(candidates))
+    progress.start(requested=count, min_degree=min_degree, max_degree=max_degree)
+    scanned = 0
+    for scanned, entity_id in enumerate(candidates, start=1):
         degree = len(backend.neighbors([entity_id], direction="both", limit=max_degree + 1))
         if min_degree <= degree <= max_degree:
             selected.append(entity_id)
+        progress.update(scanned, selected=len(selected))
         if len(selected) >= count:
             break
+    progress.finish(scanned, selected=len(selected), requested=count)
     rows = []
     for index, entity_id in enumerate(selected):
         common = {
