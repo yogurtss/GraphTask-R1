@@ -172,12 +172,14 @@ final machine-readable result on stdout. Progress records include the operation,
 `completed`, `total`, percentage, elapsed time, and action-specific accepted/rejected counts.
 Use the global option before the command group to change verbosity, for example
 `python -m graphtask_r1.cli --log-level WARNING data prepare ...`.
+`data prepare` also processes independent records concurrently. It defaults to at most 8 workers;
+set `--workers N` explicitly for the server, or use `--workers 1` to reproduce the serial path.
 
 ```bash
 # KQA Pro cold-start data
 python -m graphtask_r1.cli data fetch --dataset kqapro
 python -m graphtask_r1.cli data prepare --dataset kqapro \
-  --raw-dir data/raw/kqa_pro --output-dir data/processed/kqapro/kqapro-v1
+  --raw-dir data/raw/kqa_pro --output-dir data/processed/kqapro/kqapro-v1 --workers 8
 
 # Freebase endpoint check and leakage-safe Questioner seeds
 python -m graphtask_r1.cli graph preflight --snapshot freebase-v1

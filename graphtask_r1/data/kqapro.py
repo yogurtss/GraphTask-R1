@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from collections import defaultdict, deque
 from contextlib import suppress
 from pathlib import Path
@@ -29,7 +30,9 @@ from graphtask_r1.schema import (
 from graphtask_r1.utils import (
     ProgressLogger,
     file_hash,
+    ordered_parallel_map,
     stable_hash,
+    validate_workers,
     write_json,
     write_manifest,
     write_records,
@@ -308,6 +311,148 @@ def _answer_matches_source(answer: str, derived: AnswerSet, backend: SQLiteGraph
     return answer.strip() in candidates
 
 
+def _convert_kqapro_row(
+    item: tuple[int, dict[str, Any]],
+    *,
+    mapper: KoPLMapper,
+    backend: SQLiteGraphBackend,
+    split: str,
+    source_path: Path,
+    source_hash: str,
+    seed: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    index, row = item
+    try:
+        program = mapper.convert(row["program"])
+        answers = backend.execute_program(program)
+        if not answers.answers:
+            raise KoPLConversionError("EMPTY_ANSWER", "converted program returned no answer")
+        if "answer" in row and not _answer_matches_source(str(row["answer"]), answers, backend):
+            raise KoPLConversionError(
+                "SOURCE_ANSWER_MISMATCH",
+                f"source={row['answer']!r}, derived={answers.values()!r}",
+            )
+        verification = verify_task(str(row["question"]), program, backend)
+        if not verification.passed:
+            raise KoPLConversionError(
+                "VERIFICATION_REJECTED", ",".join(verification.rejection_reasons)
+            )
+        signature = canonical_signature(program)
+        source_id = str(row.get("id", index))
+        task_id = f"gt_kqapro_{split}_{stable_hash([source_id, signature])[:16]}"
+        witnesses = backend.extract_witness(program, answers)
+        task = TaskCertificate(
+            task_id=task_id,
+            source="kqapro",
+            source_id=source_id,
+            split=split,
+            graph_snapshot="kqapro-v1",
+            question=str(row["question"]),
+            topic_entities=tuple(backend.entity_info(value) for value in _topic_ids(program)),
+            program=program,
+            sparql=compile_sparql(program),
+            gold_answers=answers,
+            witness_facts=tuple(
+                sorted(
+                    {fact for witness in witnesses for fact in witness.facts},
+                    key=lambda fact: fact.sort_key(),
+                )
+            ),
+            program_signature=signature,
+            program_cost=program_cost(program),
+            operator_tags=operator_tags(program),
+            verification=VerificationSummary(
+                executable=True,
+                semantic_equivalent=True,
+                necessity_mean=verification.necessity_mean,
+                necessity_min=verification.necessity_min,
+                shortcut_found=verification.shortcut_found,
+                answer_leak=verification.answer_leak,
+            ),
+            source_program={"language": "kopl", "steps": row["program"]},
+            provenance=TaskProvenance(
+                dataset="kqapro",
+                raw_file=source_path.name,
+                raw_index=index,
+                converter_version=CONVERTER_VERSION,
+                source_hash=source_hash,
+            ),
+            generation={"seed": seed, "graph_snapshot": "kqapro-v1"},
+        )
+        trace = compile_trace(task_id, task.question, program, backend, seed=seed + index)
+        if trace.final_answers != answers:
+            raise KoPLConversionError("TRACE_REPLAY_MISMATCH", task_id)
+        return task.model_dump(mode="json"), trace.model_dump(mode="json"), None
+    except (KoPLConversionError, TypeError, ValueError, KeyError, RuntimeError) as exc:
+        reason = exc.reason_code if isinstance(exc, KoPLConversionError) else "CONVERSION_ERROR"
+        return (
+            None,
+            None,
+            {
+                "index": index,
+                "source_id": str(row.get("id", index)),
+                "reason_code": reason,
+                "detail": str(exc),
+            },
+        )
+
+
+class _KQAProWorker:
+    def __init__(
+        self,
+        *,
+        mapper: KoPLMapper,
+        backend: SQLiteGraphBackend,
+        database_path: Path,
+        split: str,
+        source_path: Path,
+        source_hash: str,
+        seed: int,
+        parallel: bool,
+    ) -> None:
+        self.mapper = mapper
+        self.backend = backend
+        self.database_path = database_path
+        self.split = split
+        self.source_path = source_path
+        self.source_hash = source_hash
+        self.seed = seed
+        self.parallel = parallel
+        self.local = threading.local()
+        self.backends: list[SQLiteGraphBackend] = []
+        self.backends_lock = threading.Lock()
+
+    def __call__(
+        self, item: tuple[int, dict[str, Any]]
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+        row_backend = self.backend
+        if self.parallel:
+            local_backend = cast(
+                SQLiteGraphBackend | None, getattr(self.local, "backend", None)
+            )
+            if local_backend is None:
+                local_backend = SQLiteGraphBackend(
+                    self.database_path, allow_cross_thread=True
+                )
+                self.local.backend = local_backend
+                with self.backends_lock:
+                    self.backends.append(local_backend)
+            row_backend = local_backend
+        return _convert_kqapro_row(
+            item,
+            mapper=self.mapper,
+            backend=row_backend,
+            split=self.split,
+            source_path=self.source_path,
+            source_hash=self.source_hash,
+            seed=self.seed,
+        )
+
+    def close(self) -> None:
+        for backend in self.backends:
+            backend.close()
+
+
 def prepare_kqapro(
     raw_dir: Path,
     output_dir: Path,
@@ -315,7 +460,9 @@ def prepare_kqapro(
     splits: tuple[str, ...] = ("train", "val"),
     limit: int | None = None,
     seed: int = 42,
+    workers: int = 1,
 ) -> dict[str, Any]:
+    validate_workers(workers)
     kb_path = raw_dir / "kb.json"
     database_path = output_dir / "graph.sqlite"
     build_metadata = build_kqapro_database(kb_path, database_path)
@@ -329,97 +476,40 @@ def prepare_kqapro(
         rows: list[dict[str, Any]] = json.loads(source_path.read_text())
         if limit is not None:
             rows = rows[:limit]
+        source_hash = file_hash(source_path)
+        if source_hash is None:
+            raise FileNotFoundError(source_path)
         tasks: list[dict[str, Any]] = []
         traces: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
         progress = ProgressLogger(f"data.prepare.kqapro.split.{split}", total=len(rows))
-        progress.start(source=str(source_path))
-        for index, row in enumerate(rows):
-            try:
-                program = mapper.convert(row["program"])
-                answers = backend.execute_program(program)
-                if not answers.answers:
-                    raise KoPLConversionError(
-                        "EMPTY_ANSWER", "converted program returned no answer"
-                    )
-                if "answer" in row and not _answer_matches_source(
-                    str(row["answer"]), answers, backend
-                ):
-                    raise KoPLConversionError(
-                        "SOURCE_ANSWER_MISMATCH",
-                        f"source={row['answer']!r}, derived={answers.values()!r}",
-                    )
-                verification = verify_task(str(row["question"]), program, backend)
-                if not verification.passed:
-                    raise KoPLConversionError(
-                        "VERIFICATION_REJECTED", ",".join(verification.rejection_reasons)
-                    )
-                signature = canonical_signature(program)
-                source_id = str(row.get("id", index))
-                task_id = f"gt_kqapro_{split}_{stable_hash([source_id, signature])[:16]}"
-                witnesses = backend.extract_witness(program, answers)
-                task = TaskCertificate(
-                    task_id=task_id,
-                    source="kqapro",
-                    source_id=source_id,
-                    split=split,
-                    graph_snapshot="kqapro-v1",
-                    question=str(row["question"]),
-                    topic_entities=tuple(
-                        backend.entity_info(value) for value in _topic_ids(program)
-                    ),
-                    program=program,
-                    sparql=compile_sparql(program),
-                    gold_answers=answers,
-                    witness_facts=tuple(
-                        sorted(
-                            {fact for witness in witnesses for fact in witness.facts},
-                            key=lambda fact: fact.sort_key(),
-                        )
-                    ),
-                    program_signature=signature,
-                    program_cost=program_cost(program),
-                    operator_tags=operator_tags(program),
-                    verification=VerificationSummary(
-                        executable=True,
-                        semantic_equivalent=True,
-                        necessity_mean=verification.necessity_mean,
-                        necessity_min=verification.necessity_min,
-                        shortcut_found=verification.shortcut_found,
-                        answer_leak=verification.answer_leak,
-                    ),
-                    source_program={"language": "kopl", "steps": row["program"]},
-                    provenance=TaskProvenance(
-                        dataset="kqapro",
-                        raw_file=source_path.name,
-                        raw_index=index,
-                        converter_version=CONVERTER_VERSION,
-                        source_hash=file_hash(source_path),
-                    ),
-                    generation={"seed": seed, "graph_snapshot": "kqapro-v1"},
+        progress.start(source=str(source_path), workers=workers)
+        process = _KQAProWorker(
+            mapper=mapper,
+            backend=backend,
+            database_path=database_path,
+            split=split,
+            source_path=source_path,
+            source_hash=source_hash,
+            seed=seed,
+            parallel=workers > 1,
+        )
+
+        try:
+            converted = ordered_parallel_map(process, enumerate(rows), workers=workers)
+            for index, (task, trace, rejection) in enumerate(converted):
+                if task is not None and trace is not None:
+                    tasks.append(task)
+                    traces.append(trace)
+                if rejection is not None:
+                    rejections.append(rejection)
+                progress.update(
+                    index + 1,
+                    accepted=len(tasks),
+                    rejected=len(rejections),
                 )
-                trace = compile_trace(task_id, task.question, program, backend, seed=seed + index)
-                if trace.final_answers != answers:
-                    raise KoPLConversionError("TRACE_REPLAY_MISMATCH", task_id)
-                tasks.append(task.model_dump(mode="json"))
-                traces.append(trace.model_dump(mode="json"))
-            except (KoPLConversionError, TypeError, ValueError, KeyError, RuntimeError) as exc:
-                reason = (
-                    exc.reason_code if isinstance(exc, KoPLConversionError) else "CONVERSION_ERROR"
-                )
-                rejections.append(
-                    {
-                        "index": index,
-                        "source_id": str(row.get("id", index)),
-                        "reason_code": reason,
-                        "detail": str(exc),
-                    }
-                )
-            progress.update(
-                index + 1,
-                accepted=len(tasks),
-                rejected=len(rejections),
-            )
+        finally:
+            process.close()
         split_dir = output_dir / split
         write_records(split_dir / "tasks.parquet", tasks)
         write_records(split_dir / "traces.parquet", traces)
@@ -447,11 +537,12 @@ def prepare_kqapro(
         "splits": split_metrics,
         "accepted": total_tasks,
         "rejected": total_rejections,
+        "workers": workers,
     }
     write_json(output_dir / "metrics.json", summary)
     write_manifest(
         output_dir,
-        {"command": "data prepare", "dataset": "kqapro", "seed": seed},
+        {"command": "data prepare", "dataset": "kqapro", "seed": seed, "workers": workers},
         ["graph.sqlite", "*/tasks.parquet", "*/traces.parquet", "*/rejections.parquet"],
     )
     return summary

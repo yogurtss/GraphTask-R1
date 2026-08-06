@@ -58,12 +58,22 @@ def _compare(left: str, datatype: str, comparator: str, right: str | int | float
 class SQLiteGraphBackend:
     """Read-only indexed graph backend produced by the KQA Pro importer."""
 
-    def __init__(self, path: Path, *, snapshot_id: str = "kqapro-v1") -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        snapshot_id: str = "kqapro-v1",
+        allow_cross_thread: bool = False,
+    ) -> None:
         if not path.exists():
             raise FileNotFoundError(path)
         self.path = path
         self.snapshot_id = snapshot_id
-        self.connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        self.connection = sqlite3.connect(
+            f"file:{path}?mode=ro",
+            uri=True,
+            check_same_thread=not allow_cross_thread,
+        )
 
     def all_entities(self, *, limit: int) -> tuple[str, ...]:
         rows = self.connection.execute(

@@ -25,8 +25,9 @@ def test_webqsp_adapter_and_heldout_denylist(tmp_path: Path) -> None:
     }
     (raw / "WebQSP.test.json").write_text(json.dumps(payload))
     output = tmp_path / "processed"
-    metrics = prepare_benchmark("webqsp", raw, output)
+    metrics = prepare_benchmark("webqsp", raw, output, workers=2)
     assert metrics["examples"] == 1
     example = read_records(output / "test" / "examples.parquet")[0]
     assert example["topic_entity_ids"] == ["m.seed"]
     assert json.loads((output / "heldout_topic_entities.json").read_text()) == ["m.seed"]
+    assert metrics["workers"] == 2

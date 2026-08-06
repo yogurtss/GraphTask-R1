@@ -6,7 +6,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 from graphtask_r1.schema import Answer, AnswerSet, BenchmarkExample
-from graphtask_r1.utils import ProgressLogger, file_hash, write_json, write_manifest, write_records
+from graphtask_r1.utils import (
+    ProgressLogger,
+    file_hash,
+    ordered_parallel_map,
+    validate_workers,
+    write_json,
+    write_manifest,
+    write_records,
+)
 
 _MID = re.compile(r"(?:ns:|/ns/|rdf\.freebase\.com/ns/)([mg]\.[A-Za-z0-9_]+)")
 
@@ -53,29 +61,34 @@ def _topics(sparql: str | None, explicit: Any = None) -> tuple[str, ...]:
     return tuple(sorted(value for value in values if value.startswith(("m.", "g."))))
 
 
-def _load_json_files(raw_dir: Path) -> list[tuple[Path, Any]]:
+def _load_json_files(raw_dir: Path, *, workers: int) -> list[tuple[Path, Any]]:
     files = sorted([*raw_dir.glob("*.json"), *raw_dir.glob("*.jsonl")])
     loaded: list[tuple[Path, Any]] = []
     progress = ProgressLogger("data.prepare.benchmark.load_files", total=len(files))
-    progress.start(raw_dir=str(raw_dir))
-    for index, path in enumerate(files):
+    progress.start(raw_dir=str(raw_dir), workers=workers)
+
+    def load(path: Path) -> tuple[Path, Any]:
         if path.suffix == ".jsonl":
-            loaded.append(
-                (path, [json.loads(line) for line in path.read_text().splitlines() if line])
-            )
-        else:
-            loaded.append((path, json.loads(path.read_text())))
+            return path, [json.loads(line) for line in path.read_text().splitlines() if line]
+        return path, json.loads(path.read_text())
+
+    for index, (path, payload) in enumerate(
+        ordered_parallel_map(load, files, workers=workers)
+    ):
+        loaded.append((path, payload))
         progress.update(index + 1, file=path.name)
     progress.finish(len(files), raw_dir=str(raw_dir))
     return loaded
 
 
-def _webqsp_rows(payload: Any, split: str) -> list[BenchmarkExample]:
+def _webqsp_rows(payload: Any, split: str, workers: int) -> list[BenchmarkExample]:
     rows = payload.get("Questions", payload) if isinstance(payload, dict) else payload
     examples: list[BenchmarkExample] = []
     progress = ProgressLogger(f"data.prepare.webqsp.parse.{split}", total=len(rows))
-    progress.start()
-    for index, row in enumerate(rows):
+    progress.start(workers=workers)
+
+    def convert(item: tuple[int, dict[str, Any]]) -> BenchmarkExample:
+        index, row = item
         parses = row.get("Parses", [])
         parse = next(
             (value for value in parses if value.get("Sparql")), parses[0] if parses else {}
@@ -83,53 +96,63 @@ def _webqsp_rows(payload: Any, split: str) -> list[BenchmarkExample]:
         sparql = parse.get("Sparql")
         all_answers = [answer for value in parses for answer in value.get("Answers", [])]
         all_topics = [value.get("TopicEntityMid") for value in parses]
-        examples.append(
-            BenchmarkExample(
-                example_id=str(row.get("QuestionId", row.get("id", index))),
-                dataset="webqsp",
-                split=split,
-                question=str(row.get("RawQuestion", row.get("ProcessedQuestion", ""))),
-                topic_entity_ids=_topics(sparql, all_topics),
-                gold_answers=_answers(all_answers or row.get("Answers", [])),
-                sparql=sparql,
-                metadata={"parse_count": len(parses)},
-            )
+        return BenchmarkExample(
+            example_id=str(row.get("QuestionId", row.get("id", index))),
+            dataset="webqsp",
+            split=split,
+            question=str(row.get("RawQuestion", row.get("ProcessedQuestion", ""))),
+            topic_entity_ids=_topics(sparql, all_topics),
+            gold_answers=_answers(all_answers or row.get("Answers", [])),
+            sparql=sparql,
+            metadata={"parse_count": len(parses)},
         )
+
+    for index, example in enumerate(
+        ordered_parallel_map(convert, enumerate(rows), workers=workers)
+    ):
+        examples.append(example)
         progress.update(index + 1)
     progress.finish(len(rows), examples=len(examples))
     return examples
 
 
-def _cwq_rows(payload: Any, split: str) -> list[BenchmarkExample]:
+def _cwq_rows(payload: Any, split: str, workers: int) -> list[BenchmarkExample]:
     rows = payload.get("questions", payload) if isinstance(payload, dict) else payload
     examples: list[BenchmarkExample] = []
     progress = ProgressLogger(f"data.prepare.cwq.parse.{split}", total=len(rows))
-    progress.start()
-    for index, row in enumerate(rows):
+    progress.start(workers=workers)
+
+    def convert(item: tuple[int, dict[str, Any]]) -> BenchmarkExample:
+        index, row = item
         sparql = row.get("sparql") or row.get("SPARQL")
-        examples.append(
-            BenchmarkExample(
-                example_id=str(row.get("ID", row.get("id", index))),
-                dataset="cwq",
-                split=str(row.get("split", split)),
-                question=str(row.get("question", row.get("machine_question", ""))),
-                topic_entity_ids=_topics(sparql, row.get("topic_entities")),
-                gold_answers=_answers(row.get("answers", row.get("answer", []))),
-                logical_form=row.get("s_expression") or row.get("logical_form"),
-                sparql=sparql,
-            )
+        return BenchmarkExample(
+            example_id=str(row.get("ID", row.get("id", index))),
+            dataset="cwq",
+            split=str(row.get("split", split)),
+            question=str(row.get("question", row.get("machine_question", ""))),
+            topic_entity_ids=_topics(sparql, row.get("topic_entities")),
+            gold_answers=_answers(row.get("answers", row.get("answer", []))),
+            logical_form=row.get("s_expression") or row.get("logical_form"),
+            sparql=sparql,
         )
+
+    for index, example in enumerate(
+        ordered_parallel_map(convert, enumerate(rows), workers=workers)
+    ):
+        examples.append(example)
         progress.update(index + 1)
     progress.finish(len(rows), examples=len(examples))
     return examples
 
 
-def _grailqa_rows(payload: Any, split: str) -> list[BenchmarkExample]:
+def _grailqa_rows(payload: Any, split: str, workers: int) -> list[BenchmarkExample]:
     rows = payload.get("questions", payload) if isinstance(payload, dict) else payload
     examples: list[BenchmarkExample] = []
     progress = ProgressLogger(f"data.prepare.grailqa.parse.{split}", total=len(rows))
-    progress.start()
-    for index, row in enumerate(rows):
+    progress.start(workers=workers)
+
+    def convert(item: tuple[int, dict[str, Any]]) -> BenchmarkExample:
+        index, row = item
         graph_query = row.get("graph_query", {})
         nodes = graph_query.get("nodes", []) if isinstance(graph_query, dict) else []
         explicit = [
@@ -137,18 +160,21 @@ def _grailqa_rows(payload: Any, split: str) -> list[BenchmarkExample]:
             for node in nodes
             if node.get("node_type") == "entity" and not node.get("question_node", False)
         ]
-        examples.append(
-            BenchmarkExample(
-                example_id=str(row.get("qid", row.get("id", index))),
-                dataset="grailqa",
-                split=str(row.get("split", split)),
-                question=str(row.get("question", "")),
-                topic_entity_ids=_topics(None, explicit),
-                gold_answers=_answers(row.get("answer", row.get("answers", []))),
-                logical_form=row.get("s_expression") or row.get("logical_form"),
-                metadata={"function": row.get("function")},
-            )
+        return BenchmarkExample(
+            example_id=str(row.get("qid", row.get("id", index))),
+            dataset="grailqa",
+            split=str(row.get("split", split)),
+            question=str(row.get("question", "")),
+            topic_entity_ids=_topics(None, explicit),
+            gold_answers=_answers(row.get("answer", row.get("answers", []))),
+            logical_form=row.get("s_expression") or row.get("logical_form"),
+            metadata={"function": row.get("function")},
         )
+
+    for index, example in enumerate(
+        ordered_parallel_map(convert, enumerate(rows), workers=workers)
+    ):
+        examples.append(example)
         progress.update(index + 1)
     progress.finish(len(rows), examples=len(examples))
     return examples
@@ -162,15 +188,18 @@ def _split_from_name(path: Path) -> str:
     return "unknown"
 
 
-def prepare_benchmark(dataset: str, raw_dir: Path, output_dir: Path) -> dict[str, Any]:
+def prepare_benchmark(
+    dataset: str, raw_dir: Path, output_dir: Path, *, workers: int = 1
+) -> dict[str, Any]:
+    validate_workers(workers)
     adapters = {"webqsp": _webqsp_rows, "cwq": _cwq_rows, "grailqa": _grailqa_rows}
     if dataset not in adapters:
         raise ValueError(f"unsupported benchmark: {dataset}")
     examples: list[BenchmarkExample] = []
     sources: list[dict[str, Any]] = []
-    for path, payload in _load_json_files(raw_dir):
+    for path, payload in _load_json_files(raw_dir, workers=workers):
         split = _split_from_name(path)
-        parsed = adapters[dataset](payload, split)
+        parsed = adapters[dataset](payload, split, workers)
         examples.extend(parsed)
         sources.append({"path": path.name, "sha256": file_hash(path), "rows": len(parsed)})
     if not examples:
@@ -195,11 +224,12 @@ def prepare_benchmark(dataset: str, raw_dir: Path, output_dir: Path) -> dict[str
         "splits": {split: len(rows) for split, rows in by_split.items()},
         "heldout_topic_entities": len(heldout),
         "sources": sources,
+        "workers": workers,
     }
     write_json(output_dir / "metrics.json", summary)
     write_manifest(
         output_dir,
-        {"command": "data prepare", "dataset": dataset},
+        {"command": "data prepare", "dataset": dataset, "workers": workers},
         ["*/examples.parquet", "heldout_topic_entities.json", "metrics.json"],
     )
     return summary

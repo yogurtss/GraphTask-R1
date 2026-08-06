@@ -34,6 +34,14 @@ from graphtask_r1.training.verl_dataset import export_role_dataset
 from graphtask_r1.utils import ProgressLogger, read_records, write_records
 
 LOGGER = logging.getLogger("graphtask_r1.cli")
+DEFAULT_DATA_WORKERS = min(8, os.cpu_count() or 1)
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -87,6 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--raw-dir", type=Path, required=True)
     prepare.add_argument("--output-dir", type=Path, required=True)
     prepare.add_argument("--splits", default="train,val")
+    prepare.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=DEFAULT_DATA_WORKERS,
+        help=f"parallel record workers (default: {DEFAULT_DATA_WORKERS})",
+    )
     _add_common(prepare)
 
     audit = data_actions.add_parser("audit")
@@ -256,9 +270,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 splits=tuple(value.strip() for value in args.splits.split(",")),
                 limit=args.limit,
                 seed=args.seed,
+                workers=args.workers,
             )
         else:
-            result = prepare_benchmark(args.dataset, args.raw_dir, args.output_dir)
+            result = prepare_benchmark(
+                args.dataset, args.raw_dir, args.output_dir, workers=args.workers
+            )
     elif args.group == "data" and args.action == "audit":
         result = audit_records(args.input, kind=args.kind)
     elif args.group == "data" and args.action == "export-verl":

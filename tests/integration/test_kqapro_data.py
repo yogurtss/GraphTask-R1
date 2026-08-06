@@ -81,6 +81,21 @@ def test_kqapro_prepare_executes_and_replays(
     assert any('phase="completed"' in value and 'accepted=1' in value for value in messages)
 
 
+def test_kqapro_parallel_output_matches_serial_output(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    serial_dir = tmp_path / "serial"
+    parallel_dir = tmp_path / "parallel"
+
+    prepare_kqapro(raw_dir, serial_dir, splits=("train",), seed=7, workers=1)
+    prepare_kqapro(raw_dir, parallel_dir, splits=("train",), seed=7, workers=3)
+
+    for name in ("tasks.parquet", "traces.parquet", "rejections.parquet"):
+        assert read_records(serial_dir / "train" / name) == read_records(
+            parallel_dir / "train" / name
+        )
+
+
 def test_mapper_rejects_non_core_kopl(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_fixture(raw_dir)
