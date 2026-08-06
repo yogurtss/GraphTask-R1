@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Protocol, runtime_checkable
 
 from graphtask_r1.envs import SolverEnv
 from graphtask_r1.graph import GraphBackend
@@ -19,6 +20,11 @@ from graphtask_r1.schema import (
     Trajectory,
     Union,
 )
+
+
+@runtime_checkable
+class _BulkEntityInfoBackend(Protocol):
+    def entity_infos(self, entity_ids: list[str]) -> tuple[object, ...]: ...
 
 
 def _trace_id(task_id: str, index: int) -> str:
@@ -56,6 +62,8 @@ def _compile_searches(
         return backend.execute_program(program)
     if isinstance(program, FilterType):
         inputs = _compile_searches(program.input, backend, task_id, calls)
+        if isinstance(backend, _BulkEntityInfoBackend):
+            backend.entity_infos(list(inputs.entity_ids()))
         for entity_id in inputs.entity_ids():
             calls.append(
                 ToolCall(

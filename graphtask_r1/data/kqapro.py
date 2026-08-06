@@ -77,7 +77,9 @@ def _ancestors(concepts: dict[str, dict[str, Any]], direct: list[str]) -> set[st
     return found
 
 
-def build_kqapro_database(kb_path: Path, output_path: Path) -> dict[str, Any]:
+def build_kqapro_database(
+    kb_path: Path, output_path: Path, *, source_hash: str | None = None
+) -> dict[str, Any]:
     """Convert KQA Pro kb.json into an indexed, immutable-after-build SQLite snapshot."""
     payload = json.loads(kb_path.read_text())
     concepts: dict[str, dict[str, Any]] = payload["concepts"]
@@ -171,7 +173,7 @@ def build_kqapro_database(kb_path: Path, output_path: Path) -> dict[str, Any]:
     metadata = {
         "snapshot_id": "kqapro-v1",
         "converter_version": CONVERTER_VERSION,
-        "source_hash": file_hash(kb_path),
+        "source_hash": source_hash if source_hash is not None else file_hash(kb_path),
         "entities": len(entities),
         "concepts": len(concepts),
     }
@@ -185,6 +187,20 @@ def build_kqapro_database(kb_path: Path, output_path: Path) -> dict[str, Any]:
     temporary.replace(output_path)
     progress.finish(completed, relations=len(relation_ids), output=str(output_path))
     return metadata
+
+
+def _existing_kqapro_database_metadata(database_path: Path) -> dict[str, Any] | None:
+    if not database_path.exists():
+        return None
+    try:
+        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        try:
+            rows = connection.execute("SELECT key, value FROM metadata").fetchall()
+        finally:
+            connection.close()
+        return {str(key): json.loads(value) for key, value in rows}
+    except (sqlite3.DatabaseError, TypeError, ValueError):
+        return None
 
 
 class KoPLMapper:
@@ -307,11 +323,11 @@ def _topic_ids(program: Program) -> tuple[str, ...]:
 
 def _answer_matches_source(answer: str, derived: AnswerSet, backend: SQLiteGraphBackend) -> bool:
     candidates = {str(value) for value in derived.values()}
-    candidates.update(backend.entity_info(value).label for value in derived.entity_ids())
+    candidates.update(info.label for info in backend.entity_infos(derived.entity_ids()))
     return answer.strip() in candidates
 
 
-def _convert_kqapro_row(
+def _convert_kqapro_row_uncached(
     item: tuple[int, dict[str, Any]],
     *,
     mapper: KoPLMapper,
@@ -340,7 +356,7 @@ def _convert_kqapro_row(
         signature = canonical_signature(program)
         source_id = str(row.get("id", index))
         task_id = f"gt_kqapro_{split}_{stable_hash([source_id, signature])[:16]}"
-        witnesses = backend.extract_witness(program, answers)
+        witness_facts = backend.materialize(program).triples
         task = TaskCertificate(
             task_id=task_id,
             source="kqapro",
@@ -348,16 +364,11 @@ def _convert_kqapro_row(
             split=split,
             graph_snapshot="kqapro-v1",
             question=str(row["question"]),
-            topic_entities=tuple(backend.entity_info(value) for value in _topic_ids(program)),
+            topic_entities=backend.entity_infos(_topic_ids(program)),
             program=program,
             sparql=compile_sparql(program),
             gold_answers=answers,
-            witness_facts=tuple(
-                sorted(
-                    {fact for witness in witnesses for fact in witness.facts},
-                    key=lambda fact: fact.sort_key(),
-                )
-            ),
+            witness_facts=witness_facts,
             program_signature=signature,
             program_cost=program_cost(program),
             operator_tags=operator_tags(program),
@@ -394,6 +405,28 @@ def _convert_kqapro_row(
                 "reason_code": reason,
                 "detail": str(exc),
             },
+        )
+
+
+def _convert_kqapro_row(
+    item: tuple[int, dict[str, Any]],
+    *,
+    mapper: KoPLMapper,
+    backend: SQLiteGraphBackend,
+    split: str,
+    source_path: Path,
+    source_hash: str,
+    seed: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    with backend.query_cache():
+        return _convert_kqapro_row_uncached(
+            item,
+            mapper=mapper,
+            backend=backend,
+            split=split,
+            source_path=source_path,
+            source_hash=source_hash,
+            seed=seed,
         )
 
 
@@ -461,11 +494,30 @@ def prepare_kqapro(
     limit: int | None = None,
     seed: int = 42,
     workers: int = 1,
+    rebuild_graph: bool = False,
 ) -> dict[str, Any]:
     validate_workers(workers)
     kb_path = raw_dir / "kb.json"
     database_path = output_dir / "graph.sqlite"
-    build_metadata = build_kqapro_database(kb_path, database_path)
+    kb_source_hash = file_hash(kb_path)
+    if kb_source_hash is None:
+        raise FileNotFoundError(kb_path)
+    existing_metadata = _existing_kqapro_database_metadata(database_path)
+    can_reuse_graph = (
+        not rebuild_graph
+        and existing_metadata is not None
+        and existing_metadata.get("source_hash") == kb_source_hash
+        and existing_metadata.get("converter_version") == CONVERTER_VERSION
+        and existing_metadata.get("snapshot_id") == "kqapro-v1"
+    )
+    if can_reuse_graph:
+        assert existing_metadata is not None
+        build_metadata = {**existing_metadata, "reused": True}
+    else:
+        build_metadata = {
+            **build_kqapro_database(kb_path, database_path, source_hash=kb_source_hash),
+            "reused": False,
+        }
     backend = SQLiteGraphBackend(database_path)
     mapper = KoPLMapper(backend)
     total_tasks = 0

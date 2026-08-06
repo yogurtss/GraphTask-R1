@@ -34,7 +34,7 @@ from graphtask_r1.training.verl_dataset import export_role_dataset
 from graphtask_r1.utils import ProgressLogger, read_records, write_records
 
 LOGGER = logging.getLogger("graphtask_r1.cli")
-DEFAULT_DATA_WORKERS = min(8, os.cpu_count() or 1)
+DEFAULT_DATA_WORKERS = 1
 
 
 def _positive_int(value: str) -> int:
@@ -95,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--raw-dir", type=Path, required=True)
     prepare.add_argument("--output-dir", type=Path, required=True)
     prepare.add_argument("--splits", default="train,val")
+    prepare.add_argument(
+        "--rebuild-graph",
+        action="store_true",
+        help="rebuild graph.sqlite even when kb.json and converter metadata match",
+    )
     prepare.add_argument(
         "--workers",
         type=_positive_int,
@@ -271,6 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=args.limit,
                 seed=args.seed,
                 workers=args.workers,
+                rebuild_graph=args.rebuild_graph,
             )
         else:
             result = prepare_benchmark(

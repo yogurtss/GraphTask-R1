@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 
 from graphtask_r1.data.kqapro import KoPLConversionError, KoPLMapper, prepare_kqapro
+from graphtask_r1.generation import compile_trace
 from graphtask_r1.graph import SQLiteGraphBackend
 from graphtask_r1.schema import (
+    AllEntities,
     Entity,
     FilterLiteral,
     FilterType,
@@ -105,6 +107,22 @@ def test_kqapro_parallel_output_matches_serial_output(tmp_path: Path) -> None:
         )
 
 
+def test_kqapro_reuses_matching_graph_snapshot(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+
+    first = prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    second = prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    rebuilt = prepare_kqapro(
+        raw_dir, output_dir, splits=("train",), limit=0, rebuild_graph=True
+    )
+
+    assert first["build"]["reused"] is False
+    assert second["build"]["reused"] is True
+    assert rebuilt["build"]["reused"] is False
+
+
 def test_mapper_rejects_non_core_kopl(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_fixture(raw_dir)
@@ -149,6 +167,82 @@ def test_sqlite_backend_batches_queries_below_runtime_variable_limit(tmp_path: P
                 value=LiteralValue(value=18, datatype="quantity", unit="year"),
             )
         ).values() == ("e_bob",)
+        infos = backend.entity_infos(candidate_ids)
+        assert infos[0].label == "Alice"
+        assert infos[1].label == "Bob"
+    finally:
+        backend.close()
+
+
+def test_sqlite_task_cache_reuses_program_and_entity_queries(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    statements: list[str] = []
+    backend.connection.set_trace_callback(statements.append)
+    program = parse_program(
+        {
+            "op": "hop",
+            "input": {"op": "entity", "entity_id": "e_alice"},
+            "relation": "friend",
+        }
+    )
+    try:
+        with backend.query_cache():
+            expected = backend.execute_program(program)
+            backend.entity_info("e_bob")
+            first_query_count = len(statements)
+            assert backend.execute_program(program) == expected
+            backend.entity_info("e_bob")
+            assert len(statements) == first_query_count
+        backend.execute_program(program)
+        assert len(statements) > first_query_count
+    finally:
+        backend.close()
+
+
+def test_sqlite_pushes_find_all_filters_into_single_queries(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    statements: list[str] = []
+    backend.connection.set_trace_callback(statements.append)
+    all_entities = AllEntities(max_results=1_000_000)
+    try:
+        assert backend.execute_program(
+            FilterType(input=all_entities, type_id="c_person")
+        ).values() == ("e_alice", "e_bob")
+        assert backend.execute_program(
+            FilterLiteral(
+                input=all_entities,
+                relation="age",
+                comparator="ge",
+                value=LiteralValue(value=18, datatype="quantity", unit="year"),
+            )
+        ).values() == ("e_bob",)
+        assert len(statements) == 2
+    finally:
+        backend.close()
+
+
+def test_trace_bulk_prefetches_filter_candidates(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    statements: list[str] = []
+    backend.connection.set_trace_callback(statements.append)
+    program = FilterType(input=AllEntities(max_results=100), type_id="c_person")
+    try:
+        with backend.query_cache():
+            trace = compile_trace("bulk-prefetch", "Which people?", program, backend, seed=7)
+        assert trace.final_answers.values() == ("e_alice", "e_bob")
+        assert len(statements) == 3
     finally:
         backend.close()
 

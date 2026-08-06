@@ -7,11 +7,13 @@ Virtuoso 数据库或 token 提交到 Git。
 耗时以及 accepted/rejected 等计数；最终 JSON 仍单独写到 stdout。需要安静运行时，将全局参数放在
 命令组之前：`python -m graphtask_r1.cli --log-level WARNING data prepare ...`。
 
-`data prepare` 的逐记录转换默认并发执行，worker 数为 `min(8, CPU 核数)`。服务器上可用
-`--workers N` 调整；内存或磁盘 I/O 紧张时降低到 2–4，排查并发问题时使用 `--workers 1`。
+`data prepare` 支持逐记录并发，但默认使用 1 个 worker。多个线程会竞争同一 SQLite 文件的
+磁盘页缓存，而且 Python 侧的校验和序列化受 GIL 影响，实际经常比串行更慢。服务器上应先用
+相同的 `--limit` 比较，再按实测设置 `--workers N`；不建议直接按 CPU 核数配置。
 KQA 的每个 worker 使用独立的只读 SQLite 连接，结果仍按原始 index 排序，因此相同输入、seed
 与版本会产生相同任务、trace 和 rejection 顺序。`kb.json -> graph.sqlite` 是单写者构建阶段，
-不会并发写库。
+不会并发写库。若现有 `graph.sqlite` 的源文件 hash、转换器版本和 snapshot 均匹配，prepare 会
+直接复用；需要强制重建时添加 `--rebuild-graph`。
 
 ## 1. 目录和不可变性
 
@@ -69,7 +71,7 @@ data/raw/kqa_pro/test.json
 python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
   --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train,val --limit 100 --seed 42 --workers 4
+  --splits train,val --limit 100 --seed 42 --workers 1
 ```
 
 确认无系统性错误后，删除这个临时输出目录并运行全量转换：
@@ -78,7 +80,7 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
   --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train,val --seed 42 --workers 8
+  --splits train,val --seed 42 --workers 1
 ```
 
 转换器执行以下步骤：
@@ -145,13 +147,13 @@ python -m graphtask_r1.cli graph preflight --snapshot freebase-v1 --limit 5
 
 ```bash
 python -m graphtask_r1.cli data prepare --dataset webqsp \
-  --raw-dir data/raw/webqsp --output-dir data/processed/webqsp --workers 8
+  --raw-dir data/raw/webqsp --output-dir data/processed/webqsp --workers 1
 
 python -m graphtask_r1.cli data prepare --dataset cwq \
-  --raw-dir data/raw/complexwebquestions --output-dir data/processed/cwq --workers 8
+  --raw-dir data/raw/complexwebquestions --output-dir data/processed/cwq --workers 1
 
 python -m graphtask_r1.cli data prepare --dataset grailqa \
-  --raw-dir data/raw/grailqa --output-dir data/processed/grailqa --workers 8
+  --raw-dir data/raw/grailqa --output-dir data/processed/grailqa --workers 1
 ```
 
 适配器保留原始 SPARQL/逻辑形式，统一 gold entity ID、问题、split 和 topic entities。主评测

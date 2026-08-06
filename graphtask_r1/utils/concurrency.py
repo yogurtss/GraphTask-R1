@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import suppress
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import TypeVar
 
 _T = TypeVar("_T")
@@ -27,13 +25,30 @@ def ordered_parallel_map(
         return
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="graphtask-data") as executor:
         iterator = iter(values)
-        pending: deque[Future[_R]] = deque()
-        for _ in range(workers * 2):
+        pending: dict[Future[_R], int] = {}
+        ready: dict[int, _R] = {}
+        submitted = 0
+        next_result = 0
+
+        def submit_one() -> bool:
+            nonlocal submitted
             try:
-                pending.append(executor.submit(function, next(iterator)))
+                value = next(iterator)
             except StopIteration:
+                return False
+            pending[executor.submit(function, value)] = submitted
+            submitted += 1
+            return True
+
+        for _ in range(workers * 2):
+            if not submit_one():
                 break
         while pending:
-            yield pending.popleft().result()
-            with suppress(StopIteration):
-                pending.append(executor.submit(function, next(iterator)))
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                index = pending.pop(future)
+                ready[index] = future.result()
+                submit_one()
+            while next_result in ready:
+                yield ready.pop(next_result)
+                next_result += 1

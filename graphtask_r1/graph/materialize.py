@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from graphtask_r1.schema import (
     AllEntities,
     Count,
     Entity,
+    EntityInfo,
     FilterLiteral,
     FilterType,
     GraphSlice,
@@ -18,6 +19,11 @@ from graphtask_r1.schema import (
 
 if TYPE_CHECKING:
     from graphtask_r1.graph.base import GraphBackend
+
+
+@runtime_checkable
+class _BulkEntityInfoBackend(Protocol):
+    def entity_infos(self, entity_ids: list[str]) -> tuple[EntityInfo, ...]: ...
 
 
 def materialize_program(
@@ -116,10 +122,14 @@ def materialize_program(
     selected_nodes = sorted(nodes)[:max_nodes]
     selected_facts = tuple(sorted(facts, key=Triple.sort_key))[:max_edges]
     relations = sorted({fact.relation for fact in selected_facts})
+    if isinstance(backend, _BulkEntityInfoBackend):
+        entities = backend.entity_infos(selected_nodes)
+    else:
+        entities = tuple(backend.entity_info(entity_id) for entity_id in selected_nodes)
     return GraphSlice(
         snapshot_id=snapshot_id,
         triples=selected_facts,
-        entities=tuple(backend.entity_info(entity_id) for entity_id in selected_nodes),
+        entities=entities,
         relations=tuple(backend.relation_info(relation_id) for relation_id in relations),
         complete=not truncated,
         truncated=truncated,
