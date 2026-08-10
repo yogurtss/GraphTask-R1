@@ -220,6 +220,7 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
         ) from exc
     env_keys = {
         "model_path": "MODEL_PATH",
+        "model_type": "MODEL_TYPE",
         "train_data": "TRAIN_DATA",
         "val_data": "VAL_DATA",
         "output_dir": "OUTPUT_DIR",

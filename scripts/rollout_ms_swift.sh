@@ -2,6 +2,7 @@
 set -euo pipefail
 
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
+: "${MODEL_TYPE:=qwen3}"
 : "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift SFT checkpoint}"
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,6 +25,7 @@ export CUDA_VISIBLE_DEVICES="${ROLLOUT_CUDA_VISIBLE_DEVICES:-0}"
 
 swift rollout \
   --model "$MODEL_PATH" \
+  --model_type "$MODEL_TYPE" \
   --adapters "$LORA_ADAPTER_PATH" \
   --external_plugins "$PROJECT_ROOT/graphtask_r1/training/ms_swift_plugin.py" \
   --agent_template hermes \

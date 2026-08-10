@@ -40,6 +40,7 @@ data/verl/kqapro_solver_rl_val.parquet
 export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
 export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/ms-swift-sft-qwen3-4b-cu124
+export MODEL_TYPE=qwen3
 export NUM_GPUS=4
 
 python -m graphtask_r1.cli train sft \

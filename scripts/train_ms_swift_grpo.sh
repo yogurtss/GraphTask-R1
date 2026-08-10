@@ -2,6 +2,7 @@
 set -euo pipefail
 
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
+: "${MODEL_TYPE:=qwen3}"
 : "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift SFT checkpoint}"
 : "${TRAIN_DATA:?Set TRAIN_DATA to the existing kqapro_solver_rl.parquet}"
 : "${VAL_DATA:=$TRAIN_DATA}"
@@ -33,6 +34,7 @@ NUM_GPUS="${NUM_GPUS:-3}"
 NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --rlhf_type grpo \
   --model "$MODEL_PATH" \
+  --model_type "$MODEL_TYPE" \
   --adapters "$LORA_ADAPTER_PATH" \
   --train_type lora \
   --dataset graphtask-train \

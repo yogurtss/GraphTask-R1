@@ -78,6 +78,7 @@ def test_ms_swift_profile_selects_ms_swift_launcher(tmp_path: Path) -> None:
             [
                 "training_backend: ms_swift",
                 "model_path: model",
+                "model_type: qwen3",
                 "train_data: train.parquet",
                 "val_data: val.parquet",
             ]
@@ -89,6 +90,7 @@ def test_ms_swift_profile_selects_ms_swift_launcher(tmp_path: Path) -> None:
 
     assert result["training_backend"] == "ms_swift"
     assert result["command"] == ["bash", "scripts/train_ms_swift_sft.sh"]
+    assert result["environment"]["MODEL_TYPE"] == "qwen3"
 
 
 def test_unknown_training_backend_is_rejected(tmp_path: Path) -> None:

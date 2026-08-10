@@ -75,6 +75,7 @@ python -m pip check
 
 ```bash
 export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+export MODEL_TYPE=qwen3
 export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
 export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/ms-swift-sft-qwen3-4b-cu124
@@ -126,6 +127,12 @@ smoke test。SFT 路径不受这项 vLLM 边界影响。
 确认使用的是 `qwen3_4b_sft_ms_swift_cuda124.yaml`，且日志显示导入
 `graphtask_r1/training/ms_swift_plugin.py`。该插件会递归规范化 ndarray；不要重新生成 KQA 或
 重新导出 Parquet。
+
+### `Please explicitly pass the model_type`
+
+确认使用仓库内最新脚本。SFT、rollout 和 GRPO 脚本都会显式传入 `--model_type qwen3`，也允许
+使用 `MODEL_TYPE` 环境变量覆盖。该错误来自 Qwen3 architecture 同时匹配普通模型和 embedding
+模型，不涉及数据文件。
 
 ### CUDA OOM
 

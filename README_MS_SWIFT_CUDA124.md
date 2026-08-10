@@ -88,6 +88,7 @@ conda activate graphtask-swift-cu124
 cd /path/to/GraphTask
 
 export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+export MODEL_TYPE=qwen3
 export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
 export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/ms-swift-sft-qwen3-4b-cu124
@@ -134,6 +135,10 @@ python -m graphtask_r1.cli train sft \
 因此遇到 `Object of type ndarray is not JSON serializable` 时，应检查是否使用了上述 config，
 不要重新生成 Parquet。
 
+训练脚本默认显式传入 `--model_type qwen3`。这是必要设置：Qwen3 的 Transformers
+architecture 同时可能匹配 `qwen3` 和 `qwen3_emb`，ms-swift 3.6.4 无法始终自动判断。使用自定义
+模型目录时可以通过 `MODEL_TYPE` 覆盖，但 Qwen3-4B-Instruct 应保持 `qwen3`。
+
 ## 4. 找到 SFT adapter
 
 ```bash
@@ -178,6 +183,7 @@ cd /path/to/GraphTask
 
 export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
 export MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
+export MODEL_TYPE=qwen3
 export LORA_ADAPTER_PATH=/absolute/path/to/checkpoint-<最后一步>
 export ROLLOUT_CUDA_VISIBLE_DEVICES=0
 export VLLM_SERVER_PORT=8000
@@ -192,6 +198,7 @@ conda activate graphtask-swift-cu124
 cd /path/to/GraphTask
 
 export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+export MODEL_TYPE=qwen3
 export MS_SWIFT_SFT_ADAPTER=/absolute/path/to/checkpoint-<最后一步>
 export SOLVER_RL_TRAIN_DATA=$PWD/data/verl/kqapro_solver_rl.parquet
 export SOLVER_RL_VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
@@ -251,6 +258,11 @@ export EPOCHS=1
 
 确认 dry-run 选择的是 `scripts/train_ms_swift_sft.sh`，并检查日志是否成功导入
 `graphtask_r1/training/ms_swift_plugin.py`。不要重新导出数据。
+
+### `Please explicitly pass the model_type`
+
+更新代码后重新运行原命令。三个 ms-swift 脚本现在都默认传入 `--model_type qwen3`；也可以在
+启动前显式设置 `export MODEL_TYPE=qwen3`。这个错误与 Parquet 无关，不要重新生成数据。
 
 ### 找不到 Parquet
 

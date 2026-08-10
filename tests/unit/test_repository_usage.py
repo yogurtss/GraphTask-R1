@@ -48,6 +48,8 @@ def test_ms_swift_sft_reads_existing_parquet_through_runtime_plugin() -> None:
     script = (PROJECT_ROOT / "scripts/train_ms_swift_sft.sh").read_text()
     assert "GRAPHTASK_MS_SWIFT_TRAIN_DATA" in script
     assert "graphtask_r1/training/ms_swift_plugin.py" in script
+    assert ': "${MODEL_TYPE:=qwen3}"' in script
+    assert '--model_type "$MODEL_TYPE"' in script
     assert "data export-sft" not in script
     assert "data prepare" not in script
 
@@ -57,6 +59,8 @@ def test_ms_swift_grpo_keeps_rollout_and_trainer_gpus_separate() -> None:
     trainer = (PROJECT_ROOT / "scripts/train_ms_swift_grpo.sh").read_text()
     assert 'ROLLOUT_CUDA_VISIBLE_DEVICES:-0' in rollout
     assert 'TRAIN_CUDA_VISIBLE_DEVICES:-1,2,3' in trainer
+    assert '--model_type "$MODEL_TYPE"' in rollout
+    assert '--model_type "$MODEL_TYPE"' in trainer
     assert "multi_turn_scheduler graphtask_solver" in trainer
     assert "multi_turn_scheduler graphtask_solver" in rollout
 

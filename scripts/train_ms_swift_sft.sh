@@ -2,6 +2,7 @@
 set -euo pipefail
 
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
+: "${MODEL_TYPE:=qwen3}"
 : "${TRAIN_DATA:?Set TRAIN_DATA to the existing kqapro_sft_train.parquet}"
 : "${VAL_DATA:=$TRAIN_DATA}"
 : "${OUTPUT_DIR:=outputs/ms-swift-sft-qwen3-4b-cu124}"
@@ -26,6 +27,7 @@ NUM_GPUS="${NUM_GPUS:-4}"
 
 NPROC_PER_NODE="$NUM_GPUS" swift sft \
   --model "$MODEL_PATH" \
+  --model_type "$MODEL_TYPE" \
   --train_type lora \
   --dataset graphtask-train \
   --val_dataset graphtask-val \
