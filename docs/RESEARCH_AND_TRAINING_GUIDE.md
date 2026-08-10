@@ -80,7 +80,9 @@ offload。不要先降低图验证强度。
 
 ## 4. 服务器环境
 
-verl 固定为 `v0.7.1` / `bec9ef74768dd201881cd4e54cd0385e87caae27`：
+默认 CUDA 12.8 profile 将 verl 固定为 `v0.7.1` /
+`bec9ef74768dd201881cd4e54cd0385e87caae27`。最高只支持 CUDA 12.4 的服务器必须使用
+[独立 CUDA 12.4 兼容环境](CUDA_12_4_ENVIRONMENT.md)，不要在默认环境中原地降级 Torch：
 
 PyTorch、verl、SGLang、Ray、FlashAttention 与 CUDA 栈由服务器环境独立安装和维护。verl
 源码可位于服务器任意位置，不需要放入本仓库的 `third_party/`；当前 Python 环境能够

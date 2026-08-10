@@ -1,15 +1,21 @@
 # Qwen3-4B + verl 训练手册
 
-项目固定 verl `v0.7.1`，commit：
-`bec9ef74768dd201881cd4e54cd0385e87caae27`。默认模型是
-`Qwen/Qwen3-4B-Instruct-2507`，非 thinking 模式，共享 LoRA rank/alpha 为 32/64。
+默认训练 profile 固定 verl `v0.7.1`，commit：
+`bec9ef74768dd201881cd4e54cd0385e87caae27`。该 profile 需要 CUDA 12.8。服务器最高只支持
+CUDA 12.4 时，不要安装默认 profile；改用独立的
+[CUDA 12.4 环境](CUDA_12_4_ENVIRONMENT.md)，其核心版本为 Python 3.10、Torch 2.6.0+cu124、
+SGLang 0.4.6.post5、vLLM 0.8.5.post1 和 verl v0.5.0。
+
+默认模型是 `Qwen/Qwen3-4B-Instruct-2507`，非 thinking 模式，共享 LoRA rank/alpha 为
+32/64。
 
 ## 1. 环境
 
 PyTorch、verl、SGLang、Ray、FlashAttention 和 CUDA 栈均由服务器环境独立管理，本仓库不会
 安装或升级它们。verl 的源码目录可以放在服务器任意位置，不需要复制或 clone 到本仓库的
-`third_party/` 下；只需确保当前 Python 环境可以 `import verl`。项目验证版本为 verl `v0.7.1`
-及上述 commit。
+`third_party/` 下；只需确保当前 Python 环境可以 `import verl`。默认 GPU profile 的验证版本为
+verl `v0.7.1` 及上述 commit。CUDA 12.4 profile 是隔离的旧版兼容环境，SFT 入口和 LoRA
+checkpoint 衔接方式不同；完整限制见专门 guide，不能只替换 Torch 版本。
 
 clone GraphTask-R1 后进入仓库根目录。服务器若还缺少本项目的轻量运行依赖，再执行：
 

@@ -158,12 +158,14 @@ gold program and answer.
 
 ## Environment
 
-- Python 3.11 or newer.
 - Run the repository directly from its root; do not install it with `pip install -e .`.
 - Install lightweight project dependencies with `python -m pip install -r requirements.txt`.
 - Install PyTorch, CUDA, SGLang, FlashAttention, and verl separately for the server's GPU stack.
-- The validated verl revision is `v0.7.1` at commit
+- The default environment uses Python 3.12, CUDA 12.8, and verl `v0.7.1` at commit
   `bec9ef74768dd201881cd4e54cd0385e87caae27`.
+- A server capped at CUDA 12.4 must use the isolated legacy stack documented in
+  [CUDA 12.4 environment](docs/CUDA_12_4_ENVIRONMENT.md): Python 3.10, Torch 2.6.0+cu124,
+  SGLang 0.4.6.post5, vLLM 0.8.5.post1, and verl v0.5.0. Do not install the v0.7.1 stack there.
 - The default model is `Qwen/Qwen3-4B-Instruct-2507`, non-thinking mode, with shared LoRA rank 32
   and alpha 64.
 
@@ -184,6 +186,7 @@ make scripted-selfplay
 ## Further documentation
 
 - [Training details](docs/TRAINING.md)
+- [CUDA 12.4 environment](docs/CUDA_12_4_ENVIRONMENT.md)
 - [KQA Pro data preparation and audits](docs/DATA_PREPARATION.md)
 - [Research and experiment design](docs/RESEARCH_AND_TRAINING_GUIDE.md)
 - [Tool and GraphScript interaction modes](docs/INTERACTION_MODES.md)
