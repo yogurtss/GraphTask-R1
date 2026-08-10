@@ -15,11 +15,22 @@ from graphtask_r1.schema import parse_program
 
 try:
     from verl.tools.base_tool import BaseTool
-    from verl.tools.schemas import ToolResponse
 except ImportError as exc:  # pragma: no cover - exercised on the training server
     raise ImportError(
         "Install the pinned verl checkout before loading graphtask verl tools"
     ) from exc
+
+try:
+    from verl.tools.schemas import ToolResponse as _ToolResponse
+except ImportError:  # verl v0.5 returns plain strings from tools
+    _ToolResponse = None  # type: ignore[assignment,misc]
+
+
+def _tool_response(text: str) -> Any:
+    """Return the response shape expected by the installed verl tool API."""
+    if _ToolResponse is None:
+        return text
+    return _ToolResponse(text=text)
 
 
 class _SessionTool(BaseTool):  # type: ignore[misc]
@@ -29,8 +40,9 @@ class _SessionTool(BaseTool):  # type: ignore[misc]
         super().__init__(config, tool_schema)
         self._sessions: dict[str, dict[str, Any]] = {}
 
-    async def create(self, instance_id: str | None = None, **kwargs: Any) -> tuple[str, Any]:
-        instance_id, response = await super().create(instance_id)
+    async def create(self, instance_id: str | None = None, **kwargs: Any) -> Any:
+        created = await super().create(instance_id)
+        resolved_instance_id = str(created[0] if isinstance(created, tuple) else created)
         role = str(kwargs.get("role", ""))
         if role not in self.allowed_roles:
             raise ValueError(f"tool {self.name} is not available to role {role!r}")
@@ -38,7 +50,7 @@ class _SessionTool(BaseTool):  # type: ignore[misc]
         topic_entity_ids = frozenset(
             str(value) for value in kwargs.get("topic_entity_ids", [])
         )
-        self._sessions[instance_id] = {
+        self._sessions[resolved_instance_id] = {
             "role": role,
             "backend": backend_from_snapshot(snapshot),
             "calls": 0,
@@ -54,7 +66,7 @@ class _SessionTool(BaseTool):  # type: ignore[misc]
             "topic_entity_ids": topic_entity_ids,
             "visible_entities": set(topic_entity_ids),
         }
-        return instance_id, response
+        return created
 
     async def release(self, instance_id: str, **kwargs: Any) -> None:
         del kwargs
@@ -122,7 +134,7 @@ class GraphSearchTool(_SessionTool):
             if int(session["edge_visits"]) > search_budget:
                 raise ValueError("graph-search edge budget exceeded")
         payload = [triple.model_dump(mode="json") for triple in triples]
-        return ToolResponse(text=json.dumps(payload, ensure_ascii=False)), 0.0, {
+        return _tool_response(json.dumps(payload, ensure_ascii=False)), 0.0, {
             "graph_calls": 1.0,
             "edge_visits": float(len(triples)),
         }
@@ -137,7 +149,7 @@ class InspectEntityTool(_SessionTool):
         del kwargs
         session = self._session(instance_id)
         info = session["backend"].entity_info(str(parameters["entity_id"]))
-        return ToolResponse(text=info.model_dump_json()), 0.0, {"graph_calls": 1.0}
+        return _tool_response(info.model_dump_json()), 0.0, {"graph_calls": 1.0}
 
 
 class ExecuteProgramTool(_SessionTool):
@@ -182,7 +194,7 @@ class ExecuteProgramTool(_SessionTool):
             if answers.answers and answers.answers[0].kind == "count"
             else "entity_set",
         }
-        return ToolResponse(text=json.dumps(response)), 0.0, usage
+        return _tool_response(json.dumps(response)), 0.0, usage
 
 
 def _program_seed(program: Any) -> frozenset[str]:

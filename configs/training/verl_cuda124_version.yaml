@@ -1,0 +1,8 @@
+repository: https://github.com/verl-project/verl.git
+tag: v0.5.0
+commit: 8fdc4d3f202f41461f4de9f42a637228e342668b
+python: "3.10"
+cuda: "12.4"
+torch: 2.6.0+cu124
+rollout: sglang-0.4.6.post5
+model: Qwen/Qwen3-4B-Instruct-2507

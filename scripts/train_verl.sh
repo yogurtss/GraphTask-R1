@@ -11,6 +11,25 @@ export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 NUM_GPUS="${NUM_GPUS:-4}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-graphtask-r1-shared-lora}"
 : "${OUTPUT_DIR:=outputs/verl/$EXPERIMENT_NAME}"
+VERL_PROFILE="${VERL_PROFILE:-cuda128}"
+case "$VERL_PROFILE" in
+  cuda124)
+    ROLLOUT_MODE="${ROLLOUT_MODE:-sync}"
+    DATA_SEED_ARG="+data.seed=${SEED:-42}"
+    if [[ -n "${LORA_ADAPTER_PATH:-}" ]]; then
+      echo "verl v0.5 cannot load LORA_ADAPTER_PATH; merge the SFT checkpoint and set MODEL_PATH" >&2
+      exit 2
+    fi
+    ;;
+  cuda128)
+    ROLLOUT_MODE="${ROLLOUT_MODE:-async}"
+    DATA_SEED_ARG="data.seed=${SEED:-42}"
+    ;;
+  *)
+    echo "Unsupported VERL_PROFILE=$VERL_PROFILE (expected cuda124 or cuda128)" >&2
+    exit 2
+    ;;
+esac
 MODEL_ARGS=()
 if [[ -n "${LORA_ADAPTER_PATH:-}" ]]; then
   MODEL_ARGS+=("actor_rollout_ref.model.lora_adapter_path=$LORA_ADAPTER_PATH")
@@ -28,6 +47,7 @@ python -m verl.trainer.main_ppo \
   data.truncation=error \
   data.return_raw_chat=true \
   data.shuffle=false \
+  "$DATA_SEED_ARG" \
   actor_rollout_ref.model.path="$MODEL_PATH" \
   actor_rollout_ref.model.lora_rank="${LORA_RANK:-32}" \
   actor_rollout_ref.model.lora_alpha="${LORA_ALPHA:-64}" \
@@ -41,7 +61,7 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.strategy=fsdp2 \
   actor_rollout_ref.ref.strategy=fsdp2 \
   actor_rollout_ref.ref.fsdp_config.param_offload=true \
-  actor_rollout_ref.rollout.mode=async \
+  actor_rollout_ref.rollout.mode="$ROLLOUT_MODE" \
   actor_rollout_ref.rollout.name=sglang \
   actor_rollout_ref.rollout.n="${ROLLOUT_N:-8}" \
   actor_rollout_ref.rollout.tensor_model_parallel_size="${TP_SIZE:-1}" \

@@ -149,21 +149,29 @@ python -m pip check
 vLLM `0.8.5.post1`。如果 `torch.cuda.is_available()` 为 `False`，先修复驱动或容器的 GPU
 透传，不要开始训练。
 
-## 6. 与当前训练脚本的边界
+## 6. 使用仓库内的 CUDA 12.4 profile
 
-- `scripts/train_verl.sh` 使用的 FSDP2、异步 SGLang、多轮工具和 Hermes 配置字段在 verl
-  v0.5.0 中存在，但该组合仍应先用小 batch 和单轮任务做服务器 smoke test。
-- `scripts/train_sft.sh` 面向 verl v0.7.1 的新 SFT 入口；verl v0.5.0 使用旧入口
-  `verl.trainer.fsdp_sft_trainer`，配置键也不同，不能直接复用当前 SFT 脚本。
-- verl v0.5.0 不能直接按当前方式通过 `actor_rollout_ref.model.lora_adapter_path` 接入 SFT
-  adapter。进入 GRPO 前需要先把旧版 SFT checkpoint 导出并合并成 Hugging Face 模型。
-- 因此 CUDA 12.4 是一个明确隔离的兼容 profile，不要把它与
-  `configs/training/verl_version.yaml` 中的默认 v0.7.1 profile 混用，也不要在同一个 Conda
-  环境中来回升级。
+仓库已经为 verl v0.5.0 接入独立训练入口：
 
-完整训练前先验证 verl v0.5.0 自带的 SGLang multi-turn 示例，再验证本项目的
-`--dry-run`、一张 GPU 的小 batch 和一轮 smoke test。CUDA 12.4 profile 尚未在本仓库 GPU CI
-中做端到端验证；文档不会把这一点伪装成已验证结果。
+- `configs/experiments/qwen3_4b_sft_cuda124.yaml` 选择旧版
+  `verl.trainer.fsdp_sft_trainer`、FSDP2、BF16 和 multi-turn messages；
+- `graphtask_r1.training.merge_sft` 将旧版 FSDP SFT checkpoint 导出，并把 LoRA 合并为完整
+  Hugging Face 模型；
+- `configs/experiments/qwen3_4b_solver_grpo_cuda124.yaml` 使用合并模型和同步 SGLang 工具
+  rollout；
+- RL Parquet 同时写入 verl v0.5 和 v0.7 所需的 `tools_kwargs` 位置。
+
+完整命令见仓库根目录 [README](../README.md) 的“Python 3.10 + CUDA 12.4 训练”。不要把
+CUDA 12.4 profile 与 `configs/training/verl_version.yaml` 中的 v0.7.1 profile 混用，也不要在
+同一个 Conda 环境中来回升级。
+
+verl v0.5.0 无法直接通过 `actor_rollout_ref.model.lora_adapter_path` 接入上一阶段 adapter，
+所以 SFT 后必须先运行合并工具。相同原因，当前 CUDA 12.4 profile 暂不支持自动 self-play；
+它支持双角色 SFT 和 Solver-only GRPO。完整训练前先验证 verl v0.5.0 自带的 SGLang
+multi-turn 示例，再验证本项目的 `--dry-run`、小 batch 和一轮 smoke test。
+
+CUDA 12.4 profile 尚未在本仓库 GPU CI 中做端到端验证；当前自动检查覆盖 Python 3.10 语法、
+版本化命令选择、Parquet 工具参数契约以及 LoRA 合并辅助逻辑。
 
 ## 参考
 

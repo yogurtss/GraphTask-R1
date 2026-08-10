@@ -17,7 +17,7 @@ from graphtask_r1.archive import TaskArchive
 from graphtask_r1.schema import TaskCertificate
 from graphtask_r1.training.prompts import role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
-from graphtask_r1.training.verl_dataset import export_role_dataset
+from graphtask_r1.training.verl_dataset import export_role_dataset, tool_kwargs
 from graphtask_r1.utils import file_hash, read_json, read_records, write_json
 
 VERL_COMMIT = "bec9ef74768dd201881cd4e54cd0385e87caae27"
@@ -162,10 +162,15 @@ def _assemble_dataset(
         )
         if config.interaction_mode == "tool":
             row["agent_name"] = "tool_agent"
-            row["tools_kwargs"] = {
-                name: {"create_kwargs": {**extra, "role": "questioner"}}
-                for name in ("graph_search", "inspect_entity", "execute_program")
-            }
+            questioner_tools = tool_kwargs(
+                ("graph_search", "inspect_entity", "execute_program"),
+                extra,
+                role="questioner",
+            )
+            row["tools_kwargs"] = questioner_tools
+            extra["need_tools_kwargs"] = True
+            extra["tools_kwargs"] = questioner_tools
+            row["extra_info"] = extra
         else:
             row.pop("agent_name", None)
             row.pop("tools_kwargs", None)

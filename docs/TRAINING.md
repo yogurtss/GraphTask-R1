@@ -1,10 +1,9 @@
 # Qwen3-4B + verl 训练手册
 
-默认训练 profile 固定 verl `v0.7.1`，commit：
-`bec9ef74768dd201881cd4e54cd0385e87caae27`。该 profile 需要 CUDA 12.8。服务器最高只支持
-CUDA 12.4 时，不要安装默认 profile；改用独立的
-[CUDA 12.4 环境](CUDA_12_4_ENVIRONMENT.md)，其核心版本为 Python 3.10、Torch 2.6.0+cu124、
-SGLang 0.4.6.post5、vLLM 0.8.5.post1 和 verl v0.5.0。
+仓库提供两个隔离 profile：CUDA 12.8 使用 verl `v0.7.1` commit
+`bec9ef74768dd201881cd4e54cd0385e87caae27`；CUDA 12.4 使用 Python 3.10、Torch
+2.6.0+cu124、SGLang 0.4.6.post5、vLLM 0.8.5.post1 和 verl v0.5.0。后者的安装和训练主线见
+[CUDA 12.4 环境](CUDA_12_4_ENVIRONMENT.md)及仓库根目录 [README](../README.md)。
 
 默认模型是 `Qwen/Qwen3-4B-Instruct-2507`，非 thinking 模式，共享 LoRA rank/alpha 为
 32/64。
@@ -14,8 +13,8 @@ SGLang 0.4.6.post5、vLLM 0.8.5.post1 和 verl v0.5.0。
 PyTorch、verl、SGLang、Ray、FlashAttention 和 CUDA 栈均由服务器环境独立管理，本仓库不会
 安装或升级它们。verl 的源码目录可以放在服务器任意位置，不需要复制或 clone 到本仓库的
 `third_party/` 下；只需确保当前 Python 环境可以 `import verl`。默认 GPU profile 的验证版本为
-verl `v0.7.1` 及上述 commit。CUDA 12.4 profile 是隔离的旧版兼容环境，SFT 入口和 LoRA
-checkpoint 衔接方式不同；完整限制见专门 guide，不能只替换 Torch 版本。
+verl `v0.7.1` 及上述 commit。CUDA 12.4 profile 是隔离的旧版兼容环境，仓库会自动选择旧版
+SFT 入口和同步 SGLang，但 SFT checkpoint 必须先合并再交给 GRPO；不能只替换 Torch 版本。
 
 clone GraphTask-R1 后进入仓库根目录。服务器若还缺少本项目的轻量运行依赖，再执行：
 
@@ -77,6 +76,10 @@ python -m graphtask_r1.cli train sft \
   --config configs/experiments/qwen3_4b_sft.yaml
 ```
 
+CUDA 12.4 环境把配置文件替换为
+`configs/experiments/qwen3_4b_sft_cuda124.yaml`。训练完成后按 README 运行
+`python -m graphtask_r1.training.merge_sft`，不能把旧版 LoRA adapter 直接传给 GRPO。
+
 SFT 数据使用 verl `messages` contract。Questioner 学习输出结构化 TaskProposal；Solver 学习
 真实 `graph_search`/`inspect_entity` 调用和 `<answer>`。两种角色写入同一 adapter。
 
@@ -102,11 +105,16 @@ python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo.yaml
 ```
 
+上述 adapter 直连命令只用于 CUDA 12.8。CUDA 12.4 应设置 `CUDA124_SFT_MODEL` 为已经合并的
+模型目录，并使用 `configs/experiments/qwen3_4b_solver_grpo_cuda124.yaml`；该 profile 强制同步
+SGLang rollout，以保留 verl v0.5 的每条样本工具 session 参数。
+
 先确认格式有效率、工具成功率和 held-out KQA F1，再进入 KQA Pro SQLite self-play。
 
-## 4. KQA Pro mixed-role self-play
+## 4. KQA Pro mixed-role self-play（仅 CUDA 12.8）
 
-默认路径完全使用已经由 `kb.json` 构建的 KQA Pro SQLite 图，不需要下载 Freebase、启动
+当前 self-play orchestrator 需要 verl v0.7.1 的 adapter 交接接口，不支持 CUDA 12.4。默认
+路径完全使用已经由 `kb.json` 构建的 KQA Pro SQLite 图，不需要下载 Freebase、启动
 Virtuoso 或设置 `FREEBASE_ENDPOINT`。accepted KQA 任务作为不可变 base pool，Questioner 从
 同一图的独立实体 seeds 出发生成新任务；认证通过的任务写入 archive，并在后续轮次混入 Solver
 batch。

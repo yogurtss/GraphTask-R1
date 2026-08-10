@@ -214,10 +214,14 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
         "num_gpus": "NUM_GPUS",
         "experiment_name": "EXPERIMENT_NAME",
         "lora_adapter_path": "LORA_ADAPTER_PATH",
+        "verl_profile": "VERL_PROFILE",
     }
-    selected_env = {
-        target: str(config[source]) for source, target in env_keys.items() if source in config
-    }
+    selected_env: dict[str, str] = {}
+    for source, target in env_keys.items():
+        if target in os.environ:
+            selected_env[target] = os.environ[target]
+        elif source in config:
+            selected_env[target] = str(config[source])
     result = {"stage": stage, "command": ["bash", script], "environment": selected_env}
     if not dry_run:
         subprocess.run(["bash", script], env={**os.environ, **selected_env}, check=True)

@@ -13,6 +13,16 @@ from graphtask_r1.training.relations import require_catalog_covers_program
 from graphtask_r1.utils import ProgressLogger
 
 
+def tool_kwargs(
+    names: tuple[str, ...], common: Mapping[str, object], *, role: str
+) -> dict[str, dict[str, dict[str, object]]]:
+    """Build the session kwargs consumed by both verl v0.5 and v0.7 datasets."""
+    return {
+        name: {"create_kwargs": {**common, "role": role}}
+        for name in names
+    }
+
+
 def export_role_dataset(
     tasks: list[TaskCertificate],
     output_path: Path,
@@ -74,6 +84,23 @@ def export_role_dataset(
             "program_profile": program_profile,
         }
         if include_questioner:
+            questioner_tools = tool_kwargs(
+                ("graph_search", "inspect_entity", "execute_program"),
+                common,
+                role="questioner",
+            )
+            questioner_extra = {
+                **common,
+                "role": "questioner",
+                "role_weight": questioner_weight,
+                "opponent_url": opponent_url,
+                "opponent_samples": opponent_samples,
+                **(
+                    {"need_tools_kwargs": True, "tools_kwargs": questioner_tools}
+                    if interaction_mode == "tool"
+                    else {}
+                ),
+            }
             payload = (
                 "Start from these seed entities and construct a novel, executable challenge: "
                 + ", ".join(topic_ids)
@@ -89,25 +116,12 @@ def export_role_dataset(
                     ),
                     "ability": "graph_task_generation",
                     "reward_model": {"style": "rule", "ground_truth": "{}"},
-                    "extra_info": {
-                        **common,
-                        "role": "questioner",
-                        "role_weight": questioner_weight,
-                        "opponent_url": opponent_url,
-                        "opponent_samples": opponent_samples,
-                    },
+                    "extra_info": questioner_extra,
                     "uid": f"questioner:{task.task_id}",
                     **(
                         {
                             "agent_name": "tool_agent",
-                            "tools_kwargs": {
-                                name: {"create_kwargs": {**common, "role": "questioner"}}
-                                for name in (
-                                    "graph_search",
-                                    "inspect_entity",
-                                    "execute_program",
-                                )
-                            },
+                            "tools_kwargs": questioner_tools,
                         }
                         if interaction_mode == "tool"
                         else {}
@@ -115,6 +129,19 @@ def export_role_dataset(
                 }
             )
         if include_solver:
+            solver_tools = tool_kwargs(
+                ("graph_search", "inspect_entity"), common, role="solver"
+            )
+            solver_extra = {
+                **common,
+                "role": "solver",
+                "role_weight": solver_weight,
+                **(
+                    {"need_tools_kwargs": True, "tools_kwargs": solver_tools}
+                    if interaction_mode == "tool"
+                    else {}
+                ),
+            }
             rows.append(
                 {
                     "data_source": "graphtask/solver",
@@ -129,15 +156,12 @@ def export_role_dataset(
                         "style": "rule",
                         "ground_truth": task.gold_answers.model_dump_json(),
                     },
-                    "extra_info": {**common, "role": "solver", "role_weight": solver_weight},
+                    "extra_info": solver_extra,
                     "uid": f"solver:{task.task_id}",
                     **(
                         {
                             "agent_name": "tool_agent",
-                            "tools_kwargs": {
-                                name: {"create_kwargs": {**common, "role": "solver"}}
-                                for name in ("graph_search", "inspect_entity")
-                            },
+                            "tools_kwargs": solver_tools,
                         }
                         if interaction_mode == "tool"
                         else {}

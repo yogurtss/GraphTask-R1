@@ -2,6 +2,7 @@ import pytest
 
 from graphtask_r1.dsl import canonical_signature, canonicalize, compile_sparql, program_cost
 from graphtask_r1.graph import GraphOverlay, toy_graph
+from graphtask_r1.graph.sqlite import _runtime_sql_variable_limit
 from graphtask_r1.schema import Entity, Hop, Intersect, Triple
 
 
@@ -39,3 +40,15 @@ def test_canonical_intersection_is_order_invariant_and_idempotent() -> None:
 def test_sparql_rejects_unsafe_iri() -> None:
     with pytest.raises(ValueError, match="unsafe IRI"):
         compile_sparql(Hop(input=Entity(entity_id="alice"), relation="bad>relation"))
+
+
+def test_python310_sqlite_variable_limit_falls_back_to_compile_options() -> None:
+    class Python310Connection:
+        def execute(self, query: str) -> "Python310Connection":
+            assert query == "PRAGMA compile_options"
+            return self
+
+        def fetchall(self) -> list[tuple[str]]:
+            return [("THREADSAFE=1",), ("MAX_VARIABLE_NUMBER=123",)]
+
+    assert _runtime_sql_variable_limit(Python310Connection()) == 123

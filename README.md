@@ -1,28 +1,35 @@
 # GraphTask-R1
 
-GraphTask-R1 trains one shared LoRA policy in two roles: a privileged graph Questioner that
-constructs executable tasks and a tool-limited Solver that answers them. Every accepted task is
-verified by executing its certified program; gold answers are never copied from model output.
+GraphTask-R1 用同一个 Qwen3-4B + LoRA 策略训练两个角色：Questioner 在图上构造可执行任务，
+Solver 通过受限图工具回答问题。所有 gold answer 都由认证程序实际执行得到，不采用模型输出
+作为 gold。
 
-The current default is **KQA Pro-only**. KQA Pro supplies the cold-start tasks, validation set,
-SQLite graph, and self-play seeds. Freebase, WebQSP, CWQ, and GrailQA are optional future
-extensions and are not required by the commands below.
+当前训练主线只使用 **KQA Pro**。不需要 Freebase、Virtuoso、WebQSP、CWQ 或 GrailQA。
+本 README 以服务器上限为 **Python 3.10 + CUDA 12.4** 的环境为默认流程。
 
-## Continue from an existing processed KQA Pro dataset
+## 当前支持范围
 
-Use this path when KQA Pro has already been processed. You do **not** need to run `data fetch`,
-`data prepare`, or `--rebuild-graph` again.
+| Profile | Python / CUDA | PyTorch / verl | SFT | Solver GRPO | 自动 self-play |
+| --- | --- | --- | --- | --- | --- |
+| `cuda124` | 3.10 / 12.4 | 2.6.0+cu124 / v0.5.0 | 支持 | 支持，同步 SGLang | 暂不支持 |
+| `cuda128` | 3.12 / 12.8 | 2.8 / v0.7.1 | 支持 | 支持，异步 SGLang | 支持 |
 
-The following files are the reusable, expensive processing results:
+CUDA 12.4 的完整安装命令和固定版本见
+[CUDA 12.4 环境指南](docs/CUDA_12_4_ENVIRONMENT.md)。两个 profile 必须使用不同 Conda
+环境，不能在同一环境中原地升降级。
+
+## 1. 复用已经处理好的 KQA Pro
+
+如果下面三个文件已经存在，**不要再次运行** `data fetch`、`data prepare` 或
+`--rebuild-graph`：
 
 ```text
-data/processed/kqapro/kqapro-v1/
-├── graph.sqlite
-├── train/tasks.parquet
-└── val/tasks.parquet
+data/processed/kqapro/kqapro-v1/graph.sqlite
+data/processed/kqapro/kqapro-v1/train/tasks.parquet
+data/processed/kqapro/kqapro-v1/val/tasks.parquet
 ```
 
-Check that they exist and point the graph backend at the existing SQLite file:
+先检查文件并设置图路径：
 
 ```bash
 ls -lh \
@@ -33,11 +40,13 @@ ls -lh \
 export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
 ```
 
-### 1. Export training Parquet files from the existing tasks
+`tasks.parquet` 中约 9k 条 accepted records 可以直接训练。数量少于 KQA Pro 原始样本是正常
+现象：转换器只保留当前 DSL 能表达、可执行并通过认证的任务。
 
-This is the missing step when SFT reports that `kqapro_sft_train.parquet` does not exist. These
-commands read the existing accepted tasks and `graph.sqlite`; they do not process KQA Pro again and
-do not modify anything under `data/processed/`.
+## 2. 只导出训练 Parquet，不重新处理 KQA Pro
+
+仅当 `data/verl/` 下对应文件缺失时运行。以下命令读取现有 accepted tasks，不会重建
+`graph.sqlite`，也不会修改 `data/processed/`：
 
 ```bash
 python -m graphtask_r1.cli data export-sft \
@@ -61,135 +70,159 @@ python -m graphtask_r1.cli data export-verl \
   --roles solver
 ```
 
-The resulting lightweight training files are:
+完成后应有：
 
 ```text
-data/verl/
-├── kqapro_sft_train.parquet
-├── kqapro_sft_val.parquet
-├── kqapro_solver_rl.parquet
-└── kqapro_solver_rl_val.parquet
+data/verl/kqapro_sft_train.parquet
+data/verl/kqapro_sft_val.parquet
+data/verl/kqapro_solver_rl.parquet
+data/verl/kqapro_solver_rl_val.parquet
 ```
 
-They can be regenerated from the accepted tasks without rebuilding `graph.sqlite`.
+## 3. Python 3.10 + CUDA 12.4 训练
 
-### 2. Run shared Questioner/Solver SFT
+确认当前环境确实加载了 CUDA 12.4 profile：
+
+```bash
+conda activate graphtask-cu124
+
+python - <<'PY'
+import torch
+import verl
+import sglang
+
+print("torch:", torch.__version__)
+print("torch CUDA:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+print("verl:", verl.__file__)
+print("sglang:", sglang.__version__)
+assert torch.__version__.startswith("2.6.0")
+assert torch.version.cuda == "12.4"
+assert torch.cuda.is_available()
+PY
+```
+
+### 3.1 双角色 SFT
 
 ```bash
 export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
 export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
-export SFT_OUTPUT_DIR=$PWD/outputs/sft-qwen3-4b
+export SFT_OUTPUT_DIR=$PWD/outputs/sft-qwen3-4b-cu124
+export NUM_GPUS=4
 
+python -m graphtask_r1.cli train sft \
+  --config configs/experiments/qwen3_4b_sft_cuda124.yaml \
+  --dry-run
+
+python -m graphtask_r1.cli train sft \
+  --config configs/experiments/qwen3_4b_sft_cuda124.yaml
+```
+
+该配置自动选择 verl v0.5 的 `fsdp_sft_trainer`、FSDP2、BF16、多轮 `messages` 数据和
+LoRA rank/alpha 32/64。命令行环境变量优先于 YAML；例如可以用
+`NUM_GPUS=1 TRAIN_BATCH_SIZE=4 EPOCHS=1` 做有界 smoke test。
+
+### 3.2 把 SFT LoRA 合并为完整模型
+
+verl v0.5 的 GRPO 不能直接加载 `lora_adapter_path`。SFT 结束后，把最后一个
+`global_step_*` 目录导出并合并一次：
+
+```bash
+find "$SFT_OUTPUT_DIR" -maxdepth 2 -name fsdp_config.json -printf '%h\n' | sort -V
+
+export SFT_CHECKPOINT=$SFT_OUTPUT_DIR/global_step_<最后一步>
+export CUDA124_SFT_MODEL=$PWD/outputs/sft-qwen3-4b-cu124-merged
+
+python -m graphtask_r1.training.merge_sft \
+  --checkpoint "$SFT_CHECKPOINT" \
+  --output "$CUDA124_SFT_MODEL" \
+  --lora-alpha 64
+```
+
+合并工具会先调用 verl v0.5 的 FSDP model merger，修复它导出的 `lora_alpha: 0`，再用
+PEFT 将 LoRA 写入完整 Hugging Face 权重。`--output` 必须是尚不存在的目录；Qwen3-4B 合并
+需要足够的 CPU 内存和磁盘空间。
+
+### 3.3 Solver-only GRPO
+
+CUDA 12.4 profile 使用同步 SGLang multi-turn rollout，这样 verl v0.5 才会把每条样本的
+图快照、角色和工具 session 参数传给 GraphTask 工具：
+
+```bash
+export CUDA124_SFT_MODEL=$PWD/outputs/sft-qwen3-4b-cu124-merged
+export SOLVER_RL_TRAIN_DATA=$PWD/data/verl/kqapro_solver_rl.parquet
+export SOLVER_RL_VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
+export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/solver-grpo-cu124
+export NUM_GPUS=4
+
+python -m graphtask_r1.cli train solver-grpo \
+  --config configs/experiments/qwen3_4b_solver_grpo_cuda124.yaml \
+  --dry-run
+
+python -m graphtask_r1.cli train solver-grpo \
+  --config configs/experiments/qwen3_4b_solver_grpo_cuda124.yaml
+```
+
+开始长训练前建议先设置较小的 `TRAIN_BATCH_SIZE`、`ROLLOUT_N`、`MAX_RESPONSE_LENGTH` 和
+`EPOCHS=1`。如果显存不足，依次降低这四项，不要改用 CUDA 12.8 wheel。
+
+### 3.4 CUDA 12.4 的边界
+
+当前 `train self-play` orchestrator 每轮都以“base model + 上轮 adapter”的形式冻结 opponent
+并继续训练 adapter；verl v0.5 不支持这条 adapter 交接接口。因此 CUDA 12.4 目前支持到
+SFT + Solver GRPO，**不要**使用 `configs/training/selfplay.yaml`。自动 self-play 仍只属于
+`cuda128` profile。训练脚本会在 CUDA 12.4 下拒绝直接传入 `LORA_ADAPTER_PATH`，避免静默从
+错误的 base model 开始训练。
+
+## 4. CUDA 12.8 原有流程
+
+CUDA 12.8 环境继续使用原配置，行为未改变：
+
+```bash
 python -m graphtask_r1.cli train sft \
   --config configs/experiments/qwen3_4b_sft.yaml --dry-run
 
-python -m graphtask_r1.cli train sft \
-  --config configs/experiments/qwen3_4b_sft.yaml
-```
-
-### 3. Run Solver-only GRPO
-
-Use the LoRA adapter emitted by SFT:
-
-```bash
-export SFT_ADAPTER=/absolute/path/to/sft/lora_adapter
-export SOLVER_RL_TRAIN_DATA=$PWD/data/verl/kqapro_solver_rl.parquet
-export SOLVER_RL_VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
-export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/solver-grpo
-
 python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo.yaml --dry-run
-
-python -m graphtask_r1.cli train solver-grpo \
-  --config configs/experiments/qwen3_4b_solver_grpo.yaml
 ```
 
-### 4. Run KQA Pro self-play
+CUDA 12.8 的 self-play 说明见 [训练手册](docs/TRAINING.md)。
 
-Export a small seed batch first. The current orchestrator consumes every seed row in every round,
-so 256 seeds is the safe starting point.
+## 5. 只有 processed 文件不存在时才处理 KQA Pro
 
-```bash
-python -m graphtask_r1.cli data sample-seeds \
-  --snapshot kqapro-v1 \
-  --count 256 --pool-limit 100000 --seed 42 \
-  --output data/verl/kqapro_questioner_seeds.parquet
-
-export INITIAL_ADAPTER=/absolute/path/to/solver_grpo_or_sft_adapter
-export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
-export VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
-export QUESTIONER_SEEDS=$PWD/data/verl/kqapro_questioner_seeds.parquet
-
-python -m graphtask_r1.cli train self-play \
-  --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-kqapro --dry-run
-
-python -m graphtask_r1.cli train self-play \
-  --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-kqapro
-```
-
-Resume an interrupted run without changing its existing config or round directories:
-
-```bash
-python -m graphtask_r1.cli train self-play \
-  --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-kqapro --resume
-```
-
-## Process KQA Pro only when processed files are absent
-
-This is a one-time path for a new server. Skip it when the three files listed at the start of this
-README already exist.
+这是一台全新服务器的一次性流程；已有 processed 文件时跳过：
 
 ```bash
 python -m graphtask_r1.cli data fetch --dataset kqapro
 
-python -m graphtask_r1.cli data prepare --dataset kqapro \
+python -m graphtask_r1.cli data prepare \
+  --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
   --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train,val --seed 42 --workers 1
+  --splits train,val \
+  --seed 42 \
+  --workers 1
 ```
 
-Do not use `--rebuild-graph` for a normal continuation. The converter intentionally keeps only
-supported, executable, verified tasks; rejected records remain in `rejections.parquet` and must not
-be added to training. KQA Pro `test.json` is not used for training because it lacks the required
-gold program and answer.
+不要为正常续训添加 `--rebuild-graph`。KQA Pro `test.json` 缺少 gold program/answer，不进入训练。
 
-## Environment
+## 6. 开发验证
 
-- Run the repository directly from its root; do not install it with `pip install -e .`.
-- Install lightweight project dependencies with `python -m pip install -r requirements.txt`.
-- Install PyTorch, CUDA, SGLang, FlashAttention, and verl separately for the server's GPU stack.
-- The default environment uses Python 3.12, CUDA 12.8, and verl `v0.7.1` at commit
-  `bec9ef74768dd201881cd4e54cd0385e87caae27`.
-- A server capped at CUDA 12.4 must use the isolated legacy stack documented in
-  [CUDA 12.4 environment](docs/CUDA_12_4_ENVIRONMENT.md): Python 3.10, Torch 2.6.0+cu124,
-  SGLang 0.4.6.post5, vLLM 0.8.5.post1, and verl v0.5.0. Do not install the v0.7.1 stack there.
-- The default model is `Qwen/Qwen3-4B-Instruct-2507`, non-thinking mode, with shared LoRA rank 32
-  and alpha 64.
-
-Before a full job, verify that `torch`, `verl`, and `sglang` import correctly and always inspect the
-corresponding `--dry-run` output.
-
-## Development checks
+仓库从根目录直接运行，不需要 `pip install -e .`。GPU 栈单独安装，轻量依赖使用：
 
 ```bash
+python -m pip install -r requirements.txt
 python -m pip install -r requirements-dev.txt
+
 make lint
 make typecheck
 make test
-make e2e
-make scripted-selfplay
 ```
 
-## Further documentation
+更多文档：
 
-- [Training details](docs/TRAINING.md)
-- [CUDA 12.4 environment](docs/CUDA_12_4_ENVIRONMENT.md)
-- [KQA Pro data preparation and audits](docs/DATA_PREPARATION.md)
-- [Research and experiment design](docs/RESEARCH_AND_TRAINING_GUIDE.md)
-- [Tool and GraphScript interaction modes](docs/INTERACTION_MODES.md)
-
-Freebase ingestion and Freebase-backed benchmarks are optional; their setup remains documented for
-future experiments but is not part of the current default workflow.
+- [CUDA 12.4 环境指南](docs/CUDA_12_4_ENVIRONMENT.md)
+- [训练手册](docs/TRAINING.md)
+- [KQA Pro 数据准备与审计](docs/DATA_PREPARATION.md)
+- [工具与 GraphScript 交互模式](docs/INTERACTION_MODES.md)
+- [研究与实验设计](docs/RESEARCH_AND_TRAINING_GUIDE.md)

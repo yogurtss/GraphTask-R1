@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import platform
 import subprocess
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ def write_manifest(
     manifest = {
         "schema_version": 1,
         "package_version": __version__,
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "python": platform.python_version(),
         "git_commit": git_commit(),
         "lock_hash": file_hash(Path("uv.lock")),

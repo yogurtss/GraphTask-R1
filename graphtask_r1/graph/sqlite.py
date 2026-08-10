@@ -30,10 +30,25 @@ from graphtask_r1.schema import (
 )
 
 _PREFERRED_SQL_VARIABLE_LIMIT = 900
+_LEGACY_SQL_VARIABLE_LIMIT = 999
 
 
 def _chunks(values: Sequence[str], size: int) -> list[Sequence[str]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _runtime_sql_variable_limit(connection: Any) -> int:
+    """Read SQLite's bind limit, including on Python 3.10 without getlimit()."""
+    getlimit = getattr(connection, "getlimit", None)
+    limit_category = getattr(sqlite3, "SQLITE_LIMIT_VARIABLE_NUMBER", None)
+    if callable(getlimit) and isinstance(limit_category, int):
+        return int(getlimit(limit_category))
+    rows = connection.execute("PRAGMA compile_options").fetchall()
+    for row in rows:
+        option = str(row[0])
+        if option.startswith("MAX_VARIABLE_NUMBER="):
+            return int(option.partition("=")[2])
+    return _LEGACY_SQL_VARIABLE_LIMIT
 
 
 def _compare(left: str, datatype: str, comparator: str, right: str | int | float) -> bool:
@@ -119,7 +134,7 @@ class SQLiteGraphBackend:
                 self._clear_query_cache()
 
     def _sql_variable_limit(self) -> int:
-        runtime_limit = self.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+        runtime_limit = _runtime_sql_variable_limit(self.connection)
         return max(2, min(_PREFERRED_SQL_VARIABLE_LIMIT, runtime_limit))
 
     def all_entities(self, *, limit: int) -> tuple[str, ...]:

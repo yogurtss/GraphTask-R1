@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from graphtask_r1.cli import build_parser
+from graphtask_r1.cli import _launch_stage, build_parser
 
 
 def test_data_prepare_accepts_positive_worker_count() -> None:
@@ -45,3 +47,25 @@ def test_sample_seeds_defaults_to_kqapro_snapshot() -> None:
     )
     assert args.snapshot == "kqapro-v1"
     assert args.count == 256
+
+
+def test_cuda124_training_profile_is_forwarded_to_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NUM_GPUS", "1")
+    config = tmp_path / "sft.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "verl_profile: cuda124",
+                "model_path: model",
+                "train_data: train.parquet",
+                "val_data: val.parquet",
+            ]
+        )
+        + "\n"
+    )
+    result = _launch_stage("sft", config, dry_run=True)
+    assert result["command"] == ["bash", "scripts/train_sft.sh"]
+    assert result["environment"]["VERL_PROFILE"] == "cuda124"
+    assert result["environment"]["NUM_GPUS"] == "1"

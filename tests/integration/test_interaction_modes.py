@@ -77,6 +77,10 @@ def test_tool_dataset_contract_remains_tool_agent(tmp_path: Path) -> None:
     rows = pq.read_table(path).to_pylist()
     assert all(row["agent_name"] == "tool_agent" for row in rows)
     assert all(row["tools_kwargs"] for row in rows)
+    assert all(row["extra_info"]["need_tools_kwargs"] is True for row in rows)
+    assert all(
+        row["extra_info"]["tools_kwargs"] == row["tools_kwargs"] for row in rows
+    )
 
 
 def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
