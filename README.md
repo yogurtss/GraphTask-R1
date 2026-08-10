@@ -1,161 +1,176 @@
 # GraphTask-R1
 
-GraphTask-R1 trains one shared LoRA policy as both a privileged graph Questioner and a
-tool-limited Solver. Questioner proposals are accepted only after program execution, bounded
-witness materialization, counterfactual necessity checks, shortcut detection, and evaluation by
-a frozen Solver snapshot. Gold answers always come from the certified program.
+GraphTask-R1 trains one shared LoRA policy in two roles: a privileged graph Questioner that
+constructs executable tasks and a tool-limited Solver that answers them. Every accepted task is
+verified by executing its certified program; gold answers are never copied from model output.
 
-The repository now provides:
+The current default is **KQA Pro-only**. KQA Pro supplies the cold-start tasks, validation set,
+SQLite graph, and self-play seeds. Freebase, WebQSP, CWQ, and GrailQA are optional future
+extensions and are not required by the commands below.
 
-- a typed core DSL with entity roots, bounded scans, hops, intersection/union, type and typed
-  literal filters, and count;
-- deterministic in-memory, indexed KQA Pro SQLite, and Freebase Virtuoso backends;
-- KQA Pro KoPL conversion with answer reconciliation and structured rejection records;
-- WebQSP, ComplexWebQuestions, and GrailQA normalization with held-out entity denylists;
-- verl v0.7.1 multi-turn SFT/RL data exporters and Qwen3-4B-Instruct-2507 LoRA launchers;
-- candidate-specific asynchronous frontier rewards from a frozen tool-using Solver;
-- a resumable 4-GPU mixed-role self-play orchestrator and benchmark evaluator;
-- CPU fixtures, replay tests, manifests, audit commands, linting, typing, and CI.
+## Continue from an existing processed KQA Pro dataset
 
-The default training path is KQA Pro-only: KQA Pro supplies the cold-start tasks, validation data,
-SQLite graph, and self-play seeds. Freebase ingestion and the WebQSP/CWQ/GrailQA benchmarks remain
-optional extensions for servers with sufficient storage. No GPU result is claimed in this
-repository; model weights and 4-GPU training are intentionally left for the user's server.
+Use this path when KQA Pro has already been processed. You do **not** need to run `data fetch`,
+`data prepare`, or `--rebuild-graph` again.
 
-## Clone and run
+The following files are the reusable, expensive processing results:
 
-GraphTask-R1 is a source repository rather than an installable Python package. The
-`graphtask_r1/` package lives at the repository root, so after cloning you can run it directly;
-do **not** run `pip install -e .` or install GraphTask-R1 into the environment.
-
-Use Python 3.11 or newer. On a server where the Python dependencies, PyTorch, and verl are
-already available, setup is only:
-
-```bash
-git clone <repository-url> GraphTask
-cd GraphTask
-python -m graphtask_r1.cli --help
+```text
+data/processed/kqapro/kqapro-v1/
+├── graph.sqlite
+├── train/tasks.parquet
+└── val/tasks.parquet
 ```
 
-For a new CPU/development environment, install the small project-level dependency set:
+Check that they exist and point the graph backend at the existing SQLite file:
 
 ```bash
-python -m pip install -r requirements.txt
+ls -lh \
+  data/processed/kqapro/kqapro-v1/graph.sqlite \
+  data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  data/processed/kqapro/kqapro-v1/val/tasks.parquet
+
+export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
 ```
 
-`requirements.txt` deliberately excludes `torch`, `verl`, CUDA libraries, SGLang, and
-FlashAttention. Install those separately using versions that match the server's CUDA stack;
-cloning or updating this repository will therefore not replace a working GPU environment. The
-training code is validated against verl v0.7.1 at commit
-`bec9ef74768dd201881cd4e54cd0385e87caae27`.
+### 1. Export training Parquet files from the existing tasks
 
-The external verl checkout can live anywhere on the server. It does not need to be cloned into a
-`third_party/` directory in this repository; it only needs to be importable from the active Python
-environment.
-
-All commands below assume the current directory is the repository root.
-
-## GPU training environment
-
-The following is the recommended NVIDIA/FSDP2 setup for this repository. GPU packages remain
-external to GraphTask-R1: none of these commands modifies `requirements.txt`, and the verl source
-checkout is kept outside this repository.
-
-The pinned verl installer is the safest starting point because SGLang and vLLM have strict
-PyTorch/CUDA compatibility requirements and may replace an existing PyTorch installation. Use a
-fresh environment rather than running it inside another working training environment. See the
-[official verl installation guide](https://verl.readthedocs.io/en/latest/start/install.html),
-[PyTorch installation selector](https://pytorch.org/get-started/locally/), and
-[SGLang installation guide](https://docs.sglang.io/docs/get-started/install) when adapting the
-commands to different GPUs.
-
-### 1. Check the NVIDIA host
-
-Install the NVIDIA driver using the
-[official driver guide](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/latest/),
-then confirm that every training GPU is visible:
+This is the missing step when SFT reports that `kqapro_sft_train.parquet` does not exist. These
+commands read the existing accepted tasks and `graph.sqlite`; they do not process KQA Pro again and
+do not modify anything under `data/processed/`.
 
 ```bash
-nvidia-smi
+python -m graphtask_r1.cli data export-sft \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output data/verl/kqapro_sft_train.parquet \
+  --roles both
+
+python -m graphtask_r1.cli data export-sft \
+  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
+  --output data/verl/kqapro_sft_val.parquet \
+  --roles both
+
+python -m graphtask_r1.cli data export-verl \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output data/verl/kqapro_solver_rl.parquet \
+  --roles solver
+
+python -m graphtask_r1.cli data export-verl \
+  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
+  --output data/verl/kqapro_solver_rl_val.parquet \
+  --roles solver
 ```
 
-The verl installation guide currently recommends CUDA 12.8 or newer. The reproducible baseline
-below uses CUDA 12.8 and Python 3.12; do not use it unchanged for AMD/ROCm or Ascend hardware.
+The resulting lightweight training files are:
 
-### 2. Create an isolated Python environment
+```text
+data/verl/
+├── kqapro_sft_train.parquet
+├── kqapro_sft_val.parquet
+├── kqapro_solver_rl.parquet
+└── kqapro_solver_rl_val.parquet
+```
+
+They can be regenerated from the accepted tasks without rebuilding `graph.sqlite`.
+
+### 2. Run shared Questioner/Solver SFT
 
 ```bash
-conda create -n graphtask python=3.12 -y
-conda activate graphtask
-python -m pip install --upgrade pip setuptools wheel
+export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
+export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
+export SFT_OUTPUT_DIR=$PWD/outputs/sft-qwen3-4b
+
+python -m graphtask_r1.cli train sft \
+  --config configs/experiments/qwen3_4b_sft.yaml --dry-run
+
+python -m graphtask_r1.cli train sft \
+  --config configs/experiments/qwen3_4b_sft.yaml
 ```
 
-### 3. Install the pinned verl/SGLang stack outside GraphTask-R1
+### 3. Run Solver-only GRPO
 
-Set `GRAPHTASK_DEPS_ROOT` to an absolute directory on the server that is not inside this clone.
-The pinned verl script installs its matching PyTorch, SGLang, vLLM, Ray, FlashAttention, and
-FlashInfer dependencies. `USE_MEGATRON=0` avoids installing Megatron-specific packages because
-the supplied launchers use FSDP2.
+Use the LoRA adapter emitted by SFT:
 
 ```bash
-export GRAPHTASK_DEPS_ROOT=/absolute/path/to/external-dependencies
-mkdir -p "$GRAPHTASK_DEPS_ROOT"
-cd "$GRAPHTASK_DEPS_ROOT"
+export SFT_ADAPTER=/absolute/path/to/sft/lora_adapter
+export SOLVER_RL_TRAIN_DATA=$PWD/data/verl/kqapro_solver_rl.parquet
+export SOLVER_RL_VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
+export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/solver-grpo
 
-git clone https://github.com/verl-project/verl.git verl-v0.7.1
-cd verl-v0.7.1
-git checkout bec9ef74768dd201881cd4e54cd0385e87caae27
+python -m graphtask_r1.cli train solver-grpo \
+  --config configs/experiments/qwen3_4b_solver_grpo.yaml --dry-run
 
-USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
-python -m pip install --no-deps -e .
+python -m graphtask_r1.cli train solver-grpo \
+  --config configs/experiments/qwen3_4b_solver_grpo.yaml
 ```
 
-At the pinned commit, the installer is based on the Torch 2.8/CUDA 12 stack and explicitly pins
-SGLang 0.5.2, vLLM 0.11.0, FlashAttention 2.8.1, and FlashInfer 0.3.1. Treat the script at that
-commit as the source of truth. Do not substitute the newest SGLang or vLLM release without
-revalidating verl's Hydra configuration, tool calling, LoRA updates, and rollout behavior.
+### 4. Run KQA Pro self-play
 
-If PyTorch must be installed manually, choose the wheel matching the server driver and the
-remaining inference stack. For example, the official PyTorch 2.8 CUDA 12.8 wheel is:
+Export a small seed batch first. The current orchestrator consumes every seed row in every round,
+so 256 seeds is the safe starting point.
 
 ```bash
-python -m pip install \
-  torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
-  --index-url https://download.pytorch.org/whl/cu128
+python -m graphtask_r1.cli data sample-seeds \
+  --snapshot kqapro-v1 \
+  --count 256 --pool-limit 100000 --seed 42 \
+  --output data/verl/kqapro_questioner_seeds.parquet
+
+export INITIAL_ADAPTER=/absolute/path/to/solver_grpo_or_sft_adapter
+export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
+export VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
+export QUESTIONER_SEEDS=$PWD/data/verl/kqapro_questioner_seeds.parquet
+
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay.yaml \
+  --output-dir outputs/selfplay-kqapro --dry-run
+
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay.yaml \
+  --output-dir outputs/selfplay-kqapro
 ```
 
-Do not run this manual command in addition to the pinned verl installer unless intentionally
-repairing or rebuilding the environment: SGLang/vLLM installation may select a different Torch
-build. For a fully custom stack, follow the exact
-[installer at the pinned commit](https://github.com/verl-project/verl/blob/bec9ef74768dd201881cd4e54cd0385e87caae27/scripts/install_vllm_sglang_mcore.sh)
-as a compatibility checklist.
-
-### 4. Verify the environment and run GraphTask-R1
+Resume an interrupted run without changing its existing config or round directories:
 
 ```bash
-python -m pip check
-python - <<'PY'
-from importlib.metadata import version
-
-import torch
-
-for package in ("torch", "verl", "sglang", "vllm", "ray", "flash-attn"):
-    print(f"{package}: {version(package)}")
-print(f"torch CUDA runtime: {torch.version.cuda}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"GPU count: {torch.cuda.device_count()}")
-assert torch.cuda.is_available(), "PyTorch cannot access CUDA"
-PY
-
-cd /absolute/path/to/GraphTask
-python -m pip install -r requirements.txt  # skip when already satisfied
-python -m graphtask_r1.cli --help
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay.yaml \
+  --output-dir outputs/selfplay-kqapro --resume
 ```
 
-Before a full GPU job, first run the verl Qwen3 multi-turn example, then use GraphTask-R1's
-`--dry-run` command shown below to inspect all paths and GPU allocations.
+## Process KQA Pro only when processed files are absent
 
-## Local verification
+This is a one-time path for a new server. Skip it when the three files listed at the start of this
+README already exist.
+
+```bash
+python -m graphtask_r1.cli data fetch --dataset kqapro
+
+python -m graphtask_r1.cli data prepare --dataset kqapro \
+  --raw-dir data/raw/kqa_pro \
+  --output-dir data/processed/kqapro/kqapro-v1 \
+  --splits train,val --seed 42 --workers 1
+```
+
+Do not use `--rebuild-graph` for a normal continuation. The converter intentionally keeps only
+supported, executable, verified tasks; rejected records remain in `rejections.parquet` and must not
+be added to training. KQA Pro `test.json` is not used for training because it lacks the required
+gold program and answer.
+
+## Environment
+
+- Python 3.11 or newer.
+- Run the repository directly from its root; do not install it with `pip install -e .`.
+- Install lightweight project dependencies with `python -m pip install -r requirements.txt`.
+- Install PyTorch, CUDA, SGLang, FlashAttention, and verl separately for the server's GPU stack.
+- The validated verl revision is `v0.7.1` at commit
+  `bec9ef74768dd201881cd4e54cd0385e87caae27`.
+- The default model is `Qwen/Qwen3-4B-Instruct-2507`, non-thinking mode, with shared LoRA rank 32
+  and alpha 64.
+
+Before a full job, verify that `torch`, `verl`, and `sglang` import correctly and always inspect the
+corresponding `--dry-run` output.
+
+## Development checks
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -166,92 +181,12 @@ make e2e
 make scripted-selfplay
 ```
 
-## Data and training entry points
+## Further documentation
 
-Long-running commands emit timestamped progress logs to stderr at `INFO` level while keeping the
-final machine-readable result on stdout. Progress records include the operation, phase,
-`completed`, `total`, percentage, elapsed time, and action-specific accepted/rejected counts.
-Use the global option before the command group to change verbosity, for example
-`python -m graphtask_r1.cli --log-level WARNING data prepare ...`.
-`data prepare` can process independent records concurrently, but defaults to one worker because
-multiple readers of the same SQLite graph are often slower. Benchmark before setting `--workers N`.
-For KQA Pro, an existing `graph.sqlite` is reused when its source hash and converter metadata match;
-pass `--rebuild-graph` only when a forced rebuild is required.
+- [Training details](docs/TRAINING.md)
+- [KQA Pro data preparation and audits](docs/DATA_PREPARATION.md)
+- [Research and experiment design](docs/RESEARCH_AND_TRAINING_GUIDE.md)
+- [Tool and GraphScript interaction modes](docs/INTERACTION_MODES.md)
 
-```bash
-# KQA Pro cold-start data and local SQLite graph
-python -m graphtask_r1.cli data fetch --dataset kqapro
-python -m graphtask_r1.cli data prepare --dataset kqapro \
-  --raw-dir data/raw/kqa_pro --output-dir data/processed/kqapro/kqapro-v1 --workers 1
-
-# Solver RL train/validation data
-python -m graphtask_r1.cli data export-verl \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/verl/kqapro_solver_rl.parquet --roles solver
-python -m graphtask_r1.cli data export-verl \
-  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
-  --output data/verl/kqapro_solver_rl_val.parquet --roles solver
-
-# KQA Pro Questioner seeds; all rows are consumed in every self-play round
-python -m graphtask_r1.cli data sample-seeds --snapshot kqapro-v1 \
-  --count 256 --seed 42 \
-  --output data/verl/kqapro_questioner_seeds.parquet
-
-export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
-export INITIAL_ADAPTER=/absolute/path/to/solver_grpo_or_sft_adapter
-export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
-export VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
-export QUESTIONER_SEEDS=$PWD/data/verl/kqapro_questioner_seeds.parquet
-
-# Inspect the exact 4-GPU self-play launch without starting GPUs
-python -m graphtask_r1.cli train self-play --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-kqapro --dry-run
-```
-
-`configs/training/selfplay.yaml` and `data sample-seeds` default to `kqapro-v1`, and seed export
-defaults to 256 rows; no `FREEBASE_ENDPOINT` is needed. The current orchestrator includes the
-entire seed Parquet in every round, so increase the seed count only after a bounded round is stable.
-The accepted KQA Pro subset remains the immutable base pool, while newly certified KQA tasks are
-stored in the self-play archive and mixed into later Solver batches. A much smaller accepted count
-than the raw KQA question count is expected because unsupported KoPL operations and failed
-certification checks remain in `rejections.parquet`; do not add those rejected rows to training.
-
-Freebase is not required for this path. To run the optional Freebase benchmarks or extended
-self-play later, follow [Data preparation](docs/DATA_PREPARATION.md) and pass
-`--snapshot freebase-v1` explicitly when exporting seeds.
-
-### KQA Pro preparation performance
-
-The SQLite backend automatically batches bound variables below the runtime SQLite limit, including
-older builds with the common 999-variable limit; upgrading the system SQLite is not required.
-Preparation also caches repeated graph reads within each task, pushes `FindAll` type/literal filters
-into SQLite joins, and bulk-loads entity metadata. These optimizations preserve task, rejection, and
-trace ordering and contents.
-
-Use one worker first. Multiple Python threads reading the same SQLite file often increase page-cache
-and GIL contention, so a larger value should only be used after benchmarking the same `--limit` on
-the target server:
-
-```bash
-# Recommended full run
-python -m graphtask_r1.cli data prepare --dataset kqapro \
-  --raw-dir data/raw/kqa_pro \
-  --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train,val --seed 42 --workers 1
-
-# Comparable bounded benchmark before changing worker count
-python -m graphtask_r1.cli data prepare --dataset kqapro \
-  --raw-dir data/raw/kqa_pro \
-  --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train --limit 1000 --seed 42 --workers 1
-```
-
-On reruns, `graph.sqlite` is reused when the `kb.json` hash, converter version, and snapshot match.
-Use `--rebuild-graph` only to force reconstruction. The progress operation names distinguish the
-single-writer graph build from per-split conversion, making it clear which phase is taking time.
-
-Read [Data preparation](docs/DATA_PREPARATION.md) before downloading anything and
-[Training](docs/TRAINING.md) before starting verl. Research motivation and experiment design are
-in [RESEARCH_AND_TRAINING_GUIDE.md](docs/RESEARCH_AND_TRAINING_GUIDE.md). The optional end-to-end
-comparison between the existing multi-turn tool path and the restricted one-shot GraphScript path
-is documented in [Interaction modes](docs/INTERACTION_MODES.md); the default remains tool use.
+Freebase ingestion and Freebase-backed benchmarks are optional; their setup remains documented for
+future experiments but is not part of the current default workflow.

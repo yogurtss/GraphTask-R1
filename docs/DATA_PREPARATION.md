@@ -3,6 +3,11 @@
 本文档描述从官方原始文件到 GraphTask-R1 训练 Parquet 的完整过程。不要把 `data/`、模型权重、
 Virtuoso 数据库或 token 提交到 Git。
 
+如果 `data/processed/kqapro/kqapro-v1/graph.sqlite` 以及 `train/val/tasks.parquet` 已经存在，说明
+耗时的 KQA Pro 转换已经完成。此时不要再次运行 `data prepare`；直接跳到 2.3 节，用
+`data export-sft` 从现有 accepted tasks 生成缺少的 `data/verl/kqapro_sft_*.parquet`。该导出过程
+不会修改 processed 数据。
+
 所有耗时数据命令默认向 stderr 输出 `INFO` 级进度日志，包含当前阶段、完成数、总数、百分比、
 耗时以及 accepted/rejected 等计数；最终 JSON 仍单独写到 stdout。需要安静运行时，将全局参数放在
 命令组之前：`python -m graphtask_r1.cli --log-level WARNING data prepare ...`。

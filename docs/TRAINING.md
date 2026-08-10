@@ -28,7 +28,30 @@ python -c "import torch, verl, sglang; print(torch.__version__, verl.__file__, s
 
 ## 2. 双角色 SFT
 
-按数据文档生成：
+如果以下三个 processed 文件已经存在，不要再次执行 `data prepare`：
+
+```text
+data/processed/kqapro/kqapro-v1/graph.sqlite
+data/processed/kqapro/kqapro-v1/train/tasks.parquet
+data/processed/kqapro/kqapro-v1/val/tasks.parquet
+```
+
+SFT 报告缺少 `kqapro_sft_train.parquet` 时，只需从现有 accepted tasks 导出训练 Parquet。导出器
+只读 `tasks.parquet` 和 `graph.sqlite`，不会重新处理或覆盖 KQA Pro：
+
+```bash
+export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+
+python -m graphtask_r1.cli data export-sft \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output data/verl/kqapro_sft_train.parquet --roles both
+
+python -m graphtask_r1.cli data export-sft \
+  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
+  --output data/verl/kqapro_sft_val.parquet --roles both
+```
+
+导出后应得到：
 
 ```text
 data/verl/kqapro_sft_train.parquet
@@ -57,6 +80,10 @@ SFT 数据使用 verl `messages` contract。Questioner 学习输出结构化 Tas
 python -m graphtask_r1.cli data export-verl \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
   --output data/verl/kqapro_solver_rl.parquet --roles solver
+
+python -m graphtask_r1.cli data export-verl \
+  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
+  --output data/verl/kqapro_solver_rl_val.parquet --roles solver
 
 export SFT_ADAPTER=/absolute/path/to/sft/lora_adapter
 export SOLVER_RL_TRAIN_DATA=$PWD/data/verl/kqapro_solver_rl.parquet
