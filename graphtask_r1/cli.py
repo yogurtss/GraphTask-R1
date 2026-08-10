@@ -205,7 +205,19 @@ def _load_tasks(path: Path, limit: int | None) -> list[TaskCertificate]:
 
 def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, Any]:
     config = yaml.safe_load(os.path.expandvars(config_path.read_text()))
-    script = "scripts/train_sft.sh" if stage == "sft" else "scripts/train_verl.sh"
+    backend = str(config.get("training_backend", "verl"))
+    scripts = {
+        ("verl", "sft"): "scripts/train_sft.sh",
+        ("verl", "solver-grpo"): "scripts/train_verl.sh",
+        ("ms_swift", "sft"): "scripts/train_ms_swift_sft.sh",
+        ("ms_swift", "solver-grpo"): "scripts/train_ms_swift_grpo.sh",
+    }
+    try:
+        script = scripts[(backend, stage)]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported training backend/stage: {backend}/{stage}"
+        ) from exc
     env_keys = {
         "model_path": "MODEL_PATH",
         "train_data": "TRAIN_DATA",
@@ -222,7 +234,12 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
             selected_env[target] = os.environ[target]
         elif source in config:
             selected_env[target] = str(config[source])
-    result = {"stage": stage, "command": ["bash", script], "environment": selected_env}
+    result = {
+        "stage": stage,
+        "training_backend": backend,
+        "command": ["bash", script],
+        "environment": selected_env,
+    }
     if not dry_run:
         subprocess.run(["bash", script], env={**os.environ, **selected_env}, check=True)
     return result

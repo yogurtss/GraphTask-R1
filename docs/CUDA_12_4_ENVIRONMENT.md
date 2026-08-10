@@ -1,5 +1,8 @@
 # CUDA 12.4 环境安装指南
 
+> 新安装优先使用 [ms-swift CUDA 12.4 指南](MS_SWIFT_CUDA_12_4.md)：SFT 不需要 verl、
+> Ray、SGLang、vLLM 或 FlashAttention。本页保留给仍需复用原 verl v0.5 环境的服务器。
+
 本指南面向服务器驱动最高只支持 CUDA 12.4 的情况。不要在该环境中安装本项目默认的
 verl `v0.7.1` 依赖栈：该版本的官方安装文档要求 CUDA 12.8，安装脚本也使用 Torch 2.8、
 SGLang 0.5.2、vLLM 0.11.0 和面向 Torch 2.8 的 FlashAttention wheel。
@@ -154,7 +157,8 @@ vLLM `0.8.5.post1`。如果 `torch.cuda.is_available()` 为 `False`，先修复�
 仓库已经为 verl v0.5.0 接入独立训练入口：
 
 - `configs/experiments/qwen3_4b_sft_cuda124.yaml` 选择旧版
-  `verl.trainer.fsdp_sft_trainer`、FSDP2、BF16 和 multi-turn messages；
+  `verl.trainer.fsdp_sft_trainer`、FSDP2、BF16 和 multi-turn messages，并通过自定义 Dataset
+  把 pandas 产生的嵌套 `numpy.ndarray` 转换为 JSON 原生 list；
 - `graphtask_r1.training.merge_sft` 将旧版 FSDP SFT checkpoint 导出，并把 LoRA 合并为完整
   Hugging Face 模型；
 - `configs/experiments/qwen3_4b_solver_grpo_cuda124.yaml` 使用合并模型和同步 SGLang 工具
@@ -172,6 +176,9 @@ multi-turn 示例，再验证本项目的 `--dry-run`、小 batch 和一轮 smok
 
 CUDA 12.4 profile 尚未在本仓库 GPU CI 中做端到端验证；当前自动检查覆盖 Python 3.10 语法、
 版本化命令选择、Parquet 工具参数契约以及 LoRA 合并辅助逻辑。
+
+若 SFT 报错 `Object of type ndarray is not JSON serializable`，说明仍在使用未接入兼容 Dataset
+的旧脚本。更新仓库后直接重启 SFT 即可，已有 KQA processed 数据和 SFT Parquet 都能继续使用。
 
 ## 参考
 

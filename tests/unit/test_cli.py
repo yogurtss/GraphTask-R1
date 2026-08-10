@@ -69,3 +69,30 @@ def test_cuda124_training_profile_is_forwarded_to_launcher(
     assert result["command"] == ["bash", "scripts/train_sft.sh"]
     assert result["environment"]["VERL_PROFILE"] == "cuda124"
     assert result["environment"]["NUM_GPUS"] == "1"
+
+
+def test_ms_swift_profile_selects_ms_swift_launcher(tmp_path: Path) -> None:
+    config = tmp_path / "sft.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "training_backend: ms_swift",
+                "model_path: model",
+                "train_data: train.parquet",
+                "val_data: val.parquet",
+            ]
+        )
+        + "\n"
+    )
+
+    result = _launch_stage("sft", config, dry_run=True)
+
+    assert result["training_backend"] == "ms_swift"
+    assert result["command"] == ["bash", "scripts/train_ms_swift_sft.sh"]
+
+
+def test_unknown_training_backend_is_rejected(tmp_path: Path) -> None:
+    config = tmp_path / "sft.yaml"
+    config.write_text("training_backend: unknown\n")
+    with pytest.raises(ValueError, match="unsupported training backend"):
+        _launch_stage("sft", config, dry_run=True)

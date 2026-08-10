@@ -22,6 +22,8 @@ case "$VERL_PROFILE" in
       data.micro_batch_size_per_gpu="${MICRO_BATCH_SIZE:-1}" \
       data.multiturn.enable=true \
       data.multiturn.messages_key=messages \
+      data.custom_cls.path="$PROJECT_ROOT/graphtask_r1/training/verl_sft_dataset.py" \
+      data.custom_cls.name=GraphTaskMultiTurnSFTDataset \
       data.max_length="${MAX_LENGTH:-4096}" \
       optim.lr="${LR:-2e-5}" \
       model.partial_pretrain="$MODEL_PATH" \
