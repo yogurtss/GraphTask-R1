@@ -20,7 +20,12 @@ from graphtask_r1.schema import (
 )
 from graphtask_r1.training.opponent import FrozenSolverService
 from graphtask_r1.training.relations import build_relation_catalog, load_relation_catalog
-from graphtask_r1.training.selfplay import SelfPlayConfig, _assemble_dataset, run_self_play
+from graphtask_r1.training.selfplay import (
+    SelfPlayConfig,
+    _assemble_dataset,
+    load_selfplay_config,
+    run_self_play,
+)
 from graphtask_r1.training.sft_dataset import export_sft_dataset
 from graphtask_r1.training.verl_dataset import export_role_dataset
 from graphtask_r1.utils import write_json, write_records
@@ -133,8 +138,14 @@ def test_selfplay_defaults_preserve_legacy_tool_profile() -> None:
             "questioner_seeds": "seeds.parquet",
         }
     )
+    assert config.graph_snapshot == "kqapro-v1"
     assert config.interaction_mode == "tool"
     assert config.program_profile == "full"
+
+
+def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
+    config_path = Path(__file__).parents[2] / "configs/training/selfplay.yaml"
+    assert load_selfplay_config(config_path).graph_snapshot == "kqapro-v1"
 
 
 def test_comparison_profile_requires_relation_catalog() -> None:

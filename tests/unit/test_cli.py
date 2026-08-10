@@ -37,3 +37,11 @@ def test_data_prepare_rejects_zero_workers() -> None:
                 "0",
             ]
         )
+
+
+def test_sample_seeds_defaults_to_kqapro_snapshot() -> None:
+    args = build_parser().parse_args(
+        ["data", "sample-seeds", "--output", "seeds.parquet"]
+    )
+    assert args.snapshot == "kqapro-v1"
+    assert args.count == 256

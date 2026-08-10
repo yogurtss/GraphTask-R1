@@ -69,27 +69,42 @@ python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo.yaml
 ```
 
-先确认格式有效率、工具成功率和 held-out KQA F1，再进入 Freebase self-play。
+先确认格式有效率、工具成功率和 held-out KQA F1，再进入 KQA Pro SQLite self-play。
 
-## 4. 真实 mixed-role self-play
+## 4. KQA Pro mixed-role self-play
+
+默认路径完全使用已经由 `kb.json` 构建的 KQA Pro SQLite 图，不需要下载 Freebase、启动
+Virtuoso 或设置 `FREEBASE_ENDPOINT`。accepted KQA 任务作为不可变 base pool，Questioner 从
+同一图的独立实体 seeds 出发生成新任务；认证通过的任务写入 archive，并在后续轮次混入 Solver
+batch。
 
 默认 GPU 布局：
 
 ```text
 GPU 0–1  verl actor/rollout/ref，共享 LoRA mixed-role GRPO
 GPU 2–3  上一轮冻结 LoRA 的 SGLang Solver，DP=2、TP=1
-CPU      GraphTask opponent/archive service、Virtuoso 和 reward workers
+CPU      GraphTask opponent/archive service、KQA Pro SQLite 和 reward workers
 ```
 
-准备环境变量：
+先导出 KQA Pro seeds。当前 orchestrator 每轮读取 seed Parquet 的全部行，因此先让 seed 数量与
+默认的 `solver_episodes: 256` 对齐；短轮稳定后再提高到 512 或 1024。
+
+```bash
+export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+
+python -m graphtask_r1.cli data sample-seeds \
+  --snapshot kqapro-v1 \
+  --count 256 --pool-limit 100000 --seed 42 \
+  --output data/verl/kqapro_questioner_seeds.parquet
+```
+
+准备训练环境变量：
 
 ```bash
 export INITIAL_ADAPTER=/absolute/path/to/solver_grpo_or_sft_adapter
 export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
 export VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
-export QUESTIONER_SEEDS=$PWD/data/verl/freebase_questioner_seeds.parquet
-export FREEBASE_ENDPOINT=http://127.0.0.1:8890/sparql
-export GRAPHTASK_GRAPH_CACHE=$PWD/data/cache/freebase.sqlite
+export QUESTIONER_SEEDS=$PWD/data/verl/kqapro_questioner_seeds.parquet
 ```
 
 先检查完整进程计划：
@@ -97,7 +112,7 @@ export GRAPHTASK_GRAPH_CACHE=$PWD/data/cache/freebase.sqlite
 ```bash
 python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-qwen3-4b --dry-run
+  --output-dir outputs/selfplay-kqapro --dry-run
 ```
 
 确认路径后启动：
@@ -105,7 +120,7 @@ python -m graphtask_r1.cli train self-play \
 ```bash
 python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-qwen3-4b
+  --output-dir outputs/selfplay-kqapro
 ```
 
 每轮使用上轮 adapter 启动冻结 Solver。Questioner 的每个有效候选通过异步 `/evaluate`
@@ -118,15 +133,19 @@ python -m graphtask_r1.cli train self-play \
 ```bash
 python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-qwen3-4b --resume
+  --output-dir outputs/selfplay-kqapro --resume
 ```
 
 resume 会核对 config hash，并从最后完成 round 的 adapter 继续。不要修改已有 round 目录。
 
-## 5. Benchmark 评测
+## 5. 验证与可选 Freebase benchmark
+
+默认实验使用 `kqapro_solver_rl_val.parquet` 监控 held-out KQA 指标。WebQSP、CWQ 和 GrailQA
+的问题文件本身不能替代知识图，它们仍需要 Freebase backend；没有 Freebase 时不要运行下面的
+可选 benchmark，也不要把缺失的图查询当作模型错误。
 
 用待评测 adapter 启动冻结 Solver SGLang 和 GraphTask service，命令形态与每轮 `plan.json`
-中的 `sglang`、`opponent` 一致。服务健康后：
+中的 `sglang`、`opponent` 一致。以后准备好 Freebase 服务后可以运行：
 
 ```bash
 python -m graphtask_r1.cli evaluate benchmark \
@@ -143,7 +162,8 @@ python -m graphtask_r1.cli evaluate benchmark \
 ## 6. 故障排查和降配顺序
 
 - SGLang 启动失败：先检查 adapter 路径、模型缓存和 `/health`，再检查 `round_*/logs/`。
-- Virtuoso timeout：不要把 timeout 当负样本；检查 endpoint、索引和 cache 权限。
+- KQA 图打开失败：检查 `GRAPHTASK_KQAPRO_DB` 是否指向已生成的只读 `graph.sqlite`。
+- 可选 Freebase 路径出现 Virtuoso timeout：不要把 timeout 当负样本；检查 endpoint、索引和 cache 权限。
 - 显存不足：先降低 batch、response length、rollout N，再启用 optimizer/parameter offload。
 - Questioner 全部无效：回到 SFT，检查 TaskProposal JSON、禁止 `all_entities` 和 topic root 一致性。
 - 角色坍缩：检查两角色格式率和 reward 分布，再调整 0.35/0.65 权重。

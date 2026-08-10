@@ -3,7 +3,7 @@ initial_adapter: ${INITIAL_ADAPTER}
 base_tasks: ${BASE_TASKS}
 val_data: ${VAL_DATA}
 questioner_seeds: ${QUESTIONER_SEEDS}
-graph_snapshot: freebase-v1
+graph_snapshot: kqapro-v1
 rounds: 3
 solver_episodes: 256
 opponent_samples: 8

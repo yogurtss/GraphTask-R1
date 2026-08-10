@@ -133,9 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(export_sft)
 
     seeds = data_actions.add_parser("sample-seeds")
-    seeds.add_argument("--snapshot", default="freebase-v1")
+    seeds.add_argument("--snapshot", default="kqapro-v1")
     seeds.add_argument("--output", type=Path, required=True)
-    seeds.add_argument("--count", type=int, default=1024)
+    seeds.add_argument("--count", type=int, default=256)
     seeds.add_argument("--exclude", type=Path)
     seeds.add_argument("--pool-limit", type=int, default=100_000)
     seeds.add_argument("--opponent-url")

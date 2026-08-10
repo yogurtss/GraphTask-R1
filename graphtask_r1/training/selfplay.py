@@ -31,7 +31,7 @@ class SelfPlayConfig(BaseModel):
     base_tasks: Path
     val_data: Path
     questioner_seeds: Path
-    graph_snapshot: str = "freebase-v1"
+    graph_snapshot: str = "kqapro-v1"
     rounds: int = Field(default=3, gt=0)
     solver_episodes: int = Field(default=256, gt=0)
     opponent_samples: int = Field(default=8, gt=0)

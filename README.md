@@ -17,9 +17,10 @@ The repository now provides:
 - a resumable 4-GPU mixed-role self-play orchestrator and benchmark evaluator;
 - CPU fixtures, replay tests, manifests, audit commands, linting, typing, and CI.
 
-No GPU result is claimed in this repository. Training and Freebase ingestion are intentionally
-left for the user's server because they require model weights, licensed datasets, large storage,
-and 4×80GB GPUs.
+The default training path is KQA Pro-only: KQA Pro supplies the cold-start tasks, validation data,
+SQLite graph, and self-play seeds. Freebase ingestion and the WebQSP/CWQ/GrailQA benchmarks remain
+optional extensions for servers with sufficient storage. No GPU result is claimed in this
+repository; model weights and 4-GPU training are intentionally left for the user's server.
 
 ## Clone and run
 
@@ -178,21 +179,46 @@ For KQA Pro, an existing `graph.sqlite` is reused when its source hash and conve
 pass `--rebuild-graph` only when a forced rebuild is required.
 
 ```bash
-# KQA Pro cold-start data
+# KQA Pro cold-start data and local SQLite graph
 python -m graphtask_r1.cli data fetch --dataset kqapro
 python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro --output-dir data/processed/kqapro/kqapro-v1 --workers 1
 
-# Freebase endpoint check and leakage-safe Questioner seeds
-python -m graphtask_r1.cli graph preflight --snapshot freebase-v1
-python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 \
-  --exclude data/processed/freebase_heldout_entities.json \
-  --output data/verl/freebase_questioner_seeds.parquet
+# Solver RL train/validation data
+python -m graphtask_r1.cli data export-verl \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output data/verl/kqapro_solver_rl.parquet --roles solver
+python -m graphtask_r1.cli data export-verl \
+  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
+  --output data/verl/kqapro_solver_rl_val.parquet --roles solver
+
+# KQA Pro Questioner seeds; all rows are consumed in every self-play round
+python -m graphtask_r1.cli data sample-seeds --snapshot kqapro-v1 \
+  --count 256 --seed 42 \
+  --output data/verl/kqapro_questioner_seeds.parquet
+
+export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+export INITIAL_ADAPTER=/absolute/path/to/solver_grpo_or_sft_adapter
+export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
+export VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
+export QUESTIONER_SEEDS=$PWD/data/verl/kqapro_questioner_seeds.parquet
 
 # Inspect the exact 4-GPU self-play launch without starting GPUs
 python -m graphtask_r1.cli train self-play --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay --dry-run
+  --output-dir outputs/selfplay-kqapro --dry-run
 ```
+
+`configs/training/selfplay.yaml` and `data sample-seeds` default to `kqapro-v1`, and seed export
+defaults to 256 rows; no `FREEBASE_ENDPOINT` is needed. The current orchestrator includes the
+entire seed Parquet in every round, so increase the seed count only after a bounded round is stable.
+The accepted KQA Pro subset remains the immutable base pool, while newly certified KQA tasks are
+stored in the self-play archive and mixed into later Solver batches. A much smaller accepted count
+than the raw KQA question count is expected because unsupported KoPL operations and failed
+certification checks remain in `rejections.parquet`; do not add those rejected rows to training.
+
+Freebase is not required for this path. To run the optional Freebase benchmarks or extended
+self-play later, follow [Data preparation](docs/DATA_PREPARATION.md) and pass
+`--snapshot freebase-v1` explicitly when exporting seeds.
 
 ### KQA Pro preparation performance
 
