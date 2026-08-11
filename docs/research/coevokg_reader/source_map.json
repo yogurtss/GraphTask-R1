@@ -1,0 +1,25 @@
+{
+  "paper": {
+    "title": "CoEvoKG: Co-Evolving Knowledge Graphs with Self-Evolving Search Agents",
+    "arxiv_id": "2608.01904v1",
+    "source_url": "https://arxiv.org/abs/2608.01904",
+    "source_format": ["doi-arxiv", "pdf-text", "html"],
+    "scope": "dataset-and-evaluation-focused excerpts"
+  },
+  "blocks": [
+    {"id": "S001", "page": 3, "section": "3.1 Problem Formulation", "type": "body", "topic": "KILT chain pool", "confidence": "high"},
+    {"id": "S002", "page": 4, "section": "3.2 Evidence chain pool", "type": "body", "topic": "2-3 hop offline construction", "confidence": "high"},
+    {"id": "S003", "page": 4, "section": "3.2 Seed fallback", "type": "body", "topic": "fallback QA", "confidence": "high"},
+    {"id": "S004", "page": 6, "section": "4.1 Benchmarks", "type": "body", "topic": "final benchmark composition", "confidence": "high"},
+    {"id": "S005", "page": 6, "section": "4.1 Benchmarks", "type": "body", "topic": "split isolation and metric", "confidence": "high"},
+    {"id": "S006", "page": 6, "section": "4.1 Retrieval and interaction", "type": "body", "topic": "retrieval protocol", "confidence": "high"},
+    {"id": "S007", "page": 6, "section": "4.1 Training", "type": "body", "topic": "training budget and checkpoint selection", "confidence": "high"}
+  ],
+  "glossary": {
+    "evidence chain": "证据链",
+    "chain pool": "链池",
+    "seed pool": "种子题池",
+    "held-out subset": "留出子集",
+    "path support": "路径支撑"
+  }
+}
