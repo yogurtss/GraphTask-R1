@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+MAX_LENGTH="${MAX_LENGTH:-32768}"
+if ! [[ "$MAX_LENGTH" =~ ^[0-9]+$ ]] || (( MAX_LENGTH < 1 || MAX_LENGTH > 40960 )); then
+  echo "MAX_LENGTH must be an integer between 1 and 40960" >&2
+  exit 2
+fi
+
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
 : "${MODEL_TYPE:=qwen3}"
-: "${TRAIN_DATA:?Set TRAIN_DATA to the existing kqapro_sft_train.parquet}"
+: "${TRAIN_DATA:?Set TRAIN_DATA to an SFT parquet file}"
 : "${VAL_DATA:=$TRAIN_DATA}"
 : "${OUTPUT_DIR:=outputs/ms-swift-sft-qwen3-4b-cu124}"
 
@@ -16,7 +22,7 @@ if ! command -v swift >/dev/null 2>&1; then
   exit 2
 fi
 if [[ ! -f "$TRAIN_DATA" || ! -f "$VAL_DATA" ]]; then
-  echo "Existing SFT parquet not found; do not regenerate KQA, fix TRAIN_DATA/VAL_DATA" >&2
+  echo "SFT parquet not found; generate it or fix TRAIN_DATA/VAL_DATA" >&2
   exit 2
 fi
 
@@ -43,7 +49,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift sft \
   --lora_rank "${LORA_RANK:-32}" \
   --lora_alpha "${LORA_ALPHA:-64}" \
   --target_modules all-linear \
-  --max_length "${MAX_LENGTH:-4096}" \
+  --max_length "$MAX_LENGTH" \
   --gradient_checkpointing true \
   --gradient_checkpointing_kwargs '{"use_reentrant":false}' \
   --dataset_num_proc "${DATASET_NUM_PROC:-1}" \

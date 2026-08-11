@@ -18,8 +18,10 @@ from graphtask_r1.schema import (
     TaskProposal,
     Triple,
 )
+from graphtask_r1.training.ms_swift_data import convert_rl_row
 from graphtask_r1.training.opponent import FrozenSolverService
 from graphtask_r1.training.relations import build_relation_catalog, load_relation_catalog
+from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.selfplay import (
     SelfPlayConfig,
     _assemble_dataset,
@@ -27,7 +29,6 @@ from graphtask_r1.training.selfplay import (
     run_self_play,
 )
 from graphtask_r1.training.sft_dataset import export_sft_dataset
-from graphtask_r1.training.verl_dataset import export_role_dataset
 from graphtask_r1.utils import write_json, write_records
 
 
@@ -54,33 +55,114 @@ def test_graphscript_datasets_use_single_turn_without_tools(tmp_path: Path) -> N
     task = _task()
     sft_path = tmp_path / "code_sft.parquet"
     rl_path = tmp_path / "code_rl.parquet"
-    assert export_sft_dataset(
-        [task], sft_path, interaction_mode="graphscript", relation_catalog=_catalog()
-    ) == 2
+    assert (
+        export_sft_dataset(
+            [task], sft_path, interaction_mode="graphscript", relation_catalog=_catalog()
+        )
+        == 2
+    )
     sft_rows = pq.read_table(sft_path).to_pylist()
     for row in sft_rows:
         output = json.loads(row["messages"][-1]["content"])
         assert output["version"] == "0.1"
         assert row["interaction_mode"] == "graphscript"
-    assert export_role_dataset(
-        [task], rl_path, interaction_mode="graphscript", relation_catalog=_catalog()
-    ) == 2
+    assert (
+        export_role_dataset(
+            [task], rl_path, interaction_mode="graphscript", relation_catalog=_catalog()
+        )
+        == 2
+    )
     rl_rows = pq.read_table(rl_path).to_pylist()
     assert all("agent_name" not in row for row in rl_rows)
     assert all("tools_kwargs" not in row for row in rl_rows)
     assert all(row["extra_info"]["interaction_mode"] == "graphscript" for row in rl_rows)
 
 
-def test_tool_dataset_contract_remains_tool_agent(tmp_path: Path) -> None:
-    path = tmp_path / "tool_rl.parquet"
-    assert export_role_dataset([_task()], path, relation_catalog=_catalog()) == 2
-    rows = pq.read_table(path).to_pylist()
-    assert all(row["agent_name"] == "tool_agent" for row in rows)
-    assert all(row["tools_kwargs"] for row in rows)
-    assert all(row["extra_info"]["need_tools_kwargs"] is True for row in rows)
-    assert all(
-        row["extra_info"]["tools_kwargs"] == row["tools_kwargs"] for row in rows
+def test_graphscript_v02_sft_uses_question_only_and_full_program_ir(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "code_v02_sft.parquet"
+    assert (
+        export_sft_dataset(
+            [_task()],
+            path,
+            include_questioner=False,
+            interaction_mode="graphscript",
+            graphscript_version="0.2",
+            relation_catalog=_catalog(),
+        )
+        == 1
     )
+    row = pq.read_table(path).to_pylist()[0]
+    assert row["graphscript_version"] == "0.2"
+    assert "Topic entities" not in row["messages"][1]["content"]
+    output = json.loads(row["messages"][-1]["content"])
+    assert output["version"] == "0.2"
+    assert output["ops"][0] == {
+        "op": "resolve_entity",
+        "query": "Alice",
+        "match": "exact",
+        "limit": 1,
+        "out": "h0",
+    }
+
+
+def test_graphscript_v02_grpo_uses_same_question_only_operator_contract(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "code_v02_grpo.parquet"
+    assert (
+        export_role_dataset(
+            [_task()],
+            path,
+            include_questioner=False,
+            interaction_mode="graphscript",
+            graphscript_version="0.2",
+            relation_catalog=_catalog(),
+            program_profile="graphscript_v0_2",
+        )
+        == 1
+    )
+    row = pq.read_table(path).to_pylist()[0]
+    assert row["extra_info"]["graphscript_version"] == "0.2"
+    assert "search_passage" in row["extra_info"]["operator_set"]
+    assert "Topic entities" not in row["prompt"][1]["content"]
+    assert "GraphScript v0.2" in row["prompt"][0]["content"]
+    assert "tools_kwargs" not in row
+
+
+def test_tool_dataset_is_backend_neutral_and_adapted_at_load_time(tmp_path: Path) -> None:
+    path = tmp_path / "tool_rl.parquet"
+    assert (
+        export_role_dataset(
+            [_task()], path, interaction_mode="tool", relation_catalog=_catalog()
+        )
+        == 2
+    )
+    rows = pq.read_table(path).to_pylist()
+    assert all("agent_name" not in row for row in rows)
+    assert all("tools_kwargs" not in row for row in rows)
+    adapted = [convert_rl_row(row) for row in rows]
+    assert all(row["tools"] for row in adapted)
+
+
+def test_tool_sft_serializes_query_arguments_as_json(tmp_path: Path) -> None:
+    path = tmp_path / "tool_sft.parquet"
+
+    assert (
+        export_sft_dataset(
+            [_task()], path, interaction_mode="tool", relation_catalog=_catalog()
+        )
+        == 2
+    )
+
+    solver = next(row for row in pq.read_table(path).to_pylist() if row["role"] == "solver")
+    tool_call = next(
+        message["tool_calls"][0] for message in solver["messages"] if message.get("tool_calls")
+    )
+    arguments = tool_call["function"]["arguments"]
+    assert isinstance(arguments, str)
+    assert json.loads(arguments)["query"]["steps"][0]["op"] == "hop"
 
 
 def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
@@ -97,6 +179,7 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
                 "rounds: 1",
                 f"relation_catalog: {tmp_path / 'relations.json'}",
                 "interaction_mode: graphscript",
+                'graphscript_version: "0.1"',
                 "program_profile: graphscript_v0_1",
             ]
         )
@@ -121,9 +204,7 @@ def test_interaction_task_selection_and_catalog_are_deterministic(tmp_path: Path
         graph_snapshot="toy-v1",
     )
     output = tmp_path / "interaction.parquet"
-    metrics = select_graphscript_tasks(
-        [selected_task, one_hop], output, backend=toy_graph()
-    )
+    metrics = select_graphscript_tasks([selected_task, one_hop], output, backend=toy_graph())
     assert metrics == {"input": 2, "selected": 1, "rejected": 1}
     rows = pq.read_table(output)["record_json"].to_pylist()
     restored = [TaskCertificate.model_validate(json.loads(value)) for value in rows]
@@ -133,7 +214,7 @@ def test_interaction_task_selection_and_catalog_are_deterministic(tmp_path: Path
     assert load_relation_catalog(catalog_path) == relations
 
 
-def test_selfplay_defaults_preserve_legacy_tool_profile() -> None:
+def test_selfplay_defaults_use_unified_graphscript_profile() -> None:
     config = SelfPlayConfig.model_validate(
         {
             "initial_adapter": "adapter",
@@ -142,14 +223,15 @@ def test_selfplay_defaults_preserve_legacy_tool_profile() -> None:
             "questioner_seeds": "seeds.parquet",
         }
     )
-    assert config.graph_snapshot == "kqapro-v1"
-    assert config.interaction_mode == "tool"
-    assert config.program_profile == "full"
+    assert config.graph_snapshot == "kilt-2019-08-01-v1"
+    assert config.interaction_mode == "graphscript"
+    assert config.graphscript_version == "0.2"
+    assert config.program_profile == "graphscript_v0_2"
 
 
-def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
+def test_default_selfplay_file_uses_kilt_snapshot() -> None:
     config_path = Path(__file__).parents[2] / "configs/training/selfplay.yaml"
-    assert load_selfplay_config(config_path).graph_snapshot == "kqapro-v1"
+    assert load_selfplay_config(config_path).graph_snapshot == "kilt-2019-08-01-v1"
 
 
 def test_comparison_profile_requires_relation_catalog() -> None:
@@ -160,7 +242,8 @@ def test_comparison_profile_requires_relation_catalog() -> None:
                 "base_tasks": "tasks.parquet",
                 "val_data": "val.parquet",
                 "questioner_seeds": "seeds.parquet",
-                "interaction_mode": "tool",
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.1",
                 "program_profile": "graphscript_v0_1",
             }
         )
@@ -314,6 +397,7 @@ def test_graphscript_selfplay_assembles_mixed_single_turn_dataset(tmp_path: Path
         graph_snapshot="toy-v1",
         solver_episodes=1,
         interaction_mode="graphscript",
+        graphscript_version="0.1",
         relation_catalog=catalog_path,
         relation_catalogs={"toy-v1": catalog_path},
         program_profile="graphscript_v0_1",

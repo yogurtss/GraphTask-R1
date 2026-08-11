@@ -1,30 +1,13 @@
-# ms-swift：Python 3.10 + CUDA 12.4 训练指南
+# ms-swift：Python 3.10 + CUDA 12.4 环境
 
-本指南使用 `ms-swift==3.6.4`。这是 ms-swift 官方 CUDA 12.4 / Python 3.10 / Torch 2.6
-镜像使用的版本。SFT 路径只依赖 PyTorch/Transformers/PEFT 等普通训练组件，
-不安装 verl、Ray、SGLang、vLLM 或 FlashAttention；Solver GRPO 的 vLLM 是可选第二阶段。
+推荐固定 Python 3.10、PyTorch 2.6.0+cu124 和 `ms-swift==3.6.4`。SFT 使用 PyTorch SDPA；
+GRPO 额外安装 vLLM。为避免 Transformers、PEFT、TRL 和 CUDA wheel 被其他项目改写，请创建
+独立 Conda 环境。
 
-## 1. 固定版本
-
-| 组件 | 版本 |
-| --- | --- |
-| Python | `3.10` |
-| PyTorch | `2.6.0+cu124` |
-| torchvision | `0.21.0+cu124` |
-| torchaudio | `2.6.0+cu124` |
-| ms-swift | `3.6.4` |
-| Attention（SFT/trainer） | PyTorch `sdpa` |
-| vLLM（仅 GRPO） | `0.8.5.post1` |
-
-ms-swift 3.6.4 将 Transformers 固定在 `<4.53`、PEFT 固定在 `<0.16`、TRL 固定在 `<0.20`，
-与官方 cu124 镜像的 Torch 2.6 / vLLM 0.8.5 组合一致。先固定官方 cu124 wheel，再装
-ms-swift，避免 pip 选择其他 CUDA runtime。
-
-## 2. 建立 SFT 最小环境
+## 1. 建立环境
 
 ```bash
 nvidia-smi
-nvcc --version
 
 conda create -n graphtask-swift-cu124 python=3.10 -y
 conda activate graphtask-swift-cu124
@@ -38,10 +21,19 @@ python -m pip install "ms-swift==3.6.4"
 python -m pip install -r requirements.txt
 ```
 
-本仓库脚本显式使用 `--attn_impl sdpa`，因此 SFT 不需要编译或下载 FlashAttention。也不要在
-该环境中安装 verl；两者的 Transformers、PEFT、TRL 和 rollout 约束不同。
+只做 SFT 时不需要安装 vLLM。要运行 GRPO，再执行：
 
-## 3. 验证
+```bash
+python -m pip install "vllm==0.8.5.post1" math_verify
+```
+
+ms-swift 3.6.4 的 GRPO trainer 会导入它的多轮 scheduler 注册表，即使 GraphScript 主线未启用
+多轮模式，因此 GRPO 环境仍需补装 `math_verify`；SFT 和数据预检不需要它。
+
+Self-play 的 frozen opponent 使用 SGLang，建议在独立服务环境中部署，并与 ms-swift actor GPU
+隔离。普通 SFT 和 Solver-only GRPO 不依赖该服务。
+
+## 2. 验证版本与 GPU
 
 ```bash
 python - <<'PY'
@@ -68,92 +60,56 @@ swift sft --help >/dev/null
 python -m pip check
 ```
 
-`nvidia-smi` 的 CUDA Version 表示驱动支持上限；关键验证项是
-`torch.version.cuda == "12.4"` 和 `torch.cuda.is_available()`。
+`nvidia-smi` 显示的是驱动支持上限；环境是否正确应以 `torch.version.cuda` 和实际
+`torch.cuda.is_available()` 为准。
 
-## 4. 直接读取现有 Parquet
-
-```bash
-export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
-export MODEL_TYPE=qwen3
-export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
-export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
-export SFT_OUTPUT_DIR=$PWD/outputs/ms-swift-sft-qwen3-4b-cu124
-export NUM_GPUS=4
-
-python -m graphtask_r1.cli train sft \
-  --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml \
-  --dry-run
-
-python -m graphtask_r1.cli train sft \
-  --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml
-```
-
-`graphtask_r1/training/ms_swift_plugin.py` 注册两个本地 dataset alias；加载器直接打开
-`SFT_TRAIN_DATA` / `SFT_VAL_DATA`，在内存中做字段适配。它不会调用仓库的数据生成 CLI，也
-不会写回输入 Parquet。
-
-## 5. 可选 GRPO 环境
-
-只有 Solver GRPO 才安装 vLLM：
+## 3. 验证本项目集成
 
 ```bash
-conda activate graphtask-swift-cu124
-python -m pip install "vllm==0.8.5.post1"
+export PYTHONPATH=$PWD
 
-python - <<'PY'
-import torch
-import vllm
-print(torch.__version__, torch.version.cuda, vllm.__version__)
-assert torch.__version__.startswith("2.6.0")
-assert torch.version.cuda == "12.4"
-PY
+python -m graphtask_r1.cli train sft \
+  --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml --dry-run
 
-python -m pip check
+python scripts/preflight_ms_swift_sft.py --help
+bash -n scripts/train_ms_swift_sft.sh
+bash -n scripts/train_ms_swift_grpo.sh
+bash -n scripts/rollout_ms_swift.sh
 ```
 
-再次检查 Torch 仍为 cu124。不要为了 GRPO 安装 SGLang 或 Ray；ms-swift 的 server 模式只需
-vLLM。启动顺序、GPU 隔离和训练命令见根目录 [README](../README.md) 第 4 节。
+本地插件直接读取 `TRAIN_DATA` / `VAL_DATA` 指向的 Parquet，并在内存中适配字段；不会修改输入
+文件，也不会隐式重新生成 KQAPro 或 KILT。
 
-ms-swift 3.6.4 + Torch 2.6 cu124 + vLLM 0.8.5.post1 是官方镜像组合，但本项目的自定义图工具
-rollout 尚未在 GPU CI 中做端到端验证，
-所以先使用 `NUM_GPUS=1`、`ROLLOUT_N=2`、较短 `MAX_COMPLETION_LENGTH` 和少量训练步进行
-smoke test。SFT 路径不受这项 vLLM 边界影响。
-
-## 6. 常见问题
-
-### `ndarray is not JSON serializable`
-
-确认使用的是 `qwen3_4b_sft_ms_swift_cuda124.yaml`，且日志显示导入
-`graphtask_r1/training/ms_swift_plugin.py`。该插件会递归规范化 ndarray；不要重新生成 KQA 或
-重新导出 Parquet。
+## 4. 常见问题
 
 ### `Please explicitly pass the model_type`
 
-确认使用仓库内最新脚本。SFT、rollout 和 GRPO 脚本都会显式传入 `--model_type qwen3`，也允许
-使用 `MODEL_TYPE` 环境变量覆盖。该错误来自 Qwen3 architecture 同时匹配普通模型和 embedding
-模型，不涉及数据文件。
+使用仓库内脚本或设置 `MODEL_TYPE=qwen3`。SFT、rollout 和 GRPO 均显式传入 model type。
+
+### `ndarray is not JSON serializable`
+
+确认 `--external_plugins` 指向 `graphtask_r1/training/ms_swift_plugin.py`。适配器会递归把
+NumPy/Arrow 值转换为 JSON 原生类型。
+
+### 样本从约 1 万降到约 3 千
+
+先运行 `scripts/preflight_ms_swift_sft.py` 查看结构化 rejection。若主要原因为
+`SFT_MAX_LENGTH_EXCEEDED`，把 `MAX_LENGTH` 与预检 `--max-length` 同时提高到 20000–40960；若
+是 tool trace 过长，优先导出 GraphScript v0.2 单程序样本，并提高 KQAPro prepare 的
+`--max-trace-tool-calls` 与 `--max-trace-query-results`。不得依赖静默截断，因为它可能删除 `emit`
+或最终答案监督。
 
 ### CUDA OOM
 
-SFT 先设：
-
-```bash
-export NUM_GPUS=1
-export MICRO_BATCH_SIZE=1
-export GRADIENT_ACCUMULATION_STEPS=8
-export MAX_LENGTH=2048
-```
-
-GRPO 依次降低 `ROLLOUT_N`、`MAX_COMPLETION_LENGTH`、`MICRO_BATCH_SIZE` 和 rollout 的
-`GPU_MEMORY_UTILIZATION`。rollout 与 trainer 不得使用同一张 GPU。
+先保持 `MICRO_BATCH_SIZE=1`，降低 max length 或 rollout generations，再提高 gradient
+accumulation。正式 GRPO 前用 `NUM_GPUS=1`、`ROLLOUT_N=2`、短 completion 做 bounded smoke。
 
 ## 官方参考
 
-- [ms-swift CUDA 12.4 官方镜像矩阵](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/GetStarted/SWIFT-installation.md)
 - [ms-swift v3.6.4 release](https://github.com/modelscope/ms-swift/releases/tag/v3.6.4)
-- [ms-swift 自定义数据集](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Customization/Custom-dataset.md)
-- [ms-swift agent 数据格式](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/Agent-support.md)
-- [ms-swift 自定义 reward](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/GRPO/DeveloperGuide/reward_function.md)
-- [ms-swift 多轮 GRPO](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/GRPO/DeveloperGuide/multi_turn.md)
-- [PyTorch 2.6.0 cu124 安装表](https://pytorch.org/get-started/previous-versions/)
+- [ms-swift 安装](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/GetStarted/SWIFT-installation.md)
+- [自定义数据集](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Customization/Custom-dataset.md)
+- [Agent 数据格式](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/Agent-support.md)
+- [GRPO reward](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/GRPO/DeveloperGuide/reward_function.md)
+- [多轮 GRPO](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/GRPO/DeveloperGuide/multi_turn.md)
+- [PyTorch 2.6.0 cu124](https://pytorch.org/get-started/previous-versions/)

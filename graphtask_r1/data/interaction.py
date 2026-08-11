@@ -39,9 +39,7 @@ def select_graphscript_tasks(
             reason = "SHORTCUT_FOUND"
         else:
             try:
-                script = program_to_graphscript(
-                    task.program, follow_limit=max_follow_limit
-                )
+                script = program_to_graphscript(task.program, follow_limit=max_follow_limit)
                 compiled = graphscript_to_program(
                     script, seed_entity=task.topic_entities[0].entity_id
                 )

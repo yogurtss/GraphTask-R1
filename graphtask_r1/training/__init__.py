@@ -4,7 +4,7 @@ from graphtask_r1.training.parsing import (
     parse_task_proposal,
 )
 from graphtask_r1.training.prompts import role_prompt
-from graphtask_r1.training.verl_dataset import export_role_dataset
+from graphtask_r1.training.rl_dataset import export_role_dataset
 
 __all__ = [
     "export_role_dataset",

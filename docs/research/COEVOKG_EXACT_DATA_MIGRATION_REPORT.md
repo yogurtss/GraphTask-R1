@@ -1,5 +1,12 @@
 # GraphTask-R1 对齐 CoEvoKG 数据集的最小改造调研报告
 
+> 实现状态（2026-08-11）：SSP 固定 revision importer、HotpotQA/TriviaQA 各 500 题测试集、
+> alias-aware normalized EM、KILT hyperlink/FTS5 流式 importer、SQLite snapshot factory 和
+> bounded integration tests 已完成。35GB KILT 已通过 100 页 smoke build；全量图/FTS 构建尚未
+> 启动，因此当前可声明 SSP test parity，不能声明 KILT exact artifact parity。
+> 当前 KILT 原文件为 37,318,876,722 字节，SHA-256 为
+> `f966d6f09c4ff91656db5c56c384f136b0c495c7083c043586b8cb1033c389a5`。
+
 > 调研日期：2026-08-11
 >
 > 范围：只讨论数据、下载、适配与实验协议，不实现代码
@@ -115,7 +122,7 @@ SSP 文件还包含 `searchR1_musique` 500 题，因此原始 `test.jsonl` 共 3
 
 本项目当前应以 L2 为目标，并在结果表脚注明“formal CoEvoKG training manifest was not publicly released”。
 
-## 4. 最小代码改造设计（本轮不实现）
+## 4. 最小代码改造设计（数据适配边界已实现）
 
 ### 4.1 为什么不能只把 JSON 路径换掉
 
@@ -170,7 +177,7 @@ SSP 2,625 held-out questions ─────────────────
 
 ### 4.4 文件级影响预估
 
-若后续实现，预计是“新增为主、少量扩展”为主：
+当前实现保持“新增为主、少量扩展”：
 
 | 位置 | 预计变化 |
 |---|---|

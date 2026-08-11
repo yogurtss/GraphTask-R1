@@ -22,6 +22,16 @@ unset GRAPHTASK_MS_SWIFT_DATA_KIND
 unset GRAPHTASK_MS_SWIFT_TRAIN_DATA
 unset GRAPHTASK_MS_SWIFT_VAL_DATA
 export CUDA_VISIBLE_DEVICES="${ROLLOUT_CUDA_VISIBLE_DEVICES:-0}"
+INTERACTION_MODE="${INTERACTION_MODE:-graphscript}"
+if [[ "$INTERACTION_MODE" != "tool" && "$INTERACTION_MODE" != "graphscript" ]]; then
+  echo "INTERACTION_MODE must be tool or graphscript" >&2
+  exit 2
+fi
+MULTI_TURN_ARGS=()
+if [[ "$INTERACTION_MODE" == "tool" ]]; then
+  MULTI_TURN_ARGS=(--multi_turn_scheduler graphtask_solver --max_turns "${MAX_TURNS:-8}")
+fi
+export INTERACTION_MODE
 
 swift rollout \
   --model "$MODEL_PATH" \
@@ -29,12 +39,11 @@ swift rollout \
   --adapters "$LORA_ADAPTER_PATH" \
   --external_plugins "$PROJECT_ROOT/graphtask_r1/training/ms_swift_plugin.py" \
   --agent_template hermes \
-  --multi_turn_scheduler graphtask_solver \
-  --max_turns "${MAX_TURNS:-8}" \
+  "${MULTI_TURN_ARGS[@]}" \
   --use_async_engine true \
   --tensor_parallel_size "${ROLLOUT_TP_SIZE:-1}" \
   --vllm_max_lora_rank "${LORA_RANK:-32}" \
-  --max_model_len "${VLLM_MAX_MODEL_LEN:-4096}" \
+  --max_model_len "${VLLM_MAX_MODEL_LEN:-32768}" \
   --gpu_memory_utilization "${GPU_MEMORY_UTILIZATION:-0.8}" \
   --port "${VLLM_SERVER_PORT:-8000}" \
   --seed "${SEED:-42}" \

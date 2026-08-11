@@ -1,128 +1,65 @@
-# Tool use 与 GraphScript 双模式
+# 交互模式与统一程序接口
 
-GraphTask-R1 现在支持两条端到端交互路径，同时保留原有 `tool/tool` 为默认行为：
+主实验只使用 `GraphScript v0.2` 作为模型输出。显式工具调用保留为消融模式，但它通过同一个
+ms-swift 数据加载器、图后端和 reward 运行，不拥有独立数据 schema 或训练入口。
 
-| 模式 | Questioner | Solver | verl agent |
-|---|---|---|---|
-| `tool` | 多轮 `graph_search / inspect_entity / execute_program` | 多轮图搜索后提交 `<answer>` | `tool_agent` |
-| `graphscript` | 一次提交受限 GraphScript | 一次提交受限 GraphScript，执行结果即答案 | `single_turn_agent` |
+| 模式 | 模型行为 | ms-swift 调度 | 用途 |
+| --- | --- | --- | --- |
+| `graphscript` | 一次生成完整 JSON 程序，执行器返回答案 | 单轮 | SFT、GRPO、self-play、最终验证 |
+| `tool` | 多轮调用 `graph_search`、`inspect_entity`、`text_search` | `graphtask_solver` | 消融与兼容性检查 |
 
-GraphScript 不是 Python。v0.1 只接受严格 JSON，形状固定为
-`start -> follow -> follow -> require_unique -> emit`，禁止文件、网络、shell、循环及任意代码执行。
-它会编译到现有 typed `Program`，gold answer、verifier、necessity/shortcut 检查、reward、archive
-和 graph backend 均继续复用现有实现。
+## GraphScript v0.2
 
-## 公平比较约束
+输入只保证自然语言问题，不保证 topic entity。程序可用 `resolve_entity` 或 `search_passage` 建立
+入口，再使用统一算子：
 
-- 首轮只比较 `tool/tool` 与 `graphscript/graphscript` 两个端到端系统；结果不能归因到单一角色。
-- 两组分别训练一个共享 Questioner/Solver LoRA，使用相同 base checkpoint、样本、seed、训练步数、
-  frozen-opponent 采样数和 relation catalog。
-- 两组均使用 `graphscript_v0_1` task profile：单 topic、两跳 chain、唯一实体答案、无已知 shortcut。
-- relation catalog 是按 graph snapshot 划分的全局训练目录，不包含某个 episode 的可达路径或答案。
-- `edge_visits` 定义为后端返回的 primitive triples。GraphScript 执行有硬预算；tool rollout 同时记录
-  每次搜索返回的 triples，verl 日志中的总量用于效率比较。
-- comparison profile 中，tool Questioner 将总 edge budget 静态分成搜索与候选执行两半，并限制一次
-  `execute_program`；tool Solver 的全部预算用于搜索。这样无需跨 tool 实例的全局状态也能保证硬上限。
-- 主报告需同时给出 optimizer steps、实际训练 token、LLM calls、edge visits 和 wall time；不能仅按
-  LLM call 数或仅按 step 数宣称公平。
+```text
+start, all_entities, resolve_entity, search_passage, passage_pages,
+follow, intersect, union, filter_type, filter_literal, count,
+query_attribute, query_relation, select_between, select_among,
+require_unique, emit
+```
 
-## 1. 从现有 KQA Pro 任务选出共同子集
+约束如下：
+
+- 至多 64 个操作，SSA handle 为 `h0..h63`；
+- `follow` 有显式方向、relation 和返回上限；
+- 所有 materialization 受 `max_follow_limit`、`max_edge_visits` 和
+  `max_returned_entities` 限制；
+- 最后一个操作必须为 `emit`；
+- 模型不得输出自由文本答案，gold 只能来自执行器；
+- SFT、GRPO 和 benchmark 使用同一个 parser、schema、operator set 与 executor。
+
+v0.1 只用于固定两跳的历史公平对比，不混入主实验。
+
+## 数据字段
+
+训练文件保存 GraphTask 中立字段：
+
+- SFT：`messages`、`role`、`task_id`、`interaction_mode`、
+  `graphscript_version`、`operator_set`；
+- RL：`prompt`、`reward_model`、`extra_info`、`uid`；
+- `extra_info` 保存 graph snapshot、角色、限制、relation catalog ID、operator set 和 trace 上下文。
+
+GraphScript 行加载后不附加 tool schema。`tool` 行则由
+`graphtask_r1/training/ms_swift_data.py` 动态生成 ms-swift `tools` 字段，源 Parquet 不保存某个
+训练框架的 agent/session 私有字段。
+
+## 导出示例
 
 ```bash
-python -m graphtask_r1.cli data select-interaction-tasks \
+python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet
-
-python -m graphtask_r1.cli data select-interaction-tasks \
-  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
-  --output data/processed/kqapro/kqapro-v1/val/interaction_tasks.parquet
-
-python -m graphtask_r1.cli data build-relation-catalog \
-  --input data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet \
-  --output data/processed/kqapro/kqapro-v1/relation_catalog.json
-```
-
-命令会保留结构化 rejection records 和 metrics。不要用 val/test 任务扩充训练 relation catalog。
-筛选会在任务对应的 graph backend 上同时执行认证 Program 与有界 GraphScript；只有 seed、gold 和
-有界结果一致，且满足默认 `max_follow_limit=100`、`max_edge_visits=200` 的任务才会进入共同子集。
-输入必须属于同一 graph snapshot；如实验预算不同，使用同名命令行参数显式覆盖默认值。
-
-## 2. 导出两组 SFT 数据
-
-```bash
-python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet \
-  --output data/verl/kqapro_tool_sft.parquet \
-  --interaction-mode tool \
+  --output data/training/kqapro_graphscript_v02_sft_train.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 
-python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/train/interaction_tasks.parquet \
-  --output data/verl/kqapro_graphscript_sft.parquet \
-  --interaction-mode graphscript \
+python -m graphtask_r1.cli data export-rl \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output data/training/kqapro_graphscript_v02_rl.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
 
-分别训练并保存两个 SFT adapter。两组必须从同一个 base checkpoint 开始；不要让一个 arm 从另一个
-arm 的 adapter 继续训练。
-
-## 3. 构建 Freebase relation catalog 与 seeds
-
-Freebase catalog 必须来自训练侧任务。可从已有 legacy tool self-play archive 导出，再构建 catalog：
-
-```bash
-python -m graphtask_r1.cli data export-archive \
-  --archive outputs/selfplay-qwen3-4b/archive.sqlite \
-  --output data/processed/freebase_train_tasks.parquet
-
-python -m graphtask_r1.cli data build-relation-catalog \
-  --input data/processed/freebase_train_tasks.parquet \
-  --output data/processed/freebase_relation_catalog.json \
-  --snapshot freebase-v1
-```
-
-随后为两个 arm 用相同 seed、denylist 和 catalog 分别导出 seed rows：
-
-```bash
-python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 --seed 42 \
-  --exclude data/processed/freebase_heldout_entities.json \
-  --relation-catalog data/processed/freebase_relation_catalog.json \
-  --interaction-mode tool --output data/verl/freebase_tool_seeds.parquet
-
-python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 --seed 42 \
-  --exclude data/processed/freebase_heldout_entities.json \
-  --relation-catalog data/processed/freebase_relation_catalog.json \
-  --interaction-mode graphscript --output data/verl/freebase_graphscript_seeds.parquet
-```
-
-## 4. 运行两个独立 self-play arm
-
-Tool comparison arm 使用 `configs/training/selfplay_tool_compare.yaml`；GraphScript arm 使用
-`configs/training/selfplay_graphscript.yaml`。两者必须使用不同的 `INITIAL_ADAPTER`、
-`QUESTIONER_SEEDS` 和 output directory，但环境变量 `BASE_TASKS`、`VAL_DATA`、模型、seed 与预算一致。
-
-```bash
-export RELATION_CATALOG=$PWD/data/processed/freebase_relation_catalog.json
-export KQAPRO_RELATION_CATALOG=$PWD/data/processed/kqapro/kqapro-v1/relation_catalog.json
-
-python -m graphtask_r1.cli train self-play \
-  --config configs/training/selfplay_tool_compare.yaml \
-  --output-dir outputs/interaction-tool --dry-run
-
-python -m graphtask_r1.cli train self-play \
-  --config configs/training/selfplay_graphscript.yaml \
-  --output-dir outputs/interaction-graphscript --dry-run
-```
-
-先检查两个 dry-run plan 的 model、round、数据量、预算和 GPU 布局完全一致，再分别启动真实训练。
-现有 `configs/training/selfplay.yaml` 继续使用 `interaction_mode: tool` 和 `program_profile: full`，
-不受对比 profile 限制。
-
-## 验收顺序
-
-1. ToyGraph：解析、预算、唯一性、tool/program 执行等价及 replay 全部通过。
-2. KQA Pro SFT：GraphScript parse/schema/executable rate 和 tool-call success rate 达标。
-3. Frozen Solver 校准：两个模式的 pass-rate 分布都不能集中在 0 或 1。
-4. Freebase smoke：固定 seeds、bounded limits，各跑一个短 round，确认 reward 可重算且 resume 连续。
-5. 完整比较：至少 3 个训练 seed；报告 valid/frontier rate、frontier per 1K edge visits、token、calls、
-   latency 和 Standard/High-Branching 分桶。
+若运行工具消融，将两条命令的 `--interaction-mode` 改为 `tool`，并在启动脚本中显式设置
+`INTERACTION_MODE=tool`。不要把两种模式混入同一个训练 split。

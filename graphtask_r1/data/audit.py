@@ -7,6 +7,8 @@ from typing import Any
 from graphtask_r1.schema import BenchmarkExample, TaskCertificate
 from graphtask_r1.utils import ProgressLogger, read_records
 
+GRAPH_QA_DATASETS = frozenset({"webqsp", "cwq", "grailqa"})
+
 
 def audit_records(path: Path, *, kind: str = "auto") -> dict[str, Any]:
     records = read_records(path)
@@ -31,8 +33,12 @@ def audit_records(path: Path, *, kind: str = "auto") -> dict[str, Any]:
                 example = BenchmarkExample.model_validate(record)
                 ids.append(example.example_id)
                 splits[example.split] += 1
-                if not example.question or not example.topic_entity_ids:
-                    raise ValueError("benchmark example lacks question or gold topic entities")
+                if example.dataset in GRAPH_QA_DATASETS and not example.topic_entity_ids:
+                    raise ValueError("graph benchmark example lacks gold topic entities")
+                if example.dataset not in GRAPH_QA_DATASETS and (
+                    not example.gold_answers.answers or not example.answer_aliases
+                ):
+                    raise ValueError("open-QA benchmark example lacks gold answer aliases")
             else:
                 raise ValueError(f"unknown audit kind: {selected}")
             accepted += 1

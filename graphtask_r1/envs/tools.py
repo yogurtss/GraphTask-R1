@@ -7,7 +7,7 @@ QUESTIONER_TOOLS = frozenset(
         "finalize_program",
     }
 )
-SOLVER_TOOLS = frozenset({"search", "inspect_entity", "final_answer"})
+SOLVER_TOOLS = frozenset({"search", "text_search", "inspect_entity", "final_answer"})
 
 
 def tools_for_role(role: str) -> frozenset[str]:

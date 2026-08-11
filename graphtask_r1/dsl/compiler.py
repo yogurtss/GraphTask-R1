@@ -13,6 +13,10 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     Union,
     program_to_dict,
 )
@@ -102,6 +106,53 @@ class _Builder:
             ]
         if isinstance(program, Count):
             return self.compile(program.input)
+        if isinstance(program, QueryAttribute):
+            entity, input_clauses = self.compile(program.input)
+            value = self.var()
+            return value, [
+                *input_clauses,
+                f"{entity} <{escape_iri(program.attribute)}> {value} .",
+            ]
+        if isinstance(program, QueryRelation):
+            subject, subject_clauses = self.compile(program.subject)
+            object_, object_clauses = self.compile(program.object)
+            relation = self.var()
+            return relation, [
+                *subject_clauses,
+                *object_clauses,
+                f"{subject} {relation} {object_} .",
+            ]
+        if isinstance(program, SelectAmong):
+            entity, input_clauses = self.compile(program.input)
+            value = self.var()
+            direction = "ASC" if program.mode == "min" else "DESC"
+            body = " ".join(
+                [
+                    *input_clauses,
+                    f"{entity} <{escape_iri(program.attribute)}> {value} .",
+                ]
+            )
+            return entity, [
+                f"{{ SELECT DISTINCT {entity} WHERE {{ {body} }} "
+                f"ORDER BY {direction}({value}) {entity} LIMIT 1 }}"
+            ]
+        if isinstance(program, SelectBetween):
+            left, left_clauses = self.compile(program.left)
+            right, right_clauses = self.compile(program.right)
+            entity = self.var()
+            value = self.var()
+            union_body = " UNION ".join(
+                [
+                    "{ " + " ".join([*left_clauses, f"BIND({left} AS {entity})"]) + " }",
+                    "{ " + " ".join([*right_clauses, f"BIND({right} AS {entity})"]) + " }",
+                ]
+            )
+            direction = "ASC" if program.mode == "min" else "DESC"
+            body = f"{union_body} {entity} <{escape_iri(program.attribute)}> {value} ."
+            return entity, [
+                f"{{ SELECT DISTINCT {entity} WHERE {{ {body} }} "
+                f"ORDER BY {direction}({value}) {entity} LIMIT 1 }}"
+            ]
         raise TypeError(type(program).__name__)
 
 

@@ -9,13 +9,14 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from graphtask_r1.archive import TaskArchive
-from graphtask_r1.evaluation import answer_metrics
+from graphtask_r1.envs.text_search import execute_text_search
+from graphtask_r1.evaluation import answer_metrics, openqa_alias_metrics
 from graphtask_r1.generation import certify_proposal
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import execute_graphscript, parse_graphscript
-from graphtask_r1.schema import BenchmarkExample, RelationInfo, TaskProposal
+from graphtask_r1.schema import Answer, AnswerSet, BenchmarkExample, RelationInfo, TaskProposal
 from graphtask_r1.training.parsing import parse_solver_output
-from graphtask_r1.training.prompts import InteractionMode, role_prompt
+from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
 
 TOOLS = [
@@ -48,6 +49,21 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "text_search",
+            "description": "Search indexed passages by natural-language query.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -65,6 +81,7 @@ async def request_opponent(
     timeout_s: float = 180.0,
     retries: int = 2,
     interaction_mode: InteractionMode = "tool",
+    graphscript_version: GraphScriptVersion = "0.1",
     allowed_relations: tuple[str, ...] = (),
     max_follow_limit: int = 100,
     max_edge_visits: int | None = None,
@@ -81,6 +98,7 @@ async def request_opponent(
         "samples": samples,
         "round": round_index,
         "interaction_mode": interaction_mode,
+        "graphscript_version": graphscript_version,
         "allowed_relations": list(allowed_relations),
         "max_follow_limit": max_follow_limit,
     }
@@ -115,22 +133,26 @@ class FrozenSolverService:
         max_turns: int = 8,
         request_timeout_s: float = 120.0,
         interaction_mode: InteractionMode = "tool",
+        graphscript_version: GraphScriptVersion = "0.1",
         relation_catalog: tuple[RelationInfo, ...] = (),
         max_follow_limit: int = 100,
         max_edge_visits: int | None = None,
+        max_completion_tokens: int = 32_768,
     ) -> None:
+        if not 1 <= max_completion_tokens <= 40_960:
+            raise ValueError("max_completion_tokens must be between 1 and 40960")
         self.model_url = model_url.rstrip("/")
         self.model = model
         self.archive = TaskArchive(archive_path)
         self.max_turns = max_turns
         self.request_timeout_s = request_timeout_s
         self.interaction_mode = interaction_mode
+        self.graphscript_version = graphscript_version
         self.relation_catalog = relation_catalog
         self.max_follow_limit = max_follow_limit
         self.max_edge_visits = max_edge_visits
+        self.max_completion_tokens = max_completion_tokens
         self.backends: dict[str, GraphBackend] = {}
-        if interaction_mode == "graphscript" and not relation_catalog:
-            raise ValueError("graphscript opponent requires a non-empty relation catalog")
 
     def backend(self, snapshot: str) -> GraphBackend:
         if snapshot not in self.backends:
@@ -148,7 +170,7 @@ class FrozenSolverService:
             "messages": messages,
             "temperature": 0.7,
             "top_p": 0.8,
-            "max_tokens": 2048,
+            "max_tokens": self.max_completion_tokens,
         }
         if use_tools:
             payload["tools"] = TOOLS
@@ -199,9 +221,7 @@ class FrozenSolverService:
             )
             if restrict_frontier:
                 visible_entities.update(
-                    value
-                    for triple in triples
-                    for value in (triple.subject, triple.object)
+                    value for triple in triples for value in (triple.subject, triple.object)
                 )
             return json.dumps([value.model_dump(mode="json") for value in triples]), len(triples)
         if name == "inspect_entity":
@@ -209,7 +229,40 @@ class FrozenSolverService:
             if restrict_frontier and entity_id not in visible_entities:
                 raise ValueError("opponent may inspect only the seed or an observed entity")
             return backend.entity_info(entity_id).model_dump_json(), 0
+        if name == "text_search":
+            passages = execute_text_search(
+                backend,
+                str(arguments["query"]),
+                limit=min(int(arguments.get("limit", 3)), 10),
+                trace_id="solver-text-search",
+            )
+            visible_entities.update(value.page_id for value in passages)
+            return json.dumps(
+                [value.model_dump(mode="json") for value in passages], ensure_ascii=False
+            ), 0
         raise ValueError(f"opponent requested unsupported tool: {name}")
+
+    @staticmethod
+    def _answer_metrics(
+        task: Any, predicted: AnswerSet, backend: GraphBackend | None = None
+    ) -> dict[str, float]:
+        aliases = tuple(getattr(task, "answer_aliases", ()))
+        if aliases:
+            rendered = AnswerSet(
+                answers=tuple(
+                    Answer(
+                        value=(
+                            backend.entity_info(str(answer.value)).label
+                            if answer.kind == "entity" and backend is not None
+                            else answer.value
+                        ),
+                        kind="literal",
+                    )
+                    for answer in predicted.answers
+                )
+            )
+            return openqa_alias_metrics(rendered, aliases)
+        return answer_metrics(predicted, task.gold_answers)
 
     async def rollout(
         self,
@@ -220,6 +273,7 @@ class FrozenSolverService:
         allowed_relations: tuple[str, ...] = (),
         max_follow_limit: int | None = None,
         max_edge_visits: int | None = None,
+        graphscript_version: GraphScriptVersion | None = None,
     ) -> dict[str, float]:
         mode = interaction_mode or self.interaction_mode
         catalog = self.relation_catalog
@@ -228,8 +282,7 @@ class FrozenSolverService:
             unknown = sorted(set(allowed_relations) - configured_relations)
             if configured_relations and unknown:
                 raise ValueError(
-                    "requested relations are outside the opponent catalog: "
-                    + ", ".join(unknown)
+                    "requested relations are outside the opponent catalog: " + ", ".join(unknown)
                 )
             labels = {value.relation_id: value for value in catalog}
             catalog = tuple(
@@ -237,12 +290,19 @@ class FrozenSolverService:
                 for value in allowed_relations
             )
         topic_ids = [entity.entity_id for entity in task.topic_entities]
+        effective_version = graphscript_version or (
+            "0.2" if not topic_ids else self.graphscript_version
+        )
+        payload = f"Question: {task.question}"
+        if effective_version == "0.1":
+            payload += f"\nTopic entities: {', '.join(topic_ids)}"
         messages: list[dict[str, Any]] = list(
             role_prompt(
                 "solver",
-                f"Question: {task.question}\nTopic entities: {', '.join(topic_ids)}",
+                payload,
                 interaction_mode=mode,
                 relation_catalog=catalog,
+                graphscript_version=effective_version,
             )
         )
         tool_calls = 0
@@ -250,41 +310,62 @@ class FrozenSolverService:
         visible_entities = set(topic_ids)
         started = time.perf_counter()
         if mode == "graphscript":
-            if len(topic_ids) != 1:
-                return {
-                    "passed": 0.0,
-                    "f1": 0.0,
-                    "tool_calls": 0.0,
-                    "edge_visits": 0.0,
-                    "latency_ms": (time.perf_counter() - started) * 1000,
-                }
             message = await self._completion(messages, use_tools=False)
             try:
                 script = parse_graphscript(
                     str(message.get("content", "")),
                     max_follow_limit=max_follow_limit or self.max_follow_limit,
                 )
+                if script.version != effective_version:
+                    raise ValueError(
+                        f"expected GraphScript {effective_version}, got {script.version}"
+                    )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {
+                    "passed": 0.0,
+                    "f1": 0.0,
+                    "tool_calls": 0.0,
+                    "edge_visits": 0.0,
+                    "program_parse": 0.0,
+                    "program_executable": 0.0,
+                    "program_operators": 0.0,
+                    "passage_searches": 0.0,
+                    "latency_ms": (time.perf_counter() - started) * 1000,
+                }
+            try:
                 execution = execute_graphscript(
                     script,
                     backend,
-                    seed_entity=topic_ids[0],
+                    seed_entity=topic_ids[0] if len(topic_ids) == 1 else None,
                     allowed_relations=frozenset(
-                        allowed_relations
-                        or (value.relation_id for value in self.relation_catalog)
+                        allowed_relations or (value.relation_id for value in self.relation_catalog)
                     ),
                     max_edge_visits=max_edge_visits or self.max_edge_visits or 200,
                     trace_id=str(getattr(task, "task_id", "opponent")),
                 )
-                metrics = answer_metrics(execution.answers, task.gold_answers)
+                metrics = self._answer_metrics(task, execution.answers, backend)
                 edge_visits = execution.usage.edge_visits
             except (TypeError, ValueError, json.JSONDecodeError):
-                metrics = {"f1": 0.0, "exact_match": 0.0}
-                edge_visits = 0
+                return {
+                    "passed": 0.0,
+                    "f1": 0.0,
+                    "tool_calls": 0.0,
+                    "edge_visits": 0.0,
+                    "program_parse": 1.0,
+                    "program_executable": 0.0,
+                    "program_operators": float(len(script.ops)),
+                    "passage_searches": 0.0,
+                    "latency_ms": (time.perf_counter() - started) * 1000,
+                }
             return {
                 "passed": float(metrics["exact_match"]),
                 "f1": float(metrics["f1"]),
                 "tool_calls": 0.0,
                 "edge_visits": edge_visits,
+                "program_parse": 1.0,
+                "program_executable": 1.0,
+                "program_operators": float(execution.usage.operators),
+                "passage_searches": float(execution.usage.passage_searches),
                 "latency_ms": (time.perf_counter() - started) * 1000,
             }
         for _ in range(self.max_turns):
@@ -309,8 +390,7 @@ class FrozenSolverService:
                             if edge_budget is not None
                             else None,
                             visible_entities=visible_entities,
-                            restrict_frontier=edge_budget is not None
-                            and bool(effective_relations),
+                            restrict_frontier=edge_budget is not None and bool(effective_relations),
                         )
                     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                         return {
@@ -345,7 +425,7 @@ class FrozenSolverService:
                     task.gold_answers.answers and task.gold_answers.answers[0].kind == "count"
                 )
                 predicted = parse_solver_output(content, count=count)
-                metrics = answer_metrics(predicted, task.gold_answers)
+                metrics = self._answer_metrics(task, predicted, backend)
             except (TypeError, ValueError, json.JSONDecodeError):
                 metrics = {"f1": 0.0, "exact_match": 0.0}
             return {
@@ -372,6 +452,10 @@ class FrozenSolverService:
         if raw_mode not in {"tool", "graphscript"}:
             raise ValueError(f"unsupported interaction mode: {raw_mode}")
         mode = cast(InteractionMode, raw_mode)
+        raw_version = str(payload.get("graphscript_version", self.graphscript_version))
+        if raw_version not in {"0.1", "0.2"}:
+            raise ValueError(f"unsupported GraphScript version: {raw_version}")
+        graphscript_version = cast(GraphScriptVersion, raw_version)
         allowed_relations = tuple(str(value) for value in payload.get("allowed_relations", []))
         backend = self.backend(snapshot)
         task = certify_proposal(proposal, backend, graph_snapshot=snapshot, round_index=round_index)
@@ -387,6 +471,7 @@ class FrozenSolverService:
                     max_edge_visits=int(payload["max_edge_visits"])
                     if payload.get("max_edge_visits") is not None
                     else self.max_edge_visits,
+                    graphscript_version=graphscript_version,
                 )
                 for _ in range(samples)
             )
@@ -397,6 +482,14 @@ class FrozenSolverService:
             "mean_f1": sum(value["f1"] for value in results) / samples,
             "mean_tool_calls": sum(value["tool_calls"] for value in results) / samples,
             "mean_edge_visits": sum(value.get("edge_visits", 0.0) for value in results) / samples,
+            "program_parse_rate": sum(value.get("program_parse", 0.0) for value in results)
+            / samples,
+            "program_execution_rate": sum(value.get("program_executable", 0.0) for value in results)
+            / samples,
+            "mean_program_operators": sum(value.get("program_operators", 0.0) for value in results)
+            / samples,
+            "mean_passage_searches": sum(value.get("passage_searches", 0.0) for value in results)
+            / samples,
             "novelty_structural": structural,
             "novelty_textual": textual,
             "samples": samples,
@@ -407,6 +500,7 @@ class FrozenSolverService:
                     **task.solver_stats,
                     **summary,
                     "interaction_mode": mode,
+                    "graphscript_version": graphscript_version,
                 },
                 "generation": {**task.generation, "interaction_mode": mode},
             }
@@ -423,14 +517,34 @@ class FrozenSolverService:
             question=example.question,
             topic_entities=tuple(backend.entity_info(value) for value in example.topic_entity_ids),
             gold_answers=example.gold_answers,
+            answer_aliases=example.answer_aliases,
         )
-        results = await asyncio.gather(*(self.rollout(task, backend) for _ in range(samples)))
+        raw_version = str(payload.get("graphscript_version", self.graphscript_version))
+        if not example.topic_entity_ids and raw_version == "0.1":
+            raw_version = "0.2"
+        if raw_version not in {"0.1", "0.2"}:
+            raise ValueError(f"unsupported GraphScript version: {raw_version}")
+        graphscript_version = cast(GraphScriptVersion, raw_version)
+        results = await asyncio.gather(
+            *(
+                self.rollout(task, backend, graphscript_version=graphscript_version)
+                for _ in range(samples)
+            )
+        )
         return {
             "example_id": example.example_id,
             "pass_rate": sum(value["passed"] for value in results) / samples,
             "mean_f1": sum(value["f1"] for value in results) / samples,
             "mean_tool_calls": sum(value["tool_calls"] for value in results) / samples,
             "mean_edge_visits": sum(value.get("edge_visits", 0.0) for value in results) / samples,
+            "program_parse_rate": sum(value.get("program_parse", 0.0) for value in results)
+            / samples,
+            "program_execution_rate": sum(value.get("program_executable", 0.0) for value in results)
+            / samples,
+            "mean_program_operators": sum(value.get("program_operators", 0.0) for value in results)
+            / samples,
+            "mean_passage_searches": sum(value.get("passage_searches", 0.0) for value in results)
+            / samples,
             "mean_latency_ms": sum(value["latency_ms"] for value in results) / samples,
             "samples": samples,
         }
@@ -470,9 +584,11 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--max-turns", type=int, default=8)
     parser.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
+    parser.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.1")
     parser.add_argument("--relation-catalog", type=Path)
     parser.add_argument("--max-follow-limit", type=int, default=100)
     parser.add_argument("--max-edge-visits", type=int)
+    parser.add_argument("--max-completion-tokens", type=int, default=32_768)
     args = parser.parse_args()
     from aiohttp import web
 
@@ -482,9 +598,11 @@ def main() -> int:
         archive_path=args.archive,
         max_turns=args.max_turns,
         interaction_mode=args.interaction_mode,
+        graphscript_version=args.graphscript_version,
         relation_catalog=load_relation_catalog(args.relation_catalog),
         max_follow_limit=args.max_follow_limit,
         max_edge_visits=args.max_edge_visits,
+        max_completion_tokens=args.max_completion_tokens,
     )
     web.run_app(create_app(service), host=args.host, port=args.port)
     return 0

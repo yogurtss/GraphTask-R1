@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from graphtask_r1.schema import BenchmarkExample
+from graphtask_r1.training.prompts import GraphScriptVersion
 from graphtask_r1.utils import read_records, write_json, write_records
 
 
@@ -17,6 +18,7 @@ async def evaluate_benchmark(
     graph_snapshot: str = "freebase-v1",
     samples: int = 1,
     concurrency: int = 16,
+    graphscript_version: GraphScriptVersion = "0.2",
 ) -> dict[str, Any]:
     try:
         import aiohttp
@@ -31,6 +33,7 @@ async def evaluate_benchmark(
                 "example": example.model_dump(mode="json"),
                 "graph_snapshot": graph_snapshot,
                 "samples": samples,
+                "graphscript_version": graphscript_version,
             }
             timeout = aiohttp.ClientTimeout(total=300)
             async with (
@@ -57,12 +60,29 @@ async def evaluate_benchmark(
             "mean_edge_visits": sum(float(value.get("mean_edge_visits", 0.0)) for value in values)
             / count,
             "mean_latency_ms": sum(float(value["mean_latency_ms"]) for value in values) / count,
+            "program_parse_rate": sum(
+                float(value.get("program_parse_rate", 0.0)) for value in values
+            )
+            / count,
+            "program_execution_rate": sum(
+                float(value.get("program_execution_rate", 0.0)) for value in values
+            )
+            / count,
+            "mean_program_operators": sum(
+                float(value.get("mean_program_operators", 0.0)) for value in values
+            )
+            / count,
+            "mean_passage_searches": sum(
+                float(value.get("mean_passage_searches", 0.0)) for value in values
+            )
+            / count,
         }
 
     summary = {
         "dataset": examples[0].dataset if examples else "unknown",
         "input": str(input_path),
         "samples": samples,
+        "graphscript_version": graphscript_version,
         "overall": summarize(results) if results else {},
         "by_split": {split: summarize(values) for split, values in buckets.items()},
     }

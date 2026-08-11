@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from graphtask_r1.dsl import canonical_signature, compile_sparql, operator_tags, program_cost
-from graphtask_r1.generation import compile_trace
+from graphtask_r1.generation import TraceCompilationError, compile_trace
 from graphtask_r1.graph import SQLiteGraphBackend
 from graphtask_r1.schema import (
     AllEntities,
@@ -22,6 +22,10 @@ from graphtask_r1.schema import (
     Intersect,
     LiteralValue,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     TaskCertificate,
     TaskProvenance,
     Union,
@@ -39,21 +43,18 @@ from graphtask_r1.utils import (
 )
 from graphtask_r1.verification import verify_task
 
-CONVERTER_VERSION = "kqapro-core-v1"
+GRAPH_CONVERTER_VERSION = "kqapro-core-v2"
+TASK_CONVERTER_VERSION = "kqapro-core-v3"
 UNSUPPORTED_KOPL = {
     "QFilterStr",
     "QFilterNum",
     "QFilterYear",
     "QFilterDate",
-    "SelectBetween",
-    "SelectAmong",
-    "QueryAttr",
     "QueryAttrUnderCondition",
     "VerifyStr",
     "VerifyNum",
     "VerifyYear",
     "VerifyDate",
-    "QueryRelation",
     "QueryAttrQualifier",
     "QueryRelationQualifier",
 }
@@ -172,7 +173,7 @@ def build_kqapro_database(
     )
     metadata = {
         "snapshot_id": "kqapro-v1",
-        "converter_version": CONVERTER_VERSION,
+        "converter_version": GRAPH_CONVERTER_VERSION,
         "source_hash": source_hash if source_hash is not None else file_hash(kb_path),
         "entities": len(entities),
         "concepts": len(concepts),
@@ -292,6 +293,23 @@ class KoPLMapper:
                 output = Count(input=args[0])
             elif function == "What":
                 output = args[0]
+            elif function == "QueryAttr":
+                output = QueryAttribute(input=args[0], attribute=inputs[0])
+            elif function == "QueryRelation":
+                output = QueryRelation(subject=args[0], object=args[1])
+            elif function == "SelectBetween":
+                output = SelectBetween(
+                    left=args[0],
+                    right=args[1],
+                    attribute=inputs[0],
+                    mode="max" if inputs[1] == "greater" else "min",
+                )
+            elif function == "SelectAmong":
+                output = SelectAmong(
+                    input=args[0],
+                    attribute=inputs[0],
+                    mode="max" if inputs[1] == "largest" else "min",
+                )
             else:
                 raise KoPLConversionError("UNSUPPORTED_KOPL_OPERATOR", function)
             outputs.append(output)
@@ -316,8 +334,12 @@ def _topic_ids(program: Program) -> tuple[str, ...]:
         return ()
     if isinstance(program, Intersect | Union):
         return tuple(sorted({value for branch in program.inputs for value in _topic_ids(branch)}))
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count):
+    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
         return _topic_ids(program.input)
+    if isinstance(program, QueryRelation):
+        return tuple(sorted({*_topic_ids(program.subject), *_topic_ids(program.object)}))
+    if isinstance(program, SelectBetween):
+        return tuple(sorted({*_topic_ids(program.left), *_topic_ids(program.right)}))
     raise TypeError(type(program).__name__)
 
 
@@ -336,6 +358,8 @@ def _convert_kqapro_row_uncached(
     source_path: Path,
     source_hash: str,
     seed: int,
+    max_trace_tool_calls: int,
+    max_trace_query_results: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     index, row = item
     try:
@@ -385,17 +409,29 @@ def _convert_kqapro_row_uncached(
                 dataset="kqapro",
                 raw_file=source_path.name,
                 raw_index=index,
-                converter_version=CONVERTER_VERSION,
+                converter_version=TASK_CONVERTER_VERSION,
                 source_hash=source_hash,
             ),
             generation={"seed": seed, "graph_snapshot": "kqapro-v1"},
         )
-        trace = compile_trace(task_id, task.question, program, backend, seed=seed + index)
+        trace = compile_trace(
+            task_id,
+            task.question,
+            program,
+            backend,
+            seed=seed + index,
+            max_tool_calls=max_trace_tool_calls,
+            max_query_results=max_trace_query_results,
+        )
         if trace.final_answers != answers:
             raise KoPLConversionError("TRACE_REPLAY_MISMATCH", task_id)
         return task.model_dump(mode="json"), trace.model_dump(mode="json"), None
     except (KoPLConversionError, TypeError, ValueError, KeyError, RuntimeError) as exc:
-        reason = exc.reason_code if isinstance(exc, KoPLConversionError) else "CONVERSION_ERROR"
+        reason = (
+            exc.reason_code
+            if isinstance(exc, KoPLConversionError | TraceCompilationError)
+            else "CONVERSION_ERROR"
+        )
         return (
             None,
             None,
@@ -417,6 +453,8 @@ def _convert_kqapro_row(
     source_path: Path,
     source_hash: str,
     seed: int,
+    max_trace_tool_calls: int,
+    max_trace_query_results: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     with backend.query_cache():
         return _convert_kqapro_row_uncached(
@@ -427,6 +465,8 @@ def _convert_kqapro_row(
             source_path=source_path,
             source_hash=source_hash,
             seed=seed,
+            max_trace_tool_calls=max_trace_tool_calls,
+            max_trace_query_results=max_trace_query_results,
         )
 
 
@@ -441,6 +481,8 @@ class _KQAProWorker:
         source_path: Path,
         source_hash: str,
         seed: int,
+        max_trace_tool_calls: int,
+        max_trace_query_results: int,
         parallel: bool,
     ) -> None:
         self.mapper = mapper
@@ -450,6 +492,8 @@ class _KQAProWorker:
         self.source_path = source_path
         self.source_hash = source_hash
         self.seed = seed
+        self.max_trace_tool_calls = max_trace_tool_calls
+        self.max_trace_query_results = max_trace_query_results
         self.parallel = parallel
         self.local = threading.local()
         self.backends: list[SQLiteGraphBackend] = []
@@ -460,13 +504,9 @@ class _KQAProWorker:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
         row_backend = self.backend
         if self.parallel:
-            local_backend = cast(
-                SQLiteGraphBackend | None, getattr(self.local, "backend", None)
-            )
+            local_backend = cast(SQLiteGraphBackend | None, getattr(self.local, "backend", None))
             if local_backend is None:
-                local_backend = SQLiteGraphBackend(
-                    self.database_path, allow_cross_thread=True
-                )
+                local_backend = SQLiteGraphBackend(self.database_path, allow_cross_thread=True)
                 self.local.backend = local_backend
                 with self.backends_lock:
                     self.backends.append(local_backend)
@@ -479,6 +519,8 @@ class _KQAProWorker:
             source_path=self.source_path,
             source_hash=self.source_hash,
             seed=self.seed,
+            max_trace_tool_calls=self.max_trace_tool_calls,
+            max_trace_query_results=self.max_trace_query_results,
         )
 
     def close(self) -> None:
@@ -495,8 +537,14 @@ def prepare_kqapro(
     seed: int = 42,
     workers: int = 1,
     rebuild_graph: bool = False,
+    max_trace_tool_calls: int = 32,
+    max_trace_query_results: int = 1_024,
 ) -> dict[str, Any]:
     validate_workers(workers)
+    if max_trace_tool_calls < 2:
+        raise ValueError("max_trace_tool_calls must be at least 2")
+    if not 1 <= max_trace_query_results <= 4_096:
+        raise ValueError("max_trace_query_results must be between 1 and 4096")
     kb_path = raw_dir / "kb.json"
     database_path = output_dir / "graph.sqlite"
     kb_source_hash = file_hash(kb_path)
@@ -507,7 +555,7 @@ def prepare_kqapro(
         not rebuild_graph
         and existing_metadata is not None
         and existing_metadata.get("source_hash") == kb_source_hash
-        and existing_metadata.get("converter_version") == CONVERTER_VERSION
+        and existing_metadata.get("converter_version") == GRAPH_CONVERTER_VERSION
         and existing_metadata.get("snapshot_id") == "kqapro-v1"
     )
     if can_reuse_graph:
@@ -544,6 +592,8 @@ def prepare_kqapro(
             source_path=source_path,
             source_hash=source_hash,
             seed=seed,
+            max_trace_tool_calls=max_trace_tool_calls,
+            max_trace_query_results=max_trace_query_results,
             parallel=workers > 1,
         )
 
@@ -590,11 +640,20 @@ def prepare_kqapro(
         "accepted": total_tasks,
         "rejected": total_rejections,
         "workers": workers,
+        "max_trace_tool_calls": max_trace_tool_calls,
+        "max_trace_query_results": max_trace_query_results,
     }
     write_json(output_dir / "metrics.json", summary)
     write_manifest(
         output_dir,
-        {"command": "data prepare", "dataset": "kqapro", "seed": seed, "workers": workers},
+        {
+            "command": "data prepare",
+            "dataset": "kqapro",
+            "seed": seed,
+            "workers": workers,
+            "max_trace_tool_calls": max_trace_tool_calls,
+            "max_trace_query_results": max_trace_query_results,
+        },
         ["graph.sqlite", "*/tasks.parquet", "*/traces.parquet", "*/rejections.parquet"],
     )
     return summary

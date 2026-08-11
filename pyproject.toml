@@ -19,5 +19,5 @@ packages = ["graphtask_r1"]
 warn_unused_ignores = false
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*", "swift", "swift.*", "verl", "verl.*", "yaml"]
+module = ["pyarrow", "pyarrow.*", "swift", "swift.*", "yaml"]
 ignore_missing_imports = true

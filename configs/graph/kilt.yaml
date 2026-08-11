@@ -1,0 +1,11 @@
+backend: sqlite
+snapshot_id: kilt-2019-08-01-v1
+database: ${GRAPHTASK_KILT_DB}
+relation_ids:
+  - wikipedia_link
+text_search:
+  backend: sqlite_fts5
+  top_k: 3
+max_neighbors: 100
+materialize_max_nodes: 10000
+materialize_max_edges: 50000

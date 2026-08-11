@@ -91,8 +91,50 @@ class Count(BaseModel):
     input: Program
 
 
+class QueryAttribute(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["query_attribute"] = "query_attribute"
+    input: Program
+    attribute: str = Field(min_length=1)
+
+
+class QueryRelation(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["query_relation"] = "query_relation"
+    subject: Program
+    object: Program
+
+
+class SelectBetween(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["select_between"] = "select_between"
+    left: Program
+    right: Program
+    attribute: str = Field(min_length=1)
+    mode: Literal["min", "max"]
+
+
+class SelectAmong(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["select_among"] = "select_among"
+    input: Program
+    attribute: str = Field(min_length=1)
+    mode: Literal["min", "max"]
+
+
 Program: TypeAlias = Annotated[
-    AllEntities | Entity | Hop | Intersect | Union | FilterType | FilterLiteral | Count,
+    AllEntities
+    | Entity
+    | Hop
+    | Intersect
+    | Union
+    | FilterType
+    | FilterLiteral
+    | Count
+    | QueryAttribute
+    | QueryRelation
+    | SelectBetween
+    | SelectAmong,
     Field(discriminator="op"),
 ]
 
@@ -102,6 +144,10 @@ Union.model_rebuild()
 FilterType.model_rebuild()
 FilterLiteral.model_rebuild()
 Count.model_rebuild()
+QueryAttribute.model_rebuild()
+QueryRelation.model_rebuild()
+SelectBetween.model_rebuild()
+SelectAmong.model_rebuild()
 PROGRAM_ADAPTER: TypeAdapter[Program] = TypeAdapter(Program)
 
 

@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from graphtask_r1.generation import compile_trace, validate_proposal
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
-from graphtask_r1.graphscript import program_to_graphscript
+from graphtask_r1.graphscript import graphscript_operators, program_to_graphscript
 from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal
-from graphtask_r1.training.prompts import InteractionMode, role_prompt
+from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
 from graphtask_r1.training.relations import require_catalog_covers_program
 from graphtask_r1.utils import ProgressLogger
 
@@ -20,6 +21,7 @@ def _questioner_messages(
     task: TaskCertificate,
     *,
     interaction_mode: InteractionMode,
+    graphscript_version: GraphScriptVersion,
     relation_catalog: tuple[RelationInfo, ...],
 ) -> list[dict[str, object]]:
     topic_ids = tuple(entity.entity_id for entity in task.topic_entities)
@@ -32,15 +34,14 @@ def _questioner_messages(
             + ", ".join(topic_ids),
             interaction_mode=interaction_mode,
             relation_catalog=relation_catalog,
+            graphscript_version=graphscript_version,
         )
     ]
     if interaction_mode == "graphscript":
-        if len(topic_ids) != 1:
+        if graphscript_version == "0.1" and len(topic_ids) != 1:
             raise ValueError("GraphScript v0.1 SFT requires exactly one topic entity")
-        script = program_to_graphscript(task.program)
-        messages.append(
-            {"role": "assistant", "content": script.model_dump_json(by_alias=True)}
-        )
+        script = program_to_graphscript(task.program, version=graphscript_version)
+        messages.append({"role": "assistant", "content": script.model_dump_json(by_alias=True)})
         return messages
     messages.append(
         {
@@ -58,12 +59,29 @@ def _observation_content(observation: object) -> str:
     return value.model_dump_json(exclude={"step"})
 
 
+def _entity_reference(
+    backend: GraphBackend, entity_id: str
+) -> tuple[str, Literal["id", "exact", "search"]]:
+    """Prefer a unique human-readable label; retain the ID when labels are ambiguous."""
+
+    label = backend.entity_info(entity_id).label
+    resolve = getattr(backend, "resolve_entities", None)
+    if callable(resolve):
+        try:
+            if tuple(resolve(label, match="exact", limit=2)) == (entity_id,):
+                return label, "exact"
+        except (TypeError, ValueError):
+            pass
+    return entity_id, "id"
+
+
 def _solver_messages(
     task: TaskCertificate,
     backend: GraphBackend,
     *,
     seed: int,
     interaction_mode: InteractionMode,
+    graphscript_version: GraphScriptVersion,
     relation_catalog: tuple[RelationInfo, ...],
 ) -> list[dict[str, object]]:
     topic_ids = tuple(entity.entity_id for entity in task.topic_entities)
@@ -71,18 +89,25 @@ def _solver_messages(
         dict(value)
         for value in role_prompt(
             "solver",
-            f"Question: {task.question}\nTopic entities: {', '.join(topic_ids)}",
+            (
+                f"Question: {task.question}\nTopic entities: {', '.join(topic_ids)}"
+                if graphscript_version == "0.1"
+                else f"Question: {task.question}"
+            ),
             interaction_mode=interaction_mode,
             relation_catalog=relation_catalog,
+            graphscript_version=graphscript_version,
         )
     ]
     if interaction_mode == "graphscript":
-        if len(topic_ids) != 1:
+        if graphscript_version == "0.1" and len(topic_ids) != 1:
             raise ValueError("GraphScript v0.1 SFT requires exactly one topic entity")
-        script = program_to_graphscript(task.program)
-        messages.append(
-            {"role": "assistant", "content": script.model_dump_json(by_alias=True)}
+        script = program_to_graphscript(
+            task.program,
+            version=graphscript_version,
+            entity_reference=lambda entity_id: _entity_reference(backend, entity_id),
         )
+        messages.append({"role": "assistant", "content": script.model_dump_json(by_alias=True)})
         return messages
     trace = compile_trace(task.task_id, task.question, task.program, backend, seed=seed)
     for index, call in enumerate(trace.calls):
@@ -106,7 +131,14 @@ def _solver_messages(
                     {
                         "id": tool_call_id,
                         "type": "function",
-                        "function": {"name": tool_name, "arguments": call.arguments},
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps(
+                                call.arguments,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
                     }
                 ],
             }
@@ -130,6 +162,7 @@ def export_sft_dataset(
     include_solver: bool = True,
     seed: int = 42,
     interaction_mode: InteractionMode = "tool",
+    graphscript_version: GraphScriptVersion = "0.1",
     relation_catalog: tuple[RelationInfo, ...] = (),
     relation_catalogs: Mapping[str, tuple[RelationInfo, ...]] | None = None,
 ) -> int:
@@ -139,19 +172,18 @@ def export_sft_dataset(
     progress.start(interaction_mode=interaction_mode)
     for index, task in enumerate(tasks):
         task_catalog = (relation_catalogs or {}).get(task.graph_snapshot, relation_catalog)
-        if interaction_mode == "graphscript" and not task_catalog:
+        if interaction_mode == "graphscript" and graphscript_version == "0.1" and not task_catalog:
             raise ValueError(
                 f"graphscript SFT export requires a relation catalog for {task.graph_snapshot}"
             )
         if interaction_mode == "graphscript":
-            validate_proposal(
-                TaskProposal(
-                    topic_entities=tuple(
-                        entity.entity_id for entity in task.topic_entities
-                    ),
-                    program=task.program,
+            if (include_questioner and task.topic_entities) or graphscript_version == "0.1":
+                validate_proposal(
+                    TaskProposal(
+                        topic_entities=tuple(entity.entity_id for entity in task.topic_entities),
+                        program=task.program,
+                    )
                 )
-            )
             require_catalog_covers_program(
                 task.program,
                 task_catalog,
@@ -163,11 +195,14 @@ def export_sft_dataset(
                     "messages": _questioner_messages(
                         task,
                         interaction_mode=interaction_mode,
+                        graphscript_version=graphscript_version,
                         relation_catalog=task_catalog,
                     ),
                     "role": "questioner",
                     "task_id": task.task_id,
                     "interaction_mode": interaction_mode,
+                    "graphscript_version": graphscript_version,
+                    "operator_set": list(graphscript_operators(graphscript_version)),
                 }
             )
         if include_solver:
@@ -181,11 +216,14 @@ def export_sft_dataset(
                         backend,
                         seed=seed + index,
                         interaction_mode=interaction_mode,
+                        graphscript_version=graphscript_version,
                         relation_catalog=task_catalog,
                     ),
                     "role": "solver",
                     "task_id": task.task_id,
                     "interaction_mode": interaction_mode,
+                    "graphscript_version": graphscript_version,
+                    "operator_set": list(graphscript_operators(graphscript_version)),
                 }
             )
         progress.update(index + 1, rows=len(rows))

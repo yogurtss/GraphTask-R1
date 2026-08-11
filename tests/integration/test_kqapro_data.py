@@ -89,7 +89,7 @@ def test_kqapro_prepare_executes_and_replays(
     messages = [record.message for record in caplog.records]
     assert any('operation="data.prepare.kqapro.build_graph"' in value for value in messages)
     assert any('operation="data.prepare.kqapro.split.train"' in value for value in messages)
-    assert any('phase="completed"' in value and 'accepted=1' in value for value in messages)
+    assert any('phase="completed"' in value and "accepted=1" in value for value in messages)
 
 
 def test_kqapro_parallel_output_matches_serial_output(tmp_path: Path) -> None:
@@ -114,13 +114,51 @@ def test_kqapro_reuses_matching_graph_snapshot(tmp_path: Path) -> None:
 
     first = prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
     second = prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
-    rebuilt = prepare_kqapro(
-        raw_dir, output_dir, splits=("train",), limit=0, rebuild_graph=True
-    )
+    rebuilt = prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0, rebuild_graph=True)
 
     assert first["build"]["reused"] is False
     assert second["build"]["reused"] is True
     assert rebuilt["build"]["reused"] is False
+
+
+def test_kopl_mapper_supports_query_and_selection_operators(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    mapper = KoPLMapper(backend)
+    try:
+        query_attribute = mapper.convert(
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Bob"]},
+                {"function": "QueryAttr", "dependencies": [0], "inputs": ["age"]},
+            ]
+        )
+        query_relation = mapper.convert(
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Alice"]},
+                {"function": "Find", "dependencies": [], "inputs": ["Bob"]},
+                {"function": "QueryRelation", "dependencies": [0, 1], "inputs": []},
+            ]
+        )
+        select_between = mapper.convert(
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Alice"]},
+                {"function": "Find", "dependencies": [], "inputs": ["Bob"]},
+                {
+                    "function": "SelectBetween",
+                    "dependencies": [0, 1],
+                    "inputs": ["age", "greater"],
+                },
+            ]
+        )
+    finally:
+        backend.close()
+
+    assert query_attribute.op == "query_attribute"
+    assert query_relation.op == "query_relation"
+    assert select_between.op == "select_between"
 
 
 def test_mapper_rejects_non_core_kopl(tmp_path: Path) -> None:
@@ -229,7 +267,7 @@ def test_sqlite_pushes_find_all_filters_into_single_queries(tmp_path: Path) -> N
         backend.close()
 
 
-def test_trace_bulk_prefetches_filter_candidates(tmp_path: Path) -> None:
+def test_trace_filters_candidates_in_one_compact_query(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_fixture(raw_dir)
     output_dir = tmp_path / "processed"
@@ -242,7 +280,11 @@ def test_trace_bulk_prefetches_filter_candidates(tmp_path: Path) -> None:
         with backend.query_cache():
             trace = compile_trace("bulk-prefetch", "Which people?", program, backend, seed=7)
         assert trace.final_answers.values() == ("e_alice", "e_bob")
-        assert len(statements) == 3
+        assert [call.name for call in trace.calls] == ["search", "final_answer"]
+        assert trace.calls[0].arguments["query"]["root"]["kind"] == "all_entities"
+        assert trace.observations[1].total_entities == 2
+        assert not any(call.name == "inspect_entity" for call in trace.calls)
+        assert len(statements) == 2
     finally:
         backend.close()
 

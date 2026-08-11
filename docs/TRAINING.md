@@ -1,212 +1,151 @@
-# Qwen3-4B + verl 训练手册
+# ms-swift 训练手册
 
-仓库提供两个隔离 profile：CUDA 12.8 使用 verl `v0.7.1` commit
-`bec9ef74768dd201881cd4e54cd0385e87caae27`；CUDA 12.4 使用 Python 3.10、Torch
-2.6.0+cu124、SGLang 0.4.6.post5、vLLM 0.8.5.post1 和 verl v0.5.0。后者的安装和训练主线见
-[CUDA 12.4 环境](CUDA_12_4_ENVIRONMENT.md)及仓库根目录 [README](../README.md)。
+仓库只有一条训练运行时：ms-swift。SFT、GRPO 和 self-play 共享本地数据适配器
+`graphtask_r1/training/ms_swift_plugin.py`；训练 Parquet 保持 GraphTask 自身的中立 schema，
+加载时才转换为 ms-swift 的 `messages`、`tools` 和 reward 输入。
 
-默认模型是 `Qwen/Qwen3-4B-Instruct-2507`，非 thinking 模式，共享 LoRA rank/alpha 为
-32/64。
+## 1. 训练前质量门
 
-## 1. 环境
+开始 GPU 作业前必须满足：
 
-PyTorch、verl、SGLang、Ray、FlashAttention 和 CUDA 栈均由服务器环境独立管理，本仓库不会
-安装或升级它们。verl 的源码目录可以放在服务器任意位置，不需要复制或 clone 到本仓库的
-`third_party/` 下；只需确保当前 Python 环境可以 `import verl`。默认 GPU profile 的验证版本为
-verl `v0.7.1` 及上述 commit。CUDA 12.4 profile 是隔离的旧版兼容环境，仓库会自动选择旧版
-SFT 入口和同步 SGLang，但 SFT checkpoint 必须先合并再交给 GRPO；不能只替换 Torch 版本。
+- `data audit` 无重复 task ID、损坏 JSON 或 certificate replay 错误；
+- gold answer 全部由 certified program 执行产生；
+- SFT 使用真实 tokenizer/template 完成长度预检；
+- SFT、GRPO 与评测均记录 `interaction_mode=graphscript`、`graphscript_version=0.2`；
+- KILT GRPO train/val 与 SSP 最终测试完全隔离；
+- 先用 ToyGraph 或 bounded KILT smoke 数据跑通，再扩大数据和 GPU 数。
 
-clone GraphTask-R1 后进入仓库根目录。服务器若还缺少本项目的轻量运行依赖，再执行：
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-GraphTask-R1 本身无需安装。可在训练前检查当前服务器环境是否可见：
-
-```bash
-python -c "import torch, verl, sglang; print(torch.__version__, verl.__file__, sglang.__file__)"
-```
-
-先运行 verl 自带的 Qwen3-4B multi-turn 示例，确认 CUDA、Ray、SGLang 和 tool-call template
-正常。升级 verl 后必须重新检查 Hydra 字段和 Parquet contract。
-
-## 2. 双角色 SFT
-
-如果以下三个 processed 文件已经存在，不要再次执行 `data prepare`：
+推荐目录：
 
 ```text
-data/processed/kqapro/kqapro-v1/graph.sqlite
-data/processed/kqapro/kqapro-v1/train/tasks.parquet
-data/processed/kqapro/kqapro-v1/val/tasks.parquet
+data/training/
+├── kqapro_graphscript_v02_sft_train.parquet
+├── kqapro_graphscript_v02_sft_val.parquet
+└── kilt-certified-grpo-v2/
+    ├── train/solver_grpo.parquet
+    └── val/solver_grpo.parquet
 ```
 
-SFT 报告缺少 `kqapro_sft_train.parquet` 时，只需从现有 accepted tasks 导出训练 Parquet。导出器
-只读 `tasks.parquet` 和 `graph.sqlite`，不会重新处理或覆盖 KQA Pro：
+## 2. SFT 长度预检
+
+预检会调用与训练相同的 model type、Qwen3 template、Hermes agent template 和
+`truncation_strategy=raise`。超过长度的样本不会被静默截断，而是写入带 reason code 的独立
+Parquet。
 
 ```bash
-export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
-
-python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/verl/kqapro_sft_train.parquet --roles both
-
-python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
-  --output data/verl/kqapro_sft_val.parquet --roles both
+python scripts/preflight_ms_swift_sft.py \
+  --input data/training/kqapro_graphscript_v02_sft_train.parquet \
+  --accepted-output outputs/preflight/kqapro-train-accepted.parquet \
+  --rejected-output outputs/preflight/kqapro-train-rejected.parquet \
+  --summary-output outputs/preflight/kqapro-train-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 \
+  --model-type qwen3 --max-length 32768
 ```
 
-导出后应得到：
+`--max-length` 支持 1–40960。若从 32K 提高到 40K，应重新运行预检并记录新的 summary；不要仅
+修改训练参数后继续使用旧 accepted 文件。
 
-```text
-data/verl/kqapro_sft_train.parquet
-data/verl/kqapro_sft_val.parquet
-```
-
-然后：
+## 3. SFT
 
 ```bash
-export SFT_TRAIN_DATA=$PWD/data/verl/kqapro_sft_train.parquet
-export SFT_VAL_DATA=$PWD/data/verl/kqapro_sft_val.parquet
-export SFT_OUTPUT_DIR=$PWD/outputs/sft-qwen3-4b
+export SFT_TRAIN_DATA=$PWD/outputs/preflight/kqapro-train-accepted.parquet
+export SFT_VAL_DATA=$PWD/data/training/kqapro_graphscript_v02_sft_val.parquet
+export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b-kqapro-v02
+export NUM_GPUS=4
+export MAX_LENGTH=32768
 
 python -m graphtask_r1.cli train sft \
-  --config configs/experiments/qwen3_4b_sft.yaml --dry-run
+  --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml --dry-run
+
 python -m graphtask_r1.cli train sft \
-  --config configs/experiments/qwen3_4b_sft.yaml
+  --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml
 ```
 
-CUDA 12.4 环境把配置文件替换为
-`configs/experiments/qwen3_4b_sft_cuda124.yaml`。训练完成后按 README 运行
-`python -m graphtask_r1.training.merge_sft`，不能把旧版 LoRA adapter 直接传给 GRPO。
+脚本使用 LoRA、BF16、SDPA 和显式 seed。显存不足时依次降低 `MAX_LENGTH`、
+`MICRO_BATCH_SIZE`，再提高 `GRADIENT_ACCUMULATION_STEPS`；不要让模板自动截断程序尾部。
 
-SFT 数据使用 verl `messages` contract。Questioner 学习输出结构化 TaskProposal；Solver 学习
-真实 `graph_search`/`inspect_entity` 调用和 `<answer>`。两种角色写入同一 adapter。
+## 4. KILT GRPO
 
-## 3. Solver-only GRPO
+先生成 bounded、可回放的数据：
 
 ```bash
-python -m graphtask_r1.cli data export-verl \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/verl/kqapro_solver_rl.parquet --roles solver
+export GRAPHTASK_KILT_DB=$PWD/data/processed/kilt/kilt-2019-08-01-v1/graph.sqlite
 
-python -m graphtask_r1.cli data export-verl \
-  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
-  --output data/verl/kqapro_solver_rl_val.parquet --roles solver
+python -m graphtask_r1.cli data bootstrap-kilt-grpo \
+  --output-dir data/training/kilt-certified-grpo-v2 \
+  --count 20608 --pool-limit 1000000 --val-ratio 0.02484472 --seed 42 \
+  --interaction-mode graphscript --graphscript-version 0.2
+```
 
-export SFT_ADAPTER=/absolute/path/to/sft/lora_adapter
-export SOLVER_RL_TRAIN_DATA=$PWD/data/verl/kqapro_solver_rl.parquet
-export SOLVER_RL_VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
-export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/solver-grpo
+### colocate smoke test
+
+```bash
+export KQAPRO_SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v02/checkpoint-last
+export KILT_GRPO_TRAIN_DATA=$PWD/data/training/kilt-certified-grpo-v2/train/solver_grpo.parquet
+export KILT_GRPO_VAL_DATA=$PWD/data/training/kilt-certified-grpo-v2/val/solver_grpo.parquet
+export KILT_GRPO_OUTPUT_DIR=$PWD/outputs/grpo/kilt-v02-smoke
+export NUM_GPUS=1
+export VLLM_MODE=colocate
+export ROLLOUT_N=2
+export MAX_COMPLETION_LENGTH=4096
 
 python -m graphtask_r1.cli train solver-grpo \
-  --config configs/experiments/qwen3_4b_solver_grpo.yaml --dry-run
+  --config configs/experiments/qwen3_4b_kilt_solver_grpo_ms_swift_cuda124.yaml --dry-run
+
 python -m graphtask_r1.cli train solver-grpo \
-  --config configs/experiments/qwen3_4b_solver_grpo.yaml
+  --config configs/experiments/qwen3_4b_kilt_solver_grpo_ms_swift_cuda124.yaml
 ```
 
-上述 adapter 直连命令只用于 CUDA 12.8。CUDA 12.4 应设置 `CUDA124_SFT_MODEL` 为已经合并的
-模型目录，并使用 `configs/experiments/qwen3_4b_solver_grpo_cuda124.yaml`；该 profile 强制同步
-SGLang rollout，以保留 verl v0.5 的每条样本工具 session 参数。
+确认 smoke test 后再提高 completion length、generation 数和 GPU 数。正式 server 模式先在独立
+GPU 上运行 `scripts/rollout_ms_swift.sh`，再以 `VLLM_MODE=server` 启动 GRPO。GraphScript 是单次
+程序生成，不启用多轮 scheduler；只有显式 `INTERACTION_MODE=tool` 的消融实验才启用它。
 
-先确认格式有效率、工具成功率和 held-out KQA F1，再进入 KQA Pro SQLite self-play。
+## 5. Self-play
 
-## 4. KQA Pro mixed-role self-play（仅 CUDA 12.8）
-
-当前 self-play orchestrator 需要 verl v0.7.1 的 adapter 交接接口，不支持 CUDA 12.4。默认
-路径完全使用已经由 `kb.json` 构建的 KQA Pro SQLite 图，不需要下载 Freebase、启动
-Virtuoso 或设置 `FREEBASE_ENDPOINT`。accepted KQA 任务作为不可变 base pool，Questioner 从
-同一图的独立实体 seeds 出发生成新任务；认证通过的任务写入 archive，并在后续轮次混入 Solver
-batch。
-
-默认 GPU 布局：
-
-```text
-GPU 0–1  verl actor/rollout/ref，共享 LoRA mixed-role GRPO
-GPU 2–3  上一轮冻结 LoRA 的 SGLang Solver，DP=2、TP=1
-CPU      GraphTask opponent/archive service、KQA Pro SQLite 和 reward workers
-```
-
-先导出 KQA Pro seeds。当前 orchestrator 每轮读取 seed Parquet 的全部行，因此先让 seed 数量与
-默认的 `solver_episodes: 256` 对齐；短轮稳定后再提高到 512 或 1024。
+默认配置是 KILT + GraphScript v0.2：
 
 ```bash
-export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+export INITIAL_ADAPTER=$KQAPRO_SFT_ADAPTER
+export BASE_TASKS=$PWD/data/training/kilt-certified-grpo-v2/train/tasks.parquet
+export VAL_DATA=$KILT_GRPO_VAL_DATA
+export QUESTIONER_SEEDS=$PWD/data/training/kilt_questioner_seeds.parquet
+export KILT_RELATION_CATALOG=$PWD/data/training/kilt-certified-grpo-v2/relation_catalog.json
+export KQAPRO_RELATION_CATALOG=$PWD/data/processed/kqapro/kqapro-v1/relation_catalog.json
 
-python -m graphtask_r1.cli data sample-seeds \
-  --snapshot kqapro-v1 \
-  --count 256 --pool-limit 100000 --seed 42 \
-  --output data/verl/kqapro_questioner_seeds.parquet
-```
-
-准备训练环境变量：
-
-```bash
-export INITIAL_ADAPTER=/absolute/path/to/solver_grpo_or_sft_adapter
-export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
-export VAL_DATA=$PWD/data/verl/kqapro_solver_rl_val.parquet
-export QUESTIONER_SEEDS=$PWD/data/verl/kqapro_questioner_seeds.parquet
-```
-
-先检查完整进程计划：
-
-```bash
 python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-kqapro --dry-run
+  --output-dir outputs/selfplay --dry-run
 ```
 
-确认路径后启动：
+真实运行每轮会启动一个冻结的 SGLang opponent、组装 questioner/solver mixed Parquet、调用
+ms-swift GRPO、查找新 LoRA adapter，并写入 round manifest。配置 hash、dataset hash、adapter
+路径和 ms-swift 版本用于恢复；修改配置后不能从旧 manifest 继续。外部图调用保留 timeout、retry、
+cache 和 trace ID。
 
-```bash
-python -m graphtask_r1.cli train self-play \
-  --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-kqapro
-```
+## 6. 最终验证
 
-每轮使用上轮 adapter 启动冻结 Solver。Questioner 的每个有效候选通过异步 `/evaluate`
-接口执行 8 次真实工具 rollout；其 pass rate、结构必要性和 novelty 共同形成 reward。接受任务由
-单写者 SQLite archive 幂等保存，并在下一轮进入 Solver batch。基础设施请求重试后仍失败会
-中止该 job，不会伪装成 Solver 答错。
-
-恢复：
-
-```bash
-python -m graphtask_r1.cli train self-play \
-  --config configs/training/selfplay.yaml \
-  --output-dir outputs/selfplay-kqapro --resume
-```
-
-resume 会核对 config hash，并从最后完成 round 的 adapter 继续。不要修改已有 round 目录。
-
-## 5. 验证与可选 Freebase benchmark
-
-默认实验使用 `kqapro_solver_rl_val.parquet` 监控 held-out KQA 指标。WebQSP、CWQ 和 GrailQA
-的问题文件本身不能替代知识图，它们仍需要 Freebase backend；没有 Freebase 时不要运行下面的
-可选 benchmark，也不要把缺失的图查询当作模型错误。
-
-用待评测 adapter 启动冻结 Solver SGLang 和 GraphTask service，命令形态与每轮 `plan.json`
-中的 `sglang`、`opponent` 一致。以后准备好 Freebase 服务后可以运行：
+HotpotQA、TriviaQA 和 NaturalQuestions 统一转换为 `BenchmarkExample`，但不转换为训练
+`TaskCertificate`。启动冻结 solver 服务后：
 
 ```bash
 python -m graphtask_r1.cli evaluate benchmark \
-  --input data/processed/grailqa/dev/examples.parquet \
-  --output-dir outputs/eval/grailqa-dev \
+  --input data/processed/ssp/hotpotqa/examples.parquet \
+  --output-dir outputs/eval/hotpotqa \
   --solver-url http://127.0.0.1:18080 \
-  --snapshot freebase-v1 --samples 1
+  --snapshot kilt-2019-08-01-v1 --graphscript-version 0.2
 ```
 
-输出包括 entity F1、exact match、工具调用数、延迟、逐 split 指标和逐样本 predictions。
-论文主表至少比较 base/SFT、static synthetic、solver-only GRPO 和完整 self-play；这些实验必须
-使用相同 token、rollout 和图调用预算。
+除 EM/F1 外必须报告 program parse rate、execution rate、operator count、passage search count 和
+latency，避免把“代码格式失败”“执行失败”和“程序语义错误”混为一类。
 
-## 6. 故障排查和降配顺序
+## 7. 入口索引
 
-- SGLang 启动失败：先检查 adapter 路径、模型缓存和 `/health`，再检查 `round_*/logs/`。
-- KQA 图打开失败：检查 `GRAPHTASK_KQAPRO_DB` 是否指向已生成的只读 `graph.sqlite`。
-- 可选 Freebase 路径出现 Virtuoso timeout：不要把 timeout 当负样本；检查 endpoint、索引和 cache 权限。
-- 显存不足：先降低 batch、response length、rollout N，再启用 optimizer/parameter offload。
-- Questioner 全部无效：回到 SFT，检查 TaskProposal JSON、禁止 `all_entities` 和 topic root 一致性。
-- 角色坍缩：检查两角色格式率和 reward 分布，再调整 0.35/0.65 权重。
-
-本仓库只验证 CPU 逻辑与命令契约；训练是否取得提升必须由服务器实验和独立 benchmark 证明。
+| 用途 | 文件 |
+| --- | --- |
+| SFT | `scripts/train_ms_swift_sft.sh` |
+| GRPO | `scripts/train_ms_swift_grpo.sh` |
+| rollout server | `scripts/rollout_ms_swift.sh` |
+| SFT 模板预检 | `scripts/preflight_ms_swift_sft.py` |
+| 数据加载与字段转换 | `graphtask_r1/training/ms_swift_data.py` |
+| dataset/reward/scheduler 注册 | `graphtask_r1/training/ms_swift_plugin.py` |
+| mixed-role round orchestration | `graphtask_r1/training/selfplay.py` |

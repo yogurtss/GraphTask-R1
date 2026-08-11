@@ -15,23 +15,24 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from graphtask_r1.archive import TaskArchive
 from graphtask_r1.schema import TaskCertificate
-from graphtask_r1.training.prompts import role_prompt
+from graphtask_r1.training.prompts import GraphScriptVersion, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
-from graphtask_r1.training.verl_dataset import export_role_dataset, tool_kwargs
+from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.utils import file_hash, read_json, read_records, write_json
 
-VERL_COMMIT = "bec9ef74768dd201881cd4e54cd0385e87caae27"
+MS_SWIFT_VERSION = "3.6.4"
 
 
 class SelfPlayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_path: str = "Qwen/Qwen3-4B-Instruct-2507"
+    model_type: str = "qwen3"
     initial_adapter: str
     base_tasks: Path
     val_data: Path
     questioner_seeds: Path
-    graph_snapshot: str = "kqapro-v1"
+    graph_snapshot: str = "kilt-2019-08-01-v1"
     rounds: int = Field(default=3, gt=0)
     solver_episodes: int = Field(default=256, gt=0)
     opponent_samples: int = Field(default=8, gt=0)
@@ -43,22 +44,34 @@ class SelfPlayConfig(BaseModel):
     opponent_gpus: str = "2,3"
     sglang_port: int = 30000
     opponent_port: int = 18080
-    train_script: Path = Path("scripts/train_verl.sh")
+    train_script: Path = Path("scripts/train_ms_swift_grpo.sh")
     sglang_start_timeout_s: int = 300
-    interaction_mode: Literal["tool", "graphscript"] = "tool"
+    interaction_mode: Literal["tool", "graphscript"] = "graphscript"
+    graphscript_version: GraphScriptVersion = "0.2"
     relation_catalog: Path | None = None
     relation_catalogs: dict[str, Path] = Field(default_factory=dict)
     max_follow_limit: int = Field(default=100, gt=0, le=1_000)
     max_edge_visits: int = Field(default=200, gt=0)
     max_returned_entities: int = Field(default=1_000, gt=0)
-    program_profile: Literal["full", "graphscript_v0_1"] = "full"
+    max_completion_tokens: int = Field(default=32_768, gt=0, le=40_960)
+    program_profile: Literal["full", "graphscript_v0_1", "graphscript_v0_2"] = (
+        "graphscript_v0_2"
+    )
 
     @model_validator(mode="after")
     def validate_interaction_contract(self) -> SelfPlayConfig:
         if self.program_profile == "graphscript_v0_1" and self.relation_catalog is None:
             raise ValueError("comparison profile requires relation_catalog")
-        if self.interaction_mode == "graphscript" and self.program_profile != "graphscript_v0_1":
-            raise ValueError("graphscript mode requires program_profile=graphscript_v0_1")
+        expected_profile = (
+            "graphscript_v" + self.graphscript_version.replace(".", "_")
+            if self.interaction_mode == "graphscript"
+            else "full"
+        )
+        if self.program_profile != expected_profile:
+            raise ValueError(
+                f"{self.interaction_mode} mode requires "
+                f"program_profile={expected_profile}"
+            )
         return self
 
 
@@ -120,6 +133,7 @@ def _assemble_dataset(
         include_questioner=False,
         include_solver=True,
         interaction_mode=config.interaction_mode,
+        graphscript_version=config.graphscript_version,
         relation_catalog=relation_catalog,
         relation_catalogs=relation_catalogs,
         max_follow_limit=config.max_follow_limit,
@@ -138,6 +152,7 @@ def _assemble_dataset(
                 "opponent_samples": config.opponent_samples,
                 "round": round_index,
                 "interaction_mode": config.interaction_mode,
+                "graphscript_version": config.graphscript_version,
                 "allowed_relations": [value.relation_id for value in relation_catalog],
                 "max_follow_limit": config.max_follow_limit,
                 "max_edge_visits": config.max_edge_visits,
@@ -146,34 +161,16 @@ def _assemble_dataset(
             }
         )
         row["extra_info"] = extra
-        legacy_tool_mode = (
-            config.interaction_mode == "tool"
-            and config.program_profile == "full"
-            and not relation_catalog
-        )
-        if legacy_tool_mode:
-            continue
         row["prompt"] = role_prompt(
             "questioner",
             "Explore from these seed entities and construct one certified task: "
             + ", ".join(topic_ids),
             interaction_mode=config.interaction_mode,
             relation_catalog=relation_catalog,
+            graphscript_version=config.graphscript_version,
         )
-        if config.interaction_mode == "tool":
-            row["agent_name"] = "tool_agent"
-            questioner_tools = tool_kwargs(
-                ("graph_search", "inspect_entity", "execute_program"),
-                extra,
-                role="questioner",
-            )
-            row["tools_kwargs"] = questioner_tools
-            extra["need_tools_kwargs"] = True
-            extra["tools_kwargs"] = questioner_tools
-            row["extra_info"] = extra
-        else:
-            row.pop("agent_name", None)
-            row.pop("tools_kwargs", None)
+        row.pop("agent_name", None)
+        row.pop("tools_kwargs", None)
     questioner_table = pa.Table.from_pylist(seed_rows)
     solver_table = pq.read_table(solver_path)
     combined = pa.concat_tables([questioner_table, solver_table], promote_options="default")
@@ -202,7 +199,7 @@ def _adapter_from_checkpoint(round_dir: Path) -> Path:
         key=lambda path: path.stat().st_mtime,
     )
     if not candidates:
-        raise RuntimeError(f"verl did not emit a LoRA adapter under {round_dir}")
+        raise RuntimeError(f"ms-swift did not emit a LoRA adapter under {round_dir}")
     return candidates[-1].parent
 
 
@@ -258,8 +255,12 @@ def _commands(
         str(config.opponent_port),
         "--interaction-mode",
         config.interaction_mode,
+        "--graphscript-version",
+        config.graphscript_version,
         "--max-follow-limit",
         str(config.max_follow_limit),
+        "--max-completion-tokens",
+        str(config.max_completion_tokens),
     ]
     if config.interaction_mode == "graphscript" or config.program_profile == "graphscript_v0_1":
         opponent.extend(["--max-edge-visits", str(config.max_edge_visits)])
@@ -320,10 +321,12 @@ def run_self_play(
             "actor_gpus": config.actor_gpus,
             "opponent_gpus": config.opponent_gpus,
             "interaction_mode": config.interaction_mode,
+            "graphscript_version": config.graphscript_version,
             "relation_catalog": str(config.relation_catalog)
             if config.relation_catalog is not None
             else None,
             "program_profile": config.program_profile,
+            "max_completion_tokens": config.max_completion_tokens,
         }
         plans.append(plan)
         if dry_run:
@@ -355,15 +358,19 @@ def run_self_play(
                     **os.environ,
                     "CUDA_VISIBLE_DEVICES": config.actor_gpus,
                     "MODEL_PATH": config.model_path,
+                    "MODEL_TYPE": config.model_type,
                     "LORA_ADAPTER_PATH": str(adapter),
                     "TRAIN_DATA": str(mixed_data.resolve()),
                     "VAL_DATA": str(config.val_data.resolve()),
                     "NUM_GPUS": str(len(config.actor_gpus.split(","))),
                     "OUTPUT_DIR": str(round_dir.resolve()),
                     "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
-                    "SAVE_FREQ": "1",
+                    "INTERACTION_MODE": config.interaction_mode,
+                    "GRAPHSCRIPT_VERSION": config.graphscript_version,
+                    "VLLM_MODE": "colocate",
+                    "SAVE_STEPS": "1",
                 }
-                with (logs / "verl.log").open("w") as train_log:
+                with (logs / "ms_swift.log").open("w") as train_log:
                     subprocess.run(
                         commands["train"],
                         env=train_env,
@@ -391,7 +398,7 @@ def run_self_play(
                 "last_completed_round": round_index,
                 "adapter": str(adapter),
                 "config_hash": file_hash(config_path),
-                "verl_commit": VERL_COMMIT,
+                "ms_swift_version": MS_SWIFT_VERSION,
             },
         )
     return {
@@ -399,5 +406,5 @@ def run_self_play(
         "rounds_requested": config.rounds,
         "rounds_completed": completed if dry_run else config.rounds,
         "plans": plans,
-        "verl_commit": VERL_COMMIT,
+        "ms_swift_version": MS_SWIFT_VERSION,
     }

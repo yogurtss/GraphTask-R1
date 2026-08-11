@@ -4,13 +4,17 @@ import json
 from collections.abc import Mapping
 from typing import cast
 
+from graphtask_r1.envs.graph_query import COMPACT_GRAPH_QUERY_SCHEMA
 from graphtask_r1.training.json_compat import to_json_compatible
 
 GRAPH_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "graph_search",
-        "description": "Traverse real graph edges adjacent to one or more entities.",
+        "description": (
+            "Traverse graph edges, or execute a bounded traversal/filter query without "
+            "materializing large intermediate entity lists."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -33,8 +37,12 @@ GRAPH_SEARCH_TOOL = {
                     "type": "integer",
                     "description": "Maximum triples returned.",
                 },
+                "query": COMPACT_GRAPH_QUERY_SCHEMA,
             },
-            "required": ["entity_ids", "direction"],
+            "anyOf": [
+                {"required": ["entity_ids", "direction"]},
+                {"required": ["query"]},
+            ],
         },
     },
 }
@@ -48,6 +56,29 @@ INSPECT_ENTITY_TOOL = {
             "type": "object",
             "properties": {"entity_id": {"type": "string"}},
             "required": ["entity_id"],
+        },
+    },
+}
+
+TEXT_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "text_search",
+        "description": (
+            "Search the indexed Wikipedia passages when a question has no exact topic entity ID."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural-language search query."},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Maximum passage hits; defaults to 3.",
+                },
+            },
+            "required": ["query"],
         },
     },
 }
@@ -71,9 +102,11 @@ EXECUTE_PROGRAM_TOOL = {
 }
 
 
-def tool_schemas(role: str) -> list[dict[str, object]]:
+def tool_schemas(role: str, *, text_search_enabled: bool = False) -> list[dict[str, object]]:
     """Return a fresh, JSON-native tool list for one GraphTask role."""
     tools = [GRAPH_SEARCH_TOOL, INSPECT_ENTITY_TOOL]
+    if role == "solver" and text_search_enabled:
+        tools.append(TEXT_SEARCH_TOOL)
     if role == "questioner":
         tools.append(EXECUTE_PROGRAM_TOOL)
     return cast(list[dict[str, object]], to_json_compatible(tools))
@@ -142,17 +175,25 @@ def convert_sft_row(row: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(normalized, dict):
         raise ValueError("SFT row must be an object")
     role = str(normalized.get("role", "solver"))
-    return {
+    text_search_enabled = bool(normalized.get("text_search_enabled", False))
+    interaction_mode = str(normalized.get("interaction_mode", "tool"))
+    result: dict[str, object] = {
         "messages": normalize_agent_messages(normalized.get("messages")),
-        "tools": json.dumps(tool_schemas(role), ensure_ascii=False, separators=(",", ":")),
         "role": role,
         "task_id": str(normalized.get("task_id", "")),
-        "interaction_mode": str(normalized.get("interaction_mode", "tool")),
+        "interaction_mode": interaction_mode,
     }
+    if interaction_mode == "tool":
+        result["tools"] = json.dumps(
+            tool_schemas(role, text_search_enabled=text_search_enabled),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return result
 
 
 def convert_rl_row(row: Mapping[str, object]) -> dict[str, object]:
-    """Adapt one existing verl RL row for ms-swift at load time."""
+    """Adapt one GraphTask RL row for ms-swift at load time."""
     normalized = to_json_compatible(row)
     if not isinstance(normalized, dict):
         raise ValueError("RL row must be an object")
@@ -163,13 +204,21 @@ def convert_rl_row(row: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(extra_info, Mapping):
         raise ValueError("extra_info must be an object")
     role = str(extra_info.get("role", "solver"))
+    text_search_enabled = bool(extra_info.get("text_search_enabled", False))
+    interaction_mode = str(extra_info.get("interaction_mode", "tool"))
     ground_truth = str(reward_model.get("ground_truth", ""))
-    return {
+    result: dict[str, object] = {
         "messages": normalize_agent_messages(normalized.get("prompt")),
-        "tools": json.dumps(tool_schemas(role), ensure_ascii=False, separators=(",", ":")),
         "data_source": str(normalized.get("data_source", "graphtask/solver")),
         "ground_truth": ground_truth,
         "solution": ground_truth,
         "extra_info": dict(extra_info),
         "uid": str(normalized.get("uid", "")),
     }
+    if interaction_mode == "tool":
+        result["tools"] = json.dumps(
+            tool_schemas(role, text_search_enabled=text_search_enabled),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return result

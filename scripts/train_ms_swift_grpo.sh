@@ -4,9 +4,25 @@ set -euo pipefail
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
 : "${MODEL_TYPE:=qwen3}"
 : "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift SFT checkpoint}"
-: "${TRAIN_DATA:?Set TRAIN_DATA to the existing kqapro_solver_rl.parquet}"
+: "${TRAIN_DATA:?Set TRAIN_DATA to a Solver RL parquet file}"
 : "${VAL_DATA:=$TRAIN_DATA}"
 : "${OUTPUT_DIR:=outputs/ms-swift-solver-grpo-cu124}"
+
+MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-32768}"
+if ! [[ "$MAX_COMPLETION_LENGTH" =~ ^[0-9]+$ ]] || (( MAX_COMPLETION_LENGTH < 1 || MAX_COMPLETION_LENGTH > 40960 )); then
+  echo "MAX_COMPLETION_LENGTH must be an integer between 1 and 40960" >&2
+  exit 2
+fi
+INTERACTION_MODE="${INTERACTION_MODE:-graphscript}"
+if [[ "$INTERACTION_MODE" != "tool" && "$INTERACTION_MODE" != "graphscript" ]]; then
+  echo "INTERACTION_MODE must be tool or graphscript" >&2
+  exit 2
+fi
+VLLM_MODE="${VLLM_MODE:-server}"
+if [[ "$VLLM_MODE" != "server" && "$VLLM_MODE" != "colocate" ]]; then
+  echo "VLLM_MODE must be server or colocate" >&2
+  exit 2
+fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -21,15 +37,20 @@ if [[ ! -d "$LORA_ADAPTER_PATH" ]]; then
   exit 2
 fi
 if [[ ! -f "$TRAIN_DATA" || ! -f "$VAL_DATA" ]]; then
-  echo "Existing Solver RL parquet not found; fix TRAIN_DATA/VAL_DATA without regenerating KQA" >&2
+  echo "Solver RL parquet not found; generate it or fix TRAIN_DATA/VAL_DATA" >&2
   exit 2
 fi
 
 export GRAPHTASK_MS_SWIFT_DATA_KIND=rl
 export GRAPHTASK_MS_SWIFT_TRAIN_DATA="$TRAIN_DATA"
 export GRAPHTASK_MS_SWIFT_VAL_DATA="$VAL_DATA"
+export INTERACTION_MODE
 export CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES:-1,2,3}"
 NUM_GPUS="${NUM_GPUS:-3}"
+MULTI_TURN_ARGS=()
+if [[ "$INTERACTION_MODE" == "tool" ]]; then
+  MULTI_TURN_ARGS=(--multi_turn_scheduler graphtask_solver --max_turns "${MAX_TURNS:-8}")
+fi
 
 NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --rlhf_type grpo \
@@ -44,11 +65,10 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --agent_template hermes \
   --loss_scale default \
   --use_vllm true \
-  --vllm_mode server \
+  --vllm_mode "$VLLM_MODE" \
   --vllm_server_host "${VLLM_SERVER_HOST:-127.0.0.1}" \
   --vllm_server_port "${VLLM_SERVER_PORT:-8000}" \
-  --multi_turn_scheduler graphtask_solver \
-  --max_turns "${MAX_TURNS:-8}" \
+  "${MULTI_TURN_ARGS[@]}" \
   --torch_dtype bfloat16 \
   --attn_impl sdpa \
   --num_train_epochs "${EPOCHS:-1}" \
@@ -60,7 +80,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --lora_rank "${LORA_RANK:-32}" \
   --lora_alpha "${LORA_ALPHA:-64}" \
   --target_modules all-linear \
-  --max_completion_length "${MAX_COMPLETION_LENGTH:-2048}" \
+  --max_completion_length "$MAX_COMPLETION_LENGTH" \
   --num_generations "${ROLLOUT_N:-4}" \
   --temperature "${TEMPERATURE:-1.0}" \
   --gradient_checkpointing true \

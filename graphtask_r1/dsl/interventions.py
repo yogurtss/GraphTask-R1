@@ -13,6 +13,10 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     Triple,
     Union,
 )
@@ -32,11 +36,29 @@ def atomic_interventions(program: Program) -> list[ProgramIntervention]:
             results.append(
                 ProgramIntervention(child.code, program.model_copy(update={"input": child.program}))
             )
-    elif isinstance(program, Count):
+    elif isinstance(program, Count | QueryAttribute | SelectAmong):
         for child in atomic_interventions(program.input):
             results.append(
                 ProgramIntervention(child.code, program.model_copy(update={"input": child.program}))
             )
+    elif isinstance(program, QueryRelation):
+        for field in ("subject", "object"):
+            branch = getattr(program, field)
+            for child in atomic_interventions(branch):
+                results.append(
+                    ProgramIntervention(
+                        child.code, program.model_copy(update={field: child.program})
+                    )
+                )
+    elif isinstance(program, SelectBetween):
+        for field in ("left", "right"):
+            branch = getattr(program, field)
+            for child in atomic_interventions(branch):
+                results.append(
+                    ProgramIntervention(
+                        child.code, program.model_copy(update={field: child.program})
+                    )
+                )
     elif isinstance(program, Intersect | Union):
         for index in range(len(program.inputs)):
             remaining = tuple(branch for i, branch in enumerate(program.inputs) if i != index)
@@ -78,10 +100,14 @@ def necessity_scores(
     interventions = atomic_interventions(program)
     if not interventions:
         return 1.0, 1.0, {}
-    scores = {
-        f"{item.code}:{index}": 1.0 - jaccard(gold, backend.execute_program(item.program))
-        for index, item in enumerate(interventions)
-    }
+    scores: dict[str, float] = {}
+    for index, item in enumerate(interventions):
+        key = f"{item.code}:{index}"
+        try:
+            scores[key] = 1.0 - jaccard(gold, backend.execute_program(item.program))
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            # A counterfactual that is no longer executable cannot reproduce the gold answer.
+            scores[key] = 1.0
     return sum(scores.values()) / len(scores), min(scores.values()), scores
 
 

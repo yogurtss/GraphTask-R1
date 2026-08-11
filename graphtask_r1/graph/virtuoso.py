@@ -24,7 +24,11 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
     RelationInfo,
+    SelectAmong,
+    SelectBetween,
     Triple,
     Union,
     Witness,
@@ -68,6 +72,35 @@ def _expand_program(program: Program) -> Program:
         )
     if isinstance(program, Count):
         return program.model_copy(update={"input": _expand_program(program.input)})
+    if isinstance(program, QueryAttribute):
+        return program.model_copy(
+            update={
+                "input": _expand_program(program.input),
+                "attribute": _expand(program.attribute),
+            }
+        )
+    if isinstance(program, QueryRelation):
+        return program.model_copy(
+            update={
+                "subject": _expand_program(program.subject),
+                "object": _expand_program(program.object),
+            }
+        )
+    if isinstance(program, SelectAmong):
+        return program.model_copy(
+            update={
+                "input": _expand_program(program.input),
+                "attribute": _expand(program.attribute),
+            }
+        )
+    if isinstance(program, SelectBetween):
+        return program.model_copy(
+            update={
+                "left": _expand_program(program.left),
+                "right": _expand_program(program.right),
+                "attribute": _expand(program.attribute),
+            }
+        )
     raise TypeError(type(program).__name__)
 
 

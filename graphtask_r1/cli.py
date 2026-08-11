@@ -16,8 +16,10 @@ import yaml
 from graphtask_r1.archive import TaskArchive
 from graphtask_r1.data import (
     audit_records,
+    bootstrap_kilt_grpo,
     merge_denylists,
     prepare_benchmark,
+    prepare_kilt,
     prepare_kqapro,
     sample_questioner_seeds,
     select_graphscript_tasks,
@@ -27,10 +29,10 @@ from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.pipeline import run_mini_pipeline
 from graphtask_r1.schema import TaskCertificate
 from graphtask_r1.training.relations import build_relation_catalog, load_relation_catalog
+from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.scripted import run_scripted_selfplay
 from graphtask_r1.training.selfplay import run_self_play
 from graphtask_r1.training.sft_dataset import export_sft_dataset
-from graphtask_r1.training.verl_dataset import export_role_dataset
 from graphtask_r1.utils import ProgressLogger, read_records, write_records
 
 LOGGER = logging.getLogger("graphtask_r1.cli")
@@ -85,16 +87,43 @@ def build_parser() -> argparse.ArgumentParser:
     fetch = data_actions.add_parser("fetch")
     fetch.add_argument(
         "--dataset",
-        choices=["kqapro", "freebase", "webqsp", "cwq", "grailqa"],
+        choices=["kqapro", "kilt", "ssp", "freebase", "webqsp", "cwq", "grailqa"],
         required=True,
     )
     fetch.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
 
     prepare = data_actions.add_parser("prepare")
-    prepare.add_argument("--dataset", choices=["kqapro", "webqsp", "cwq", "grailqa"], required=True)
+    prepare.add_argument(
+        "--dataset",
+        choices=[
+            "kqapro",
+            "kilt",
+            "ssp",
+            "webqsp",
+            "cwq",
+            "grailqa",
+            "nq",
+            "triviaqa",
+            "popqa",
+            "hotpotqa",
+            "2wikimultihopqa",
+            "bamboogle",
+            "musique",
+        ],
+        required=True,
+    )
     prepare.add_argument("--raw-dir", type=Path, required=True)
     prepare.add_argument("--output-dir", type=Path, required=True)
     prepare.add_argument("--splits", default="train,val")
+    prepare.add_argument(
+        "--include-datasets",
+        help="comma-separated SSP buckets (default: the six CoEvoKG evaluation buckets)",
+    )
+    prepare.add_argument(
+        "--no-text-index",
+        action="store_true",
+        help="for KILT only: build hyperlink graph without the FTS5 passage index",
+    )
     prepare.add_argument(
         "--rebuild-graph",
         action="store_true",
@@ -106,19 +135,49 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DATA_WORKERS,
         help=f"parallel record workers (default: {DEFAULT_DATA_WORKERS})",
     )
+    prepare.add_argument(
+        "--max-trace-tool-calls",
+        type=_positive_int,
+        default=32,
+        help="for KQAPro: maximum graph calls plus final answer in a compiled trace",
+    )
+    prepare.add_argument(
+        "--max-trace-query-results",
+        type=_positive_int,
+        default=1_024,
+        help="for KQAPro: maximum entities retained by a compact graph query",
+    )
     _add_common(prepare)
+
+    bootstrap_kilt = data_actions.add_parser("bootstrap-kilt-grpo")
+    bootstrap_kilt.add_argument("--output-dir", type=Path, required=True)
+    bootstrap_kilt.add_argument("--snapshot", default="kilt-2019-08-01-v1")
+    bootstrap_kilt.add_argument("--count", type=_positive_int, default=1_024)
+    bootstrap_kilt.add_argument("--pool-limit", type=_positive_int, default=100_000)
+    bootstrap_kilt.add_argument("--max-attempts", type=_positive_int)
+    bootstrap_kilt.add_argument("--min-degree", type=_positive_int, default=2)
+    bootstrap_kilt.add_argument("--max-degree", type=_positive_int, default=100)
+    bootstrap_kilt.add_argument("--val-ratio", type=float, default=0.1)
+    bootstrap_kilt.add_argument("--families", default="hop1,hop2,type_filter,count")
+    bootstrap_kilt.add_argument(
+        "--interaction-mode", choices=["tool", "graphscript"], default="graphscript"
+    )
+    bootstrap_kilt.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.2")
+    bootstrap_kilt.add_argument("--seed", type=int, default=42)
+    bootstrap_kilt.add_argument("--dry-run", action="store_true")
 
     audit = data_actions.add_parser("audit")
     audit.add_argument("--input", type=Path, required=True)
     audit.add_argument("--kind", choices=["auto", "task", "benchmark"], default="auto")
 
-    export = data_actions.add_parser("export-verl")
+    export = data_actions.add_parser("export-rl")
     export.add_argument("--input", type=Path, required=True)
     export.add_argument("--output", type=Path, required=True)
     export.add_argument("--roles", choices=["both", "questioner", "solver"], default="both")
     export.add_argument("--opponent-url")
     export.add_argument("--opponent-samples", type=int, default=8)
     export.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
+    export.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.1")
     export.add_argument("--relation-catalog", type=Path)
     _add_common(export)
 
@@ -126,9 +185,8 @@ def build_parser() -> argparse.ArgumentParser:
     export_sft.add_argument("--input", type=Path, required=True)
     export_sft.add_argument("--output", type=Path, required=True)
     export_sft.add_argument("--roles", choices=["both", "questioner", "solver"], default="both")
-    export_sft.add_argument(
-        "--interaction-mode", choices=["tool", "graphscript"], default="tool"
-    )
+    export_sft.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
+    export_sft.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.1")
     export_sft.add_argument("--relation-catalog", type=Path)
     _add_common(export_sft)
 
@@ -186,6 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--snapshot", default="freebase-v1")
     benchmark.add_argument("--samples", type=int, default=1)
     benchmark.add_argument("--concurrency", type=int, default=16)
+    benchmark.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.2")
     return parser
 
 
@@ -205,19 +264,14 @@ def _load_tasks(path: Path, limit: int | None) -> list[TaskCertificate]:
 
 def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, Any]:
     config = yaml.safe_load(os.path.expandvars(config_path.read_text()))
-    backend = str(config.get("training_backend", "verl"))
+    backend = str(config.get("training_backend", "ms_swift"))
+    if backend != "ms_swift":
+        raise ValueError(f"unsupported training backend: {backend}; only ms_swift is supported")
     scripts = {
-        ("verl", "sft"): "scripts/train_sft.sh",
-        ("verl", "solver-grpo"): "scripts/train_verl.sh",
-        ("ms_swift", "sft"): "scripts/train_ms_swift_sft.sh",
-        ("ms_swift", "solver-grpo"): "scripts/train_ms_swift_grpo.sh",
+        "sft": "scripts/train_ms_swift_sft.sh",
+        "solver-grpo": "scripts/train_ms_swift_grpo.sh",
     }
-    try:
-        script = scripts[(backend, stage)]
-    except KeyError as exc:
-        raise ValueError(
-            f"unsupported training backend/stage: {backend}/{stage}"
-        ) from exc
+    script = scripts[stage]
     env_keys = {
         "model_path": "MODEL_PATH",
         "model_type": "MODEL_TYPE",
@@ -227,7 +281,8 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
         "num_gpus": "NUM_GPUS",
         "experiment_name": "EXPERIMENT_NAME",
         "lora_adapter_path": "LORA_ADAPTER_PATH",
-        "verl_profile": "VERL_PROFILE",
+        "interaction_mode": "INTERACTION_MODE",
+        "graphscript_version": "GRAPHSCRIPT_VERSION",
     }
     selected_env: dict[str, str] = {}
     for source, target in env_keys.items():
@@ -299,14 +354,59 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=args.seed,
                 workers=args.workers,
                 rebuild_graph=args.rebuild_graph,
+                max_trace_tool_calls=args.max_trace_tool_calls,
+                max_trace_query_results=args.max_trace_query_results,
+            )
+        elif args.dataset == "kilt":
+            source_path = (
+                args.raw_dir
+                if args.raw_dir.is_file()
+                else args.raw_dir / "kilt_knowledgesource.json"
+            )
+            result = prepare_kilt(
+                source_path,
+                args.output_dir,
+                limit=args.limit,
+                with_text_index=not args.no_text_index,
+                rebuild_graph=args.rebuild_graph,
             )
         else:
             result = prepare_benchmark(
-                args.dataset, args.raw_dir, args.output_dir, workers=args.workers
+                args.dataset,
+                args.raw_dir,
+                args.output_dir,
+                workers=args.workers,
+                include_datasets=tuple(
+                    value.strip()
+                    for value in (args.include_datasets or "").split(",")
+                    if value.strip()
+                )
+                or None,
+                limit=args.limit,
             )
     elif args.group == "data" and args.action == "audit":
         result = audit_records(args.input, kind=args.kind)
-    elif args.group == "data" and args.action == "export-verl":
+    elif args.group == "data" and args.action == "bootstrap-kilt-grpo":
+        if args.dry_run:
+            result = vars(args)
+        else:
+            result = bootstrap_kilt_grpo(
+                args.output_dir,
+                snapshot=args.snapshot,
+                count=args.count,
+                seed=args.seed,
+                pool_limit=args.pool_limit,
+                max_attempts=args.max_attempts,
+                min_degree=args.min_degree,
+                max_degree=args.max_degree,
+                val_ratio=args.val_ratio,
+                families=tuple(
+                    value.strip() for value in args.families.split(",") if value.strip()
+                ),
+                interaction_mode=args.interaction_mode,
+                graphscript_version=args.graphscript_version,
+            )
+    elif args.group == "data" and args.action == "export-rl":
         tasks = _load_tasks(args.input, args.limit)
         if args.dry_run:
             result = {"would_export": len(tasks), "roles": args.roles}
@@ -319,6 +419,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 opponent_url=args.opponent_url,
                 opponent_samples=args.opponent_samples,
                 interaction_mode=args.interaction_mode,
+                graphscript_version=args.graphscript_version,
                 relation_catalog=load_relation_catalog(args.relation_catalog),
             )
             result = {"rows": rows, "output": str(args.output)}
@@ -334,6 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 include_solver=args.roles in {"both", "solver"},
                 seed=args.seed,
                 interaction_mode=args.interaction_mode,
+                graphscript_version=args.graphscript_version,
                 relation_catalog=load_relation_catalog(args.relation_catalog),
             )
             result = {"rows": rows, "output": str(args.output)}
@@ -410,6 +512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 graph_snapshot=args.snapshot,
                 samples=args.samples,
                 concurrency=args.concurrency,
+                graphscript_version=args.graphscript_version,
             )
         )
     LOGGER.info(

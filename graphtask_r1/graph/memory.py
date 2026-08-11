@@ -5,6 +5,7 @@ import json
 from collections.abc import Sequence
 
 from graphtask_r1.graph.overlay import GraphOverlay
+from graphtask_r1.graph.values import attribute_sort_key
 from graphtask_r1.schema import (
     AllEntities,
     AnswerSet,
@@ -17,7 +18,11 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
     RelationInfo,
+    SelectAmong,
+    SelectBetween,
     Triple,
     Union,
     Witness,
@@ -83,6 +88,40 @@ class InMemoryGraphBackend:
             values.update(triple.subject for triple in self._triples)
             values.update(triple.object for triple in self._triples)
         return tuple(sorted(values)[: max(0, limit)])
+
+    def resolve_entities(
+        self,
+        query: str,
+        *,
+        match: str = "exact",
+        limit: int = 5,
+        trace_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Resolve an ID, label, or alias without relying on global search state."""
+
+        del trace_id
+        normalized = query.strip().casefold()
+        if not normalized or limit <= 0:
+            return ()
+        if match == "id":
+            return (query,) if query in self._entities else ()
+        exact = [
+            entity_id
+            for entity_id, entity in self._entities.items()
+            if normalized
+            in {entity.label.casefold(), *(alias.casefold() for alias in entity.aliases)}
+        ]
+        if match == "exact" or exact:
+            return tuple(sorted(exact)[:limit])
+        if match != "search":
+            raise ValueError(f"invalid entity match mode: {match}")
+        fuzzy = [
+            entity_id
+            for entity_id, entity in self._entities.items()
+            if normalized in entity.label.casefold()
+            or any(normalized in alias.casefold() for alias in entity.aliases)
+        ]
+        return tuple(sorted(fuzzy)[:limit])
 
     def neighbors(
         self,
@@ -152,7 +191,58 @@ class InMemoryGraphBackend:
     def execute_program(self, program: Program) -> AnswerSet:
         if isinstance(program, Count):
             return AnswerSet.count(len(self._execute_entities(program.input)))
+        if isinstance(program, QueryAttribute):
+            values = {
+                triple.object
+                for triple in self._triples
+                if triple.subject in self._execute_entities(program.input)
+                and triple.relation == program.attribute
+            }
+            return AnswerSet.literals(values)
+        if isinstance(program, QueryRelation):
+            subjects = self._execute_entities(program.subject)
+            objects = self._execute_entities(program.object)
+            return AnswerSet.literals(
+                {
+                    triple.relation
+                    for triple in self._triples
+                    if triple.subject in subjects and triple.object in objects
+                }
+            )
+        if isinstance(program, SelectBetween):
+            candidates = {
+                *self._execute_entities(program.left),
+                *self._execute_entities(program.right),
+            }
+            return AnswerSet.entities(
+                [self._select_by_attribute(candidates, program.attribute, program.mode)]
+            )
+        if isinstance(program, SelectAmong):
+            return AnswerSet.entities(
+                [
+                    self._select_by_attribute(
+                        self._execute_entities(program.input),
+                        program.attribute,
+                        program.mode,
+                    )
+                ]
+            )
         return AnswerSet.entities(self._execute_entities(program))
+
+    def _select_by_attribute(self, entity_ids: set[str], attribute: str, mode: str) -> str:
+        candidates: list[tuple[tuple[int, str, float, int, int], str]] = []
+        for triple in self._triples:
+            if triple.subject not in entity_ids or triple.relation != attribute:
+                continue
+            value = _literal(triple.object)
+            datatype = "quantity" if isinstance(value, int | float) else "string"
+            candidates.append(
+                (attribute_sort_key(str(triple.object), datatype, None), triple.subject)
+            )
+        if not candidates:
+            raise ValueError(f"no candidate has attribute {attribute!r}")
+        ordered = sorted(candidates, key=lambda item: (item[0], item[1]))
+        return ordered[0][1] if mode == "min" else ordered[-1][1]
 
     def execute_sparql(self, sparql: str) -> AnswerSet:
         marker = "# graphtask-program:"
@@ -186,6 +276,36 @@ class InMemoryGraphBackend:
             return ()
         if isinstance(program, FilterType | Count):
             return self._program_facts(program.input)
+        if isinstance(program, QueryAttribute | SelectAmong):
+            inputs = self._execute_entities(program.input)
+            own = self.neighbors(sorted(inputs), direction="out", relation_ids=[program.attribute])
+            return tuple(
+                sorted(set(self._program_facts(program.input)) | set(own), key=Triple.sort_key)
+            )
+        if isinstance(program, QueryRelation):
+            subjects = self._execute_entities(program.subject)
+            objects = self._execute_entities(program.object)
+            relation_facts = {
+                triple
+                for triple in self._triples
+                if triple.subject in subjects and triple.object in objects
+            }
+            inherited = set(self._program_facts(program.subject)) | set(
+                self._program_facts(program.object)
+            )
+            return tuple(sorted(inherited | relation_facts, key=Triple.sort_key))
+        if isinstance(program, SelectBetween):
+            candidates = {
+                *self._execute_entities(program.left),
+                *self._execute_entities(program.right),
+            }
+            own = self.neighbors(
+                sorted(candidates), direction="out", relation_ids=[program.attribute]
+            )
+            inherited = set(self._program_facts(program.left)) | set(
+                self._program_facts(program.right)
+            )
+            return tuple(sorted(inherited | set(own), key=Triple.sort_key))
         if isinstance(program, FilterLiteral):
             inputs = self._execute_entities(program.input)
             own = self.neighbors(sorted(inputs), direction="out", relation_ids=[program.relation])

@@ -9,6 +9,10 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     Union,
 )
 
@@ -21,6 +25,10 @@ WEIGHTS = {
     "intersect": 1.5,
     "union": 1.5,
     "count": 1.0,
+    "query_attribute": 1.0,
+    "query_relation": 1.0,
+    "select_among": 1.5,
+    "select_between": 1.5,
 }
 
 
@@ -31,6 +39,10 @@ def program_cost(program: Program) -> float:
         return WEIGHTS[program.op] + program_cost(program.input)
     if isinstance(program, Intersect | Union):
         return WEIGHTS[program.op] + sum(program_cost(branch) for branch in program.inputs)
-    if isinstance(program, FilterType | FilterLiteral | Count):
+    if isinstance(program, FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
         return WEIGHTS[program.op] + program_cost(program.input)
+    if isinstance(program, QueryRelation):
+        return WEIGHTS[program.op] + program_cost(program.subject) + program_cost(program.object)
+    if isinstance(program, SelectBetween):
+        return WEIGHTS[program.op] + program_cost(program.left) + program_cost(program.right)
     raise TypeError(type(program).__name__)

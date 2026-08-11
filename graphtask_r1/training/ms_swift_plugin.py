@@ -15,15 +15,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from graphtask_r1.envs.graph_query import execute_compact_query
+from graphtask_r1.envs.text_search import execute_text_search
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.training.json_compat import to_json_compatible
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
-from graphtask_r1.training.verl_reward import compute_score
+from graphtask_r1.training.ms_swift_reward import compute_score
 
 try:
     from swift.llm.dataset import DatasetMeta, RowPreprocessor, register_dataset
-    from swift.plugin import ORM, multi_turns, orms
-    from swift.plugin.multi_turn import MultiTurnScheduler
+    from swift.plugin import ORM, orms
 except ImportError as exc:  # pragma: no cover - exercised on the training server
     raise ImportError(
         "Install the pinned ms-swift environment before loading the GraphTask plugin"
@@ -121,11 +122,7 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
             for name, value in result.items():
                 sums[name] += float(value)
                 counts[name] += 1
-        components = {
-            name: sums[name] / counts[name]
-            for name in sorted(sums)
-            if counts[name]
-        }
+        components = {name: sums[name] / counts[name] for name in sorted(sums) if counts[name]}
         logger.info(
             json.dumps(
                 {
@@ -169,11 +166,12 @@ def _string_list(value: object) -> list[str]:
     return [str(item) for item in value]
 
 
-class GraphTaskSolverScheduler(MultiTurnScheduler):  # type: ignore[misc]
-    """Instance-scoped Hermes tool scheduler for Solver-only KQA Pro rollout."""
+class GraphTaskSolverScheduler:
+    """Instance-scoped Hermes tool scheduler for Solver-only graph and passage rollout."""
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args: object, max_turns: int | None = None, **kwargs: object) -> None:
+        del args, kwargs
+        self.max_turns = max_turns
         self._backends: dict[str, GraphBackend] = {}
 
     def _backend(self, snapshot: str) -> GraphBackend:
@@ -207,10 +205,11 @@ class GraphTaskSolverScheduler(MultiTurnScheduler):  # type: ignore[misc]
             raise ValueError("invalid GraphTask rollout session state")
         return state
 
-    def check_finished(
-        self, infer_request: Any, response_choice: Any, current_turn: int
-    ) -> bool:
-        if super().check_finished(infer_request, response_choice, current_turn):
+    def check_finished(self, infer_request: Any, response_choice: Any, current_turn: int) -> bool:
+        del infer_request
+        if getattr(response_choice, "finish_reason", None) == "length":
+            return True
+        if self.max_turns is not None and current_turn >= self.max_turns:
             return True
         return not _tool_calls(response_choice)
 
@@ -220,6 +219,24 @@ class GraphTaskSolverScheduler(MultiTurnScheduler):  # type: ignore[misc]
         info: Mapping[str, object],
         state: dict[str, object],
     ) -> str:
+        snapshot = str(info.get("graph_snapshot", "kqapro-v1"))
+        if "query" in parameters:
+            max_entities = min(
+                512,
+                max(1, _int_value(info.get("max_returned_entities", 512))),
+            )
+            result = execute_compact_query(
+                self._backend(snapshot),
+                parameters["query"],
+                max_limit=max_entities,
+            )
+            visits = max(1, len(result.entities), len(result.values))
+            state["edge_visits"] = _int_value(state.get("edge_visits", 0)) + visits
+            visible = set(_string_list(state.get("visible_entities", [])))
+            visible.update(entity.entity_id for entity in result.entities)
+            state["visible_entities"] = sorted(visible)
+            return result.model_dump_json()
+
         raw_entities = parameters.get("entity_ids")
         if not isinstance(raw_entities, Sequence) or isinstance(raw_entities, str | bytes):
             raise ValueError("entity_ids must be a non-empty list")
@@ -235,7 +252,6 @@ class GraphTaskSolverScheduler(MultiTurnScheduler):  # type: ignore[misc]
         if remaining <= 0:
             raise ValueError("graph-search edge budget exhausted")
         limit = min(max(1, _int_value(parameters.get("limit", 50))), 100, remaining)
-        snapshot = str(info.get("graph_snapshot", "kqapro-v1"))
         triples = self._backend(snapshot).neighbors(
             entity_ids,
             direction=str(parameters.get("direction", "both")),
@@ -245,11 +261,7 @@ class GraphTaskSolverScheduler(MultiTurnScheduler):  # type: ignore[misc]
         )
         state["edge_visits"] = _int_value(state.get("edge_visits", 0)) + len(triples)
         visible = set(_string_list(state.get("visible_entities", [])))
-        visible.update(
-            value
-            for triple in triples
-            for value in (triple.subject, triple.object)
-        )
+        visible.update(value for triple in triples for value in (triple.subject, triple.object))
         state["visible_entities"] = sorted(visible)
         return json.dumps(
             [triple.model_dump(mode="json") for triple in triples],
@@ -274,11 +286,31 @@ class GraphTaskSolverScheduler(MultiTurnScheduler):  # type: ignore[misc]
             snapshot = str(info.get("graph_snapshot", "kqapro-v1"))
             entity_id = str(parameters["entity_id"])
             return self._backend(snapshot).entity_info(entity_id).model_dump_json()
+        if name == "text_search":
+            if not bool(info.get("text_search_enabled", False)):
+                raise ValueError("text search is not enabled for this graph snapshot")
+            snapshot = str(info.get("graph_snapshot", "kqapro-v1"))
+            passages = execute_text_search(
+                self._backend(snapshot),
+                str(parameters["query"]),
+                limit=min(
+                    max(1, _int_value(parameters.get("limit", 3))),
+                    _int_value(info.get("max_text_search_results", 3)),
+                ),
+                max_chars=_int_value(info.get("max_passage_chars", 2_000)),
+                trace_id=f"{info.get('task_id', 'solver')}:{state.get('calls', 0)}",
+            )
+            visible = set(_string_list(state.get("visible_entities", [])))
+            visible.update(passage.page_id for passage in passages)
+            state["visible_entities"] = sorted(visible)
+            return json.dumps(
+                [passage.model_dump(mode="json") for passage in passages],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         raise ValueError(f"unsupported solver tool: {name}")
 
-    def step(
-        self, infer_request: Any, response_choice: Any, current_turn: int
-    ) -> Any:
+    def step(self, infer_request: Any, response_choice: Any, current_turn: int) -> Any:
         del current_turn
         info = self._info(infer_request)
         if str(info.get("role", "solver")) != "solver":
@@ -308,4 +340,11 @@ class GraphTaskSolverScheduler(MultiTurnScheduler):  # type: ignore[misc]
 
 _register_data()
 orms["graphtask_score"] = GraphTaskReward
-multi_turns["graphtask_solver"] = GraphTaskSolverScheduler
+if os.environ.get("INTERACTION_MODE", "graphscript") == "tool":
+    try:
+        from swift.plugin import multi_turns
+    except (AssertionError, ImportError) as exc:  # pragma: no cover - training extra
+        raise ImportError(
+            "ms-swift tool mode requires its optional math_verify dependency"
+        ) from exc
+    multi_turns["graphtask_solver"] = GraphTaskSolverScheduler

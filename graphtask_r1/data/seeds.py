@@ -90,17 +90,6 @@ def sample_questioner_seeds(
                 "reward_model": {"style": "rule", "ground_truth": "{}"},
                 "extra_info": common,
                 "uid": f"questioner:{common['task_id']}",
-                **(
-                    {
-                        "agent_name": "tool_agent",
-                        "tools_kwargs": {
-                            name: {"create_kwargs": common}
-                            for name in ("graph_search", "inspect_entity", "execute_program")
-                        },
-                    }
-                    if interaction_mode == "tool"
-                    else {}
-                ),
             }
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)

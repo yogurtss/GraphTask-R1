@@ -41,15 +41,105 @@ def test_data_prepare_rejects_zero_workers() -> None:
         )
 
 
-def test_sample_seeds_defaults_to_kqapro_snapshot() -> None:
-    args = build_parser().parse_args(
-        ["data", "sample-seeds", "--output", "seeds.parquet"]
+def test_data_prepare_accepts_ssp_bucket_filter_and_kilt_text_flag() -> None:
+    ssp = build_parser().parse_args(
+        [
+            "data",
+            "prepare",
+            "--dataset",
+            "ssp",
+            "--raw-dir",
+            "raw",
+            "--output-dir",
+            "processed",
+            "--include-datasets",
+            "hotpotqa,triviaqa",
+        ]
     )
+    assert ssp.include_datasets == "hotpotqa,triviaqa"
+
+    kilt = build_parser().parse_args(
+        [
+            "data",
+            "prepare",
+            "--dataset",
+            "kilt",
+            "--raw-dir",
+            "kilt.json",
+            "--output-dir",
+            "processed",
+            "--no-text-index",
+        ]
+    )
+    assert kilt.no_text_index is True
+
+
+def test_kilt_grpo_bootstrap_cli_has_bounded_reproducible_defaults() -> None:
+    args = build_parser().parse_args(
+        [
+            "data",
+            "bootstrap-kilt-grpo",
+            "--output-dir",
+            "processed",
+            "--count",
+            "16",
+            "--seed",
+            "7",
+            "--dry-run",
+        ]
+    )
+    assert args.snapshot == "kilt-2019-08-01-v1"
+    assert args.count == 16
+    assert args.seed == 7
+    assert args.pool_limit == 100_000
+    assert args.val_ratio == 0.1
+
+
+def test_sft_export_accepts_graphscript_v02() -> None:
+    args = build_parser().parse_args(
+        [
+            "data",
+            "export-sft",
+            "--input",
+            "tasks.parquet",
+            "--output",
+            "sft.parquet",
+            "--interaction-mode",
+            "graphscript",
+            "--graphscript-version",
+            "0.2",
+        ]
+    )
+    assert args.graphscript_version == "0.2"
+
+
+def test_kilt_grpo_profile_starts_from_kqapro_sft_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KQAPRO_SFT_ADAPTER", "/models/kqapro-sft")
+    monkeypatch.setenv("KILT_GRPO_TRAIN_DATA", "/data/kilt/train.parquet")
+    monkeypatch.setenv("KILT_GRPO_VAL_DATA", "/data/kilt/val.parquet")
+    monkeypatch.setenv("KILT_GRPO_OUTPUT_DIR", "/outputs/kilt-grpo")
+
+    result = _launch_stage(
+        "solver-grpo",
+        Path("configs/experiments/qwen3_4b_kilt_solver_grpo_ms_swift_cuda124.yaml"),
+        dry_run=True,
+    )
+
+    assert result["training_backend"] == "ms_swift"
+    assert result["environment"]["LORA_ADAPTER_PATH"] == "/models/kqapro-sft"
+    assert result["environment"]["TRAIN_DATA"] == "/data/kilt/train.parquet"
+    assert result["environment"]["VAL_DATA"] == "/data/kilt/val.parquet"
+
+
+def test_sample_seeds_defaults_to_kqapro_snapshot() -> None:
+    args = build_parser().parse_args(["data", "sample-seeds", "--output", "seeds.parquet"])
     assert args.snapshot == "kqapro-v1"
     assert args.count == 256
 
 
-def test_cuda124_training_profile_is_forwarded_to_launcher(
+def test_training_launcher_defaults_to_ms_swift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("NUM_GPUS", "1")
@@ -57,8 +147,8 @@ def test_cuda124_training_profile_is_forwarded_to_launcher(
     config.write_text(
         "\n".join(
             [
-                "verl_profile: cuda124",
                 "model_path: model",
+                "model_type: qwen3",
                 "train_data: train.parquet",
                 "val_data: val.parquet",
             ]
@@ -66,8 +156,9 @@ def test_cuda124_training_profile_is_forwarded_to_launcher(
         + "\n"
     )
     result = _launch_stage("sft", config, dry_run=True)
-    assert result["command"] == ["bash", "scripts/train_sft.sh"]
-    assert result["environment"]["VERL_PROFILE"] == "cuda124"
+    assert result["training_backend"] == "ms_swift"
+    assert result["command"] == ["bash", "scripts/train_ms_swift_sft.sh"]
+    assert result["environment"]["MODEL_TYPE"] == "qwen3"
     assert result["environment"]["NUM_GPUS"] == "1"
 
 
@@ -93,8 +184,22 @@ def test_ms_swift_profile_selects_ms_swift_launcher(tmp_path: Path) -> None:
     assert result["environment"]["MODEL_TYPE"] == "qwen3"
 
 
-def test_unknown_training_backend_is_rejected(tmp_path: Path) -> None:
+def test_non_ms_swift_training_backend_is_rejected(tmp_path: Path) -> None:
     config = tmp_path / "sft.yaml"
     config.write_text("training_backend: unknown\n")
-    with pytest.raises(ValueError, match="unsupported training backend"):
+    with pytest.raises(ValueError, match="only ms_swift is supported"):
         _launch_stage("sft", config, dry_run=True)
+
+
+def test_rl_export_uses_backend_neutral_name() -> None:
+    args = build_parser().parse_args(
+        [
+            "data",
+            "export-rl",
+            "--input",
+            "tasks.parquet",
+            "--output",
+            "rl.parquet",
+        ]
+    )
+    assert args.action == "export-rl"

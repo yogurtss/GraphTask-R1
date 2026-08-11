@@ -71,6 +71,12 @@ class AnswerSet(BaseModel):
     def count(cls, value: int) -> AnswerSet:
         return cls(answers=(Answer(value=value, kind="count"),))
 
+    @classmethod
+    def literals(cls, values: set[str] | list[str] | tuple[str, ...]) -> AnswerSet:
+        return cls(
+            answers=tuple(Answer(value=value, kind="literal") for value in sorted(set(values)))
+        )
+
     def values(self) -> tuple[str | int | float, ...]:
         return tuple(answer.value for answer in self.answers)
 

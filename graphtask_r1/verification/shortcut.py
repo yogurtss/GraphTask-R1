@@ -13,6 +13,10 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     Union,
 )
 
@@ -32,8 +36,12 @@ def topic_entities(program: Program) -> tuple[str, ...]:
         return tuple(
             sorted({entity for branch in program.inputs for entity in topic_entities(branch)})
         )
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count):
+    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
         return topic_entities(program.input)
+    if isinstance(program, QueryRelation):
+        return tuple(sorted({*topic_entities(program.subject), *topic_entities(program.object)}))
+    if isinstance(program, SelectBetween):
+        return tuple(sorted({*topic_entities(program.left), *topic_entities(program.right)}))
     if isinstance(program, AllEntities):
         return ()
     raise TypeError(type(program).__name__)

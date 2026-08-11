@@ -67,6 +67,9 @@ def test_sft_adapter_converts_existing_openai_tool_messages() -> None:
         "graph_search",
         "inspect_entity",
     ]
+    search_parameters = tools[0]["function"]["parameters"]
+    assert "query" in search_parameters["properties"]
+    assert {"required": ["query"]} in search_parameters["anyOf"]
     json.dumps(converted)
 
 
@@ -99,3 +102,52 @@ def test_rl_adapter_reuses_prompt_and_reward_columns_in_memory() -> None:
         "topic_entity_ids": ["alice"],
     }
     json.dumps(converted)
+
+
+def test_rl_adapter_exposes_text_search_only_for_enabled_kilt_solver() -> None:
+    converted = convert_rl_row(
+        {
+            "data_source": "graphtask/solver",
+            "prompt": [
+                {"role": "system", "content": "Use retrieved evidence."},
+                {"role": "user", "content": "Open-domain question"},
+            ],
+            "reward_model": {"ground_truth": '{"answers":[]}'},
+            "extra_info": {
+                "role": "solver",
+                "graph_snapshot": "kilt-2019-08-01-v1",
+                "topic_entity_ids": [],
+                "text_search_enabled": True,
+            },
+            "uid": "solver:kilt-task",
+        }
+    )
+
+    tools = json.loads(str(converted["tools"]))
+    assert [tool["function"]["name"] for tool in tools] == [
+        "graph_search",
+        "inspect_entity",
+        "text_search",
+    ]
+
+
+def test_graphscript_rows_do_not_expose_tool_call_schema() -> None:
+    converted = convert_rl_row(
+        {
+            "data_source": "graphtask/solver",
+            "prompt": [
+                {"role": "system", "content": "Compile GraphScript v0.2."},
+                {"role": "user", "content": "Question"},
+            ],
+            "reward_model": {"ground_truth": '{"answers":[]}'},
+            "extra_info": {
+                "role": "solver",
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.2",
+                "text_search_enabled": True,
+            },
+            "uid": "solver:code-task",
+        }
+    )
+
+    assert "tools" not in converted

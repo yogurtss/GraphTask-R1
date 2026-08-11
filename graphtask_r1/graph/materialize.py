@@ -13,6 +13,10 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     Triple,
     Union,
 )
@@ -98,6 +102,62 @@ def materialize_program(
             return
         if isinstance(node, Count):
             visit(node.input)
+            return
+        if isinstance(node, QueryAttribute | SelectAmong):
+            visit(node.input)
+            inputs = backend.execute_program(node.input).entity_ids()
+            nodes.update(inputs)
+            remaining = max_edges - len(facts)
+            relation = node.attribute
+            edges = backend.neighbors(
+                inputs,
+                direction="out",
+                relation_ids=[relation],
+                limit=max(0, remaining + 1),
+            )
+            if len(edges) > remaining:
+                truncated = True
+                edges = edges[:remaining]
+            facts.update(edges)
+            return
+        if isinstance(node, QueryRelation):
+            visit(node.subject)
+            visit(node.object)
+            subjects = backend.execute_program(node.subject).entity_ids()
+            objects = set(backend.execute_program(node.object).entity_ids())
+            nodes.update(subjects)
+            nodes.update(objects)
+            remaining = max_edges - len(facts)
+            edges = backend.neighbors(
+                subjects,
+                direction="out",
+                limit=max(0, remaining + 1),
+            )
+            selected = [edge for edge in edges if edge.object in objects]
+            if len(selected) > remaining:
+                truncated = True
+                selected = selected[:remaining]
+            facts.update(selected)
+            return
+        if isinstance(node, SelectBetween):
+            visit(node.left)
+            visit(node.right)
+            candidates = (
+                *backend.execute_program(node.left).entity_ids(),
+                *backend.execute_program(node.right).entity_ids(),
+            )
+            nodes.update(candidates)
+            remaining = max_edges - len(facts)
+            edges = backend.neighbors(
+                candidates,
+                direction="out",
+                relation_ids=[node.attribute],
+                limit=max(0, remaining + 1),
+            )
+            if len(edges) > remaining:
+                truncated = True
+                edges = edges[:remaining]
+            facts.update(edges)
             return
         raise TypeError(type(node).__name__)
 

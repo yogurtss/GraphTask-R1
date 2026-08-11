@@ -7,20 +7,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from graphtask_r1.generation import validate_proposal
+from graphtask_r1.graphscript import graphscript_operators
 from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal
-from graphtask_r1.training.prompts import InteractionMode, role_prompt
+from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
 from graphtask_r1.training.relations import require_catalog_covers_program
 from graphtask_r1.utils import ProgressLogger
-
-
-def tool_kwargs(
-    names: tuple[str, ...], common: Mapping[str, object], *, role: str
-) -> dict[str, dict[str, dict[str, object]]]:
-    """Build the session kwargs consumed by both verl v0.5 and v0.7 datasets."""
-    return {
-        name: {"create_kwargs": {**common, "role": role}}
-        for name in names
-    }
 
 
 def export_role_dataset(
@@ -34,6 +25,7 @@ def export_role_dataset(
     questioner_weight: float = 0.35,
     solver_weight: float = 0.65,
     interaction_mode: InteractionMode = "tool",
+    graphscript_version: GraphScriptVersion = "0.1",
     relation_catalog: tuple[RelationInfo, ...] = (),
     relation_catalogs: Mapping[str, tuple[RelationInfo, ...]] | None = None,
     max_follow_limit: int = 100,
@@ -41,30 +33,35 @@ def export_role_dataset(
     max_returned_entities: int = 1_000,
     program_profile: str = "full",
 ) -> int:
-    """Export verl RLHFDataset rows with role-specific prompts and tool session kwargs."""
+    """Export role-specific RL rows consumed directly by the ms-swift preprocessor."""
     rows: list[dict[str, object]] = []
-    progress = ProgressLogger("data.export_verl", total=len(tasks))
-    progress.start(interaction_mode=interaction_mode, program_profile=program_profile)
+    progress = ProgressLogger("data.export_rl", total=len(tasks))
+    progress.start(
+        interaction_mode=interaction_mode,
+        graphscript_version=graphscript_version,
+        program_profile=program_profile,
+    )
     for index, task in enumerate(tasks):
         graph_snapshot = task.graph_snapshot
         task_catalog = (relation_catalogs or {}).get(graph_snapshot, relation_catalog)
-        if interaction_mode == "graphscript" and not task_catalog:
+        if interaction_mode == "graphscript" and graphscript_version == "0.1" and not task_catalog:
             raise ValueError(
-                f"graphscript verl export requires a relation catalog for {graph_snapshot}"
+                f"GraphScript RL export requires a relation catalog for {graph_snapshot}"
             )
-        if program_profile == "graphscript_v0_1":
-            if not task_catalog:
+        if program_profile in {"graphscript_v0_1", "graphscript_v0_2"}:
+            if program_profile == "graphscript_v0_1" and not task_catalog:
                 raise ValueError(
-                    f"comparison verl export requires a relation catalog for {graph_snapshot}"
+                    f"comparison RL export requires a relation catalog for {graph_snapshot}"
                 )
-            validate_proposal(
-                TaskProposal(
-                    topic_entities=tuple(
-                        entity.entity_id for entity in task.topic_entities
-                    ),
-                    program=task.program,
+            if program_profile == "graphscript_v0_1" or (
+                include_questioner and task.topic_entities
+            ):
+                validate_proposal(
+                    TaskProposal(
+                        topic_entities=tuple(entity.entity_id for entity in task.topic_entities),
+                        program=task.program,
+                    )
                 )
-            )
             require_catalog_covers_program(
                 task.program,
                 task_catalog,
@@ -77,29 +74,24 @@ def export_role_dataset(
             "task_id": task.task_id,
             "index": index,
             "interaction_mode": interaction_mode,
+            "graphscript_version": graphscript_version,
+            "operator_set": list(graphscript_operators(graphscript_version)),
             "allowed_relations": [value.relation_id for value in task_catalog],
             "max_follow_limit": max_follow_limit,
             "max_edge_visits": max_edge_visits,
             "max_returned_entities": max_returned_entities,
             "program_profile": program_profile,
+            "text_search_enabled": graph_snapshot.startswith("kilt-"),
+            "max_text_search_results": 3,
+            "max_passage_chars": 2_000,
         }
         if include_questioner:
-            questioner_tools = tool_kwargs(
-                ("graph_search", "inspect_entity", "execute_program"),
-                common,
-                role="questioner",
-            )
             questioner_extra = {
                 **common,
                 "role": "questioner",
                 "role_weight": questioner_weight,
                 "opponent_url": opponent_url,
                 "opponent_samples": opponent_samples,
-                **(
-                    {"need_tools_kwargs": True, "tools_kwargs": questioner_tools}
-                    if interaction_mode == "tool"
-                    else {}
-                ),
             }
             payload = (
                 "Start from these seed entities and construct a novel, executable challenge: "
@@ -113,43 +105,33 @@ def export_role_dataset(
                         payload,
                         interaction_mode=interaction_mode,
                         relation_catalog=task_catalog,
+                        graphscript_version=graphscript_version,
                     ),
                     "ability": "graph_task_generation",
                     "reward_model": {"style": "rule", "ground_truth": "{}"},
                     "extra_info": questioner_extra,
                     "uid": f"questioner:{task.task_id}",
-                    **(
-                        {
-                            "agent_name": "tool_agent",
-                            "tools_kwargs": questioner_tools,
-                        }
-                        if interaction_mode == "tool"
-                        else {}
-                    ),
                 }
             )
         if include_solver:
-            solver_tools = tool_kwargs(
-                ("graph_search", "inspect_entity"), common, role="solver"
-            )
             solver_extra = {
                 **common,
                 "role": "solver",
                 "role_weight": solver_weight,
-                **(
-                    {"need_tools_kwargs": True, "tools_kwargs": solver_tools}
-                    if interaction_mode == "tool"
-                    else {}
-                ),
             }
             rows.append(
                 {
                     "data_source": "graphtask/solver",
                     "prompt": role_prompt(
                         "solver",
-                        f"Question: {task.question}\nTopic entities: {', '.join(topic_ids)}",
+                        (
+                            f"Question: {task.question}\nTopic entities: {', '.join(topic_ids)}"
+                            if graphscript_version == "0.1"
+                            else f"Question: {task.question}"
+                        ),
                         interaction_mode=interaction_mode,
                         relation_catalog=task_catalog,
+                        graphscript_version=graphscript_version,
                     ),
                     "ability": "graph_search_qa",
                     "reward_model": {
@@ -158,14 +140,6 @@ def export_role_dataset(
                     },
                     "extra_info": solver_extra,
                     "uid": f"solver:{task.task_id}",
-                    **(
-                        {
-                            "agent_name": "tool_agent",
-                            "tools_kwargs": solver_tools,
-                        }
-                        if interaction_mode == "tool"
-                        else {}
-                    ),
                 }
             )
         progress.update(index + 1, rows=len(rows))

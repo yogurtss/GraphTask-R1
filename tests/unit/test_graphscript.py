@@ -12,8 +12,16 @@ from graphtask_r1.graphscript import (
     parse_graphscript,
     program_to_graphscript,
 )
-from graphtask_r1.schema import AnswerSet, Entity, Hop
-from graphtask_r1.training.verl_reward import compute_score
+from graphtask_r1.schema import (
+    AllEntities,
+    AnswerSet,
+    Entity,
+    FilterType,
+    Hop,
+    QueryAttribute,
+    SelectBetween,
+)
+from graphtask_r1.training.ms_swift_reward import compute_score
 
 
 def _script(first: str = "works_at", second: str = "located_in") -> str:
@@ -68,7 +76,9 @@ def test_graphscript_executes_and_compiles_to_certified_program() -> None:
         "equivalence", "Where does Alice work?", execution.program, graph, seed=42
     )
     assert tool_trace.final_answers == execution.answers
-    assert sum(len(observation.triples) for observation in tool_trace.observations) == 2
+    assert [call.name for call in tool_trace.calls] == ["search", "final_answer"]
+    assert len(tool_trace.calls[0].arguments["query"]["steps"]) == 2
+    assert tool_trace.observations[1].entities[0].entity_id == "paris"
 
 
 @pytest.mark.parametrize(
@@ -139,6 +149,124 @@ def test_graphscript_solver_reward_executes_program() -> None:
 def test_program_converter_rejects_non_chain_program() -> None:
     with pytest.raises(GraphScriptError, match="INVALID_SHAPE"):
         program_to_graphscript(Hop(input=Entity(entity_id="alice"), relation="friend"))
+
+
+def test_graphscript_v02_resolves_question_entity_and_queries_literal() -> None:
+    graph = toy_graph()
+    script = parse_graphscript(
+        {
+            "version": "0.2",
+            "ops": [
+                {
+                    "op": "resolve_entity",
+                    "query": "Alice",
+                    "match": "exact",
+                    "limit": 1,
+                    "out": "h0",
+                },
+                {
+                    "op": "query_attribute",
+                    "in": "h0",
+                    "attribute": "age",
+                    "out": "h1",
+                },
+                {"op": "emit", "in": "h1"},
+            ],
+        }
+    )
+
+    execution = execute_graphscript(
+        script,
+        graph,
+        allowed_relations=frozenset(),
+        max_edge_visits=10,
+    )
+
+    assert execution.answers == AnswerSet.literals(["34"])
+    assert execution.program == QueryAttribute(input=Entity(entity_id="alice"), attribute="age")
+    assert execution.usage.graph_calls == 1
+    assert execution.usage.edge_visits == 1
+
+
+def test_graphscript_v02_round_trips_new_program_operator() -> None:
+    graph = toy_graph()
+    program = SelectBetween(
+        left=Entity(entity_id="alice"),
+        right=Entity(entity_id="bob"),
+        attribute="age",
+        mode="max",
+    )
+
+    script = program_to_graphscript(program, version="0.2")
+    execution = execute_graphscript(
+        parse_graphscript(script.model_dump(mode="json", by_alias=True)),
+        graph,
+        allowed_relations=frozenset(),
+        max_edge_visits=10,
+    )
+
+    assert script.version == "0.2"
+    assert execution.program == program
+    assert execution.answers == AnswerSet.entities(["alice"])
+
+
+def test_graphscript_v02_supports_bounded_global_filter_program() -> None:
+    graph = toy_graph()
+    program = FilterType(input=AllEntities(max_results=100), type_id="city")
+    script = parse_graphscript(program_to_graphscript(program, version="0.2").model_dump())
+
+    execution = execute_graphscript(
+        script,
+        graph,
+        allowed_relations=frozenset(),
+        max_edge_visits=10,
+    )
+
+    assert execution.program == program
+    assert execution.answers == graph.execute_program(program)
+
+
+def test_graphscript_v02_solver_reward_does_not_require_topic_seed() -> None:
+    solution = json.dumps(
+        {
+            "version": "0.2",
+            "ops": [
+                {
+                    "op": "resolve_entity",
+                    "query": "Alice",
+                    "match": "exact",
+                    "limit": 1,
+                    "out": "h0",
+                },
+                {
+                    "op": "follow",
+                    "in": "h0",
+                    "relation": "works_at",
+                    "direction": "out",
+                    "limit": 10,
+                    "out": "h1",
+                },
+                {"op": "emit", "in": "h1"},
+            ],
+        }
+    )
+    score = asyncio.run(
+        compute_score(
+            "graphtask/solver",
+            solution,
+            AnswerSet.entities(["acme"]).model_dump_json(),
+            {
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.2",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": [],
+                "allowed_relations": ["works_at"],
+                "max_edge_visits": 10,
+            },
+        )
+    )
+    assert score["score"] == 1.0
+    assert score["edge_visits"] == 1.0
 
 
 def test_tool_comparison_questioner_cannot_change_episode_seed() -> None:

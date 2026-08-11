@@ -5,7 +5,7 @@ Virtuoso 数据库或 token 提交到 Git。
 
 如果 `data/processed/kqapro/kqapro-v1/graph.sqlite` 以及 `train/val/tasks.parquet` 已经存在，说明
 耗时的 KQA Pro 转换已经完成。此时不要再次运行 `data prepare`；直接跳到 2.3 节，用
-`data export-sft` 从现有 accepted tasks 生成缺少的 `data/verl/kqapro_sft_*.parquet`。该导出过程
+`data export-sft` 从现有 accepted tasks 生成缺少的 `data/training/kqapro_sft_*.parquet`。该导出过程
 不会修改 processed 数据。
 
 所有耗时数据命令默认向 stderr 输出 `INFO` 级进度日志，包含当前阶段、完成数、总数、百分比、
@@ -35,8 +35,8 @@ data/
 │   ├── webqsp/
 │   ├── cwq/
 │   └── grailqa/
-├── cache/                       # Virtuoso 查询缓存
-└── verl/                        # SFT/GRPO/self-play Parquet
+├── training/                    # SFT/GRPO/self-play Parquet
+└── cache/                       # 外部图查询缓存（含 Virtuoso）
 ```
 
 每次转换都会记录原文件 SHA-256、转换器版本、split、配置和统计。原文件更新后应创建新的
@@ -91,14 +91,16 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 转换器执行以下步骤：
 
 1. 将 `kb.json` 构建为带 subject/object/type/attribute 索引的 `graph.sqlite`；
-2. 将 `Find/FindAll/Relate/And/Or/FilterConcept/Filter*/Count/What` 映射到 core DSL；
+2. 将 `Find/FindAll/Relate/And/Or/FilterConcept/Filter*/Count/What`，以及
+   `QueryAttr/QueryRelation/SelectBetween/SelectAmong` 映射到 typed DSL；
 3. 重新执行 DSL 产生 gold answer；
 4. 将实体 ID 对应标签与原 KQA answer 对账；
 5. 运行局部物化、必要性、shortcut、answer leakage 和 canonical trace replay；
 6. 接受样本写入 `tasks.parquet`/`traces.parquet`，其他样本写入 `rejections.parquet`。
 
-Qualifier、属性查询、Verify、极值选择等不属于首版研究核心的 KoPL 操作不会被猜测性转换，
-而是保留原程序并标记 `UNSUPPORTED_KOPL_OPERATOR`。
+当前仍未支持 qualifier 查询、`QFilter*`、`QueryAttrUnderCondition` 和 `Verify*`。这些操作
+不会被猜测性转换，而是保留原程序并标记 `UNSUPPORTED_KOPL_OPERATOR`。属性投影、关系查询和
+属性极值选择已经由确定性的 typed program、后端执行和 compact trace 共同支持。
 
 ### 2.3 产物审计
 
@@ -106,19 +108,172 @@ Qualifier、属性查询、Verify、极值选择等不属于首版研究核心�
 python -m graphtask_r1.cli data audit \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task
 
+python -m graphtask_r1.cli data build-relation-catalog \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output data/processed/kqapro/kqapro-v1/relation_catalog.json
+
 python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/verl/kqapro_sft_train.parquet --roles both
+  --output data/training/kqapro_graphscript_v02_sft_train.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
-  --output data/verl/kqapro_sft_val.parquet --roles both
+  --output data/training/kqapro_graphscript_v02_sft_val.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
 
 必须检查 `metrics.json` 中的接受率和各 reason code。`SOURCE_ANSWER_MISMATCH`、
 `INCOMPLETE_SLICE` 或 `TRACE_REPLAY_MISMATCH` 大量出现时不要训练。
 
-## 3. Freebase 与 Virtuoso
+## 3. KILT、HotpotQA 与 TriviaQA（CoEvoKG 数据协议对齐）
+
+这条路线只对齐知识源和最终测试分布，不采用 CoEvoKG 的 chain-conditioned proposer、LLM
+quality gate、path reward 或 evidence write-back。GraphTask 的训练 gold 仍只能由认证程序执行产生；
+SSP 问题不会被转换成 `TaskCertificate`，也不会进入 self-play archive。
+
+当前 Windows 数据盘统一布局如下（WSL 路径为 `/mnt/g/datasets/GraphTaskDataset`）：
+
+```text
+G:\datasets\GraphTaskDataset\
+├── kilt_knowledgesource.json
+├── ssp\ce7a0dfbc862f923ad1668a471c409b2e023b73f\test.jsonl
+├── hotpotqa\ssp-test\test\examples.parquet
+└── triviaqa\ssp-test\test\examples.parquet
+```
+
+SSP 固定 revision 为 `ce7a0dfbc862f923ad1668a471c409b2e023b73f`，原始 `test.jsonl`
+SHA-256 为 `871c7b7cdec2e090e8597ef26a9a973a46aad0830bb1e016679dddd748462f50`。
+适配器会验证该 release 的 bucket 数量；HotpotQA 和 TriviaQA 应各为 500 题。原始 SSP 中的
+MuSiQue 不属于 CoEvoKG 最终六数据集，默认会排除。
+
+### 3.1 KILT bounded smoke build
+
+先只读取 100 页，验证 hyperlink 图与 SQLite FTS5 passage index：
+
+```bash
+python -m graphtask_r1.cli data prepare --dataset kilt \
+  --raw-dir /mnt/g/datasets/GraphTaskDataset/kilt_knowledgesource.json \
+  --output-dir data/processed/kilt/kilt-2019-08-01-smoke \
+  --limit 100 --workers 1
+```
+
+确认 `metrics.json`、`rejections.parquet`、图遍历和文本检索后再做全量构建。当前原文件为
+37,318,876,722 字节，SHA-256 是
+`f966d6f09c4ff91656db5c56c384f136b0c495c7083c043586b8cb1033c389a5`；根目录
+`checksums.sha256` 同时固定了 KILT 与 SSP。全量构建会生成页面节点、`wikipedia_link` 边、
+category type、Wikidata ID 属性和 passage FTS，应预留至少 150 GB。若只需要 hyperlink 图，
+可加 `--no-text-index` 降低空间占用。
+
+```bash
+python -m graphtask_r1.cli data prepare --dataset kilt \
+  --raw-dir /mnt/g/datasets/GraphTaskDataset/kilt_knowledgesource.json \
+  --output-dir /mnt/g/datasets/GraphTaskDataset/kilt-2019-08-01-v1 \
+  --workers 1
+
+export GRAPHTASK_KILT_DB=/mnt/g/datasets/GraphTaskDataset/kilt-2019-08-01-v1/graph.sqlite
+python -m graphtask_r1.cli graph preflight --snapshot kilt-2019-08-01-v1 --limit 5
+```
+
+KILT importer 是单写者、流式且原子替换；运行时图 backend 只读且 instance-scoped。没有
+`wikipedia_id` 的 anchor 不会被猜测性匹配，而是按页面聚合保存
+`MISSING_ANCHOR_TARGET` reason code。
+
+### 3.2 HotpotQA 与 TriviaQA 测试集
+
+若需重新下载固定 SSP release：
+
+```bash
+python -m graphtask_r1.cli data fetch --dataset ssp \
+  --raw-dir /mnt/g/datasets/GraphTaskDataset
+```
+
+这两个 SSP test bucket 都是 open-domain 输入：共 1,000 题且 `topic_entity_ids` 全为空。
+正式测试必须使用带 FTS5 passage index 的完整 KILT snapshot，不能使用
+`--no-text-index` 构建物。Solver 可以先调用 bounded `text_search` 获得页面 ID 和 passage，
+再使用 `graph_search`/`inspect_entity` 补充多跳证据；答案仍按 SSP alias EM/F1 评测。
+
+分别生成三个最终测试集：
+
+```bash
+python -m graphtask_r1.cli data prepare --dataset ssp \
+  --raw-dir /mnt/g/datasets/GraphTaskDataset/ssp/ce7a0dfbc862f923ad1668a471c409b2e023b73f \
+  --output-dir /mnt/g/datasets/GraphTaskDataset/hotpotqa/ssp-test \
+  --include-datasets hotpotqa --workers 2
+
+python -m graphtask_r1.cli data prepare --dataset ssp \
+  --raw-dir /mnt/g/datasets/GraphTaskDataset/ssp/ce7a0dfbc862f923ad1668a471c409b2e023b73f \
+  --output-dir /mnt/g/datasets/GraphTaskDataset/triviaqa/ssp-test \
+  --include-datasets triviaqa --workers 2
+
+python -m graphtask_r1.cli data prepare --dataset ssp \
+  --raw-dir /mnt/g/datasets/GraphTaskDataset/ssp/ce7a0dfbc862f923ad1668a471c409b2e023b73f \
+  --output-dir /mnt/g/datasets/GraphTaskDataset/nq/ssp-test \
+  --include-datasets nq --workers 2
+```
+
+三个适配后数据集允许空 topic entity，并把答案 alias 保存为等价类；评测采用与
+Search-R1/CoEvoKG 相同的 lowercase、去标点、去冠词、空白归一化 EM。KILT task 格式和
+HotpotQA/TriviaQA 官方格式也由相同 adapter 支持，但只有上述固定 SSP release 可以声明
+`CoEvoKG test parity`。
+
+### 3.3 从 KILT 图生成认证 GRPO 训练集
+
+KILT knowledge source 不能直接作为 GRPO prompt。`bootstrap-kilt-grpo` 从只读 KILT 图按显式
+seed 采样 `hop1`、`hop2`、`type_filter` 和 `count` 程序，执行完整 GraphTask 认证，并只把
+通过的 `TaskCertificate` 导出到统一的 GraphScript v0.2 Solver GRPO contract。模型只看到问题并
+输出可执行 code，不输出自由文本答案。所有 gold answer 来自程序执行；
+SSP 的问题和答案不会被读取。
+
+先在 smoke 图上验证：
+
+```bash
+export GRAPHTASK_KILT_DB=$PWD/data/processed/kilt/kilt-2019-08-01-smoke/graph.sqlite
+
+python -m graphtask_r1.cli data bootstrap-kilt-grpo \
+  --output-dir data/processed/kilt/kilt-grpo-smoke \
+  --count 64 --pool-limit 100 --max-attempts 3200 \
+  --val-ratio 0.125 --seed 42
+
+python -m graphtask_r1.cli data audit \
+  --input data/processed/kilt/kilt-grpo-smoke/train/tasks.parquet --kind task
+```
+
+产物包括：
+
+```text
+kilt-grpo-smoke/
+├── train/tasks.parquet
+├── train/traces.parquet
+├── train/solver_grpo.parquet
+├── val/tasks.parquet
+├── val/traces.parquet
+├── val/solver_grpo.parquet
+├── rejections.parquet
+├── relation_catalog.json
+├── metrics.json
+└── manifest.json
+```
+
+正式数据若希望得到 20,096 train + 512 validation，可请求总计 20,608 个 accepted tasks：
+
+```bash
+export GRAPHTASK_KILT_DB=/mnt/g/datasets/GraphTaskDataset/kilt-2019-08-01-v1/graph.sqlite
+
+python -m graphtask_r1.cli data bootstrap-kilt-grpo \
+  --output-dir /mnt/g/datasets/GraphTaskDataset/processed/kilt/kilt-certified-grpo-v2 \
+  --count 20608 --pool-limit 1000000 \
+  --val-ratio 0.02484472 --seed 42 \
+  --interaction-mode graphscript --graphscript-version 0.2
+```
+
+达到 `max_attempts` 仍不足 requested count 时命令会失败，同时保留 `metrics.json` 和结构化
+`rejections.parquet`，不会静默输出不完整训练集。正式运行前必须检查 accepted count、各 program
+family 接受数、rejection reason 分布和 canonical trace replay。
+
+## 4. Freebase 与 Virtuoso
 
 主实验使用 GrailQA 推荐的 [Freebase-Setup](https://github.com/dki-lab/Freebase-Setup)。Freebase
 数据和 Virtuoso 索引通常需要数百 GB；开始前根据官方 dump 的实际大小预留充足磁盘。
@@ -142,7 +297,7 @@ python -m graphtask_r1.cli graph preflight --snapshot freebase-v1 --limit 5
 
 快照在数据中只记录 `freebase-v1`；endpoint 和凭证只通过环境变量传入。
 
-## 4. WebQSP、CWQ 与 GrailQA
+## 5. WebQSP、CWQ 与 GrailQA
 
 - WebQSP：使用 Microsoft/Freebase-Setup 指向的官方文件。
 - ComplexWebQuestions v1.1：<https://www.tau-nlp.sites.tau.ac.il/compwebq>
@@ -164,7 +319,7 @@ python -m graphtask_r1.cli data prepare --dataset grailqa \
 适配器保留原始 SPARQL/逻辑形式，统一 gold entity ID、问题、split 和 topic entities。主评测
 使用 gold topic entities，避免把实体链接误差混入图推理结果。
 
-### 4.1 防止 self-play 使用 held-out seeds
+### 5.1 防止 self-play 使用 held-out seeds
 
 ```bash
 python -m graphtask_r1.cli data merge-denylists \
@@ -177,13 +332,13 @@ python -m graphtask_r1.cli data merge-denylists \
 python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 \
   --exclude data/processed/freebase_heldout_entities.json \
   --count 4096 --pool-limit 100000 --seed 42 \
-  --output data/verl/freebase_questioner_seeds.parquet
+  --output data/training/freebase_questioner_seeds.parquet
 ```
 
 采样器还会过滤度数小于 2、度数大于 100 和常见 metadata 实体。benchmark 的 dev/test 问题、
 逻辑形式和 topic entities 不得进入 Questioner prompt 或 archive。
 
-## 5. 训练前质量门
+## 6. 训练前质量门
 
 进入 GPU 训练前应全部满足：
 

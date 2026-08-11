@@ -6,3 +6,5 @@ val_data: ${SFT_VAL_DATA}
 output_dir: ${SFT_OUTPUT_DIR}
 num_gpus: 4
 experiment_name: qwen3-4b-shared-sft-ms-swift-cu124
+interaction_mode: graphscript
+graphscript_version: "0.2"

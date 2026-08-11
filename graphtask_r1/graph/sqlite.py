@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -10,6 +11,7 @@ from typing import Any
 
 from graphtask_r1.graph.materialize import materialize_program
 from graphtask_r1.graph.overlay import GraphOverlay
+from graphtask_r1.graph.values import attribute_sort_key, format_attribute_value
 from graphtask_r1.schema import (
     AllEntities,
     AnswerSet,
@@ -22,7 +24,11 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
     RelationInfo,
+    SelectAmong,
+    SelectBetween,
     Triple,
     Union,
     Witness,
@@ -31,6 +37,15 @@ from graphtask_r1.schema import (
 
 _PREFERRED_SQL_VARIABLE_LIMIT = 900
 _LEGACY_SQL_VARIABLE_LIMIT = 999
+
+
+def _time_parts(value: str | int | float) -> tuple[int, ...]:
+    text = str(value).replace("-", "/")
+    sign = -1 if text.startswith("/") else 1
+    if sign < 0:
+        text = text[1:]
+    parts = tuple(int(part) for part in text.split("/"))
+    return (sign * parts[0], *parts[1:])
 
 
 def _chunks(values: Sequence[str], size: int) -> list[Sequence[str]]:
@@ -51,13 +66,44 @@ def _runtime_sql_variable_limit(connection: Any) -> int:
     return _LEGACY_SQL_VARIABLE_LIMIT
 
 
-def _compare(left: str, datatype: str, comparator: str, right: str | int | float) -> bool:
+def _compare(
+    left: str,
+    datatype: str,
+    comparator: str,
+    right: str | int | float,
+    target_datatype: str,
+    unit: str | None,
+    target_unit: str | None,
+) -> bool:
     if comparator == "contains":
         return str(right).casefold() in left.casefold()
-    if datatype in {"quantity", "number", "year"}:
+    if (
+        datatype == "quantity"
+        and target_datatype in {"quantity", "number"}
+        and (unit or "1") != (target_unit or "1")
+    ):
+        return False
+    lhs: Any
+    rhs: Any
+    if datatype in {"year", "date"} and target_datatype in {"year", "date"}:
+        left_parts = _time_parts(left)
+        right_parts = _time_parts(right)
+        left_year = left_parts[0]
+        right_year = right_parts[0]
+        if comparator in {"eq", "ne"}:
+            if target_datatype == "year":
+                equal = left_year == right_year
+            else:
+                equal = datatype == "date" and left_parts == right_parts
+            return equal if comparator == "eq" else not equal
+        if datatype == "date" and target_datatype == "date":
+            lhs, rhs = left_parts, right_parts
+        else:
+            lhs, rhs = left_year, right_year
+    elif datatype in {"quantity", "number", "year"}:
         try:
-            lhs: Any = float(left)
-            rhs: Any = float(right)
+            lhs = float(left)
+            rhs = float(right)
         except ValueError:
             lhs, rhs = left, str(right)
     else:
@@ -106,6 +152,8 @@ class SQLiteGraphBackend:
         self._entity_info_cache: dict[str, EntityInfo] = {}
         self._relation_info_cache: dict[str, RelationInfo] = {}
         self._materialize_cache: dict[tuple[Program, int, int], GraphSlice] = {}
+        self._text_search_cache: dict[tuple[str, int, int], tuple[dict[str, Any], ...]] = {}
+        self._entity_resolution_cache: dict[tuple[str, str, int], tuple[str, ...]] = {}
 
     @property
     def _cache_enabled(self) -> bool:
@@ -119,6 +167,8 @@ class SQLiteGraphBackend:
         self._entity_info_cache.clear()
         self._relation_info_cache.clear()
         self._materialize_cache.clear()
+        self._text_search_cache.clear()
+        self._entity_resolution_cache.clear()
 
     @contextmanager
     def query_cache(self) -> Iterator[None]:
@@ -147,6 +197,58 @@ class SQLiteGraphBackend:
         result = tuple(str(row[0]) for row in rows)
         if self._cache_enabled:
             self._all_entities_cache[normalized_limit] = result
+        return result
+
+    def resolve_entities(
+        self,
+        query: str,
+        *,
+        match: str = "exact",
+        limit: int = 5,
+        trace_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Resolve exact IDs/titles/aliases, with optional passage-search fallback."""
+
+        del trace_id
+        normalized = query.strip()
+        normalized_limit = max(0, min(limit, 20))
+        if not normalized or normalized_limit == 0:
+            return ()
+        if match not in {"id", "exact", "search"}:
+            raise ValueError(f"invalid entity match mode: {match}")
+        cache_key = (normalized, match, normalized_limit)
+        if self._cache_enabled and cache_key in self._entity_resolution_cache:
+            return self._entity_resolution_cache[cache_key]
+
+        result: tuple[str, ...]
+        if match == "id":
+            row = self.connection.execute(
+                "SELECT entity_id FROM entities WHERE entity_id = ?", (normalized,)
+            ).fetchone()
+            result = (str(row[0]),) if row is not None else ()
+        else:
+            rows = self.connection.execute(
+                "SELECT DISTINCT entity.entity_id FROM entities AS entity "
+                "LEFT JOIN json_each(entity.aliases_json) AS alias "
+                "WHERE entity.label = ? COLLATE NOCASE "
+                "OR CAST(alias.value AS TEXT) = ? COLLATE NOCASE "
+                "ORDER BY entity.entity_id LIMIT ?",
+                (normalized, normalized, normalized_limit),
+            ).fetchall()
+            result = tuple(str(row[0]) for row in rows)
+            if match == "search" and not result:
+                try:
+                    passages = self.search_text(
+                        normalized,
+                        limit=normalized_limit,
+                        max_chars=1,
+                        trace_id="resolve-entity",
+                    )
+                except ValueError:
+                    passages = []
+                result = tuple(dict.fromkeys(str(passage["page_id"]) for passage in passages))
+        if self._cache_enabled:
+            self._entity_resolution_cache[cache_key] = result
         return result
 
     def neighbors(
@@ -205,9 +307,28 @@ class SQLiteGraphBackend:
             self._neighbors_cache[cache_key] = result
         return list(result)
 
-    def _filter_all_entities_by_type(
-        self, program: FilterType, *, max_results: int
-    ) -> set[str]:
+    def entity_degrees(self, entity_ids: Sequence[str]) -> dict[str, int]:
+        """Return total in/out hyperlink degrees in bounded SQL batches."""
+
+        unique_ids = tuple(sorted(set(entity_ids)))
+        result = {entity_id: 0 for entity_id in unique_ids}
+        batch_size = max(1, self._sql_variable_limit() // 2)
+        for batch in _chunks(unique_ids, batch_size):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.connection.execute(
+                "SELECT entity_id, SUM(degree) FROM ("
+                f"SELECT subject AS entity_id, COUNT(*) AS degree FROM triples "
+                f"WHERE subject IN ({placeholders}) GROUP BY subject UNION ALL "
+                f"SELECT object AS entity_id, COUNT(*) AS degree FROM triples "
+                f"WHERE object IN ({placeholders}) GROUP BY object"
+                ") GROUP BY entity_id",
+                (*batch, *batch),
+            ).fetchall()
+            for entity_id, degree in rows:
+                result[str(entity_id)] = int(degree)
+        return result
+
+    def _filter_all_entities_by_type(self, program: FilterType, *, max_results: int) -> set[str]:
         rows = self.connection.execute(
             "SELECT typed.entity_id FROM entity_types AS typed "
             "JOIN (SELECT entity_id FROM entities ORDER BY entity_id LIMIT ?) AS candidates "
@@ -220,7 +341,7 @@ class SQLiteGraphBackend:
         self, program: FilterLiteral, *, max_results: int
     ) -> set[str]:
         rows = self.connection.execute(
-            "SELECT attribute.entity_id, attribute.value, attribute.datatype "
+            "SELECT attribute.entity_id, attribute.value, attribute.datatype, attribute.unit "
             "FROM attributes AS attribute "
             "JOIN (SELECT entity_id FROM entities ORDER BY entity_id LIMIT ?) AS candidates "
             "ON candidates.entity_id = attribute.entity_id WHERE attribute.key = ?",
@@ -228,8 +349,16 @@ class SQLiteGraphBackend:
         ).fetchall()
         return {
             str(entity_id)
-            for entity_id, value, datatype in rows
-            if _compare(str(value), str(datatype), program.comparator, program.value.value)
+            for entity_id, value, datatype, unit in rows
+            if _compare(
+                str(value),
+                str(datatype),
+                program.comparator,
+                program.value.value,
+                program.value.datatype,
+                None if unit is None else str(unit),
+                program.value.unit,
+            )
         }
 
     def _execute_entities(self, program: Program) -> set[str]:
@@ -247,17 +376,13 @@ class SQLiteGraphBackend:
                 relation_ids=[program.relation],
                 limit=1_000_000,
             )
-            result = {
-                edge.object if program.direction == "out" else edge.subject for edge in edges
-            }
+            result = {edge.object if program.direction == "out" else edge.subject for edge in edges}
         elif isinstance(program, Intersect):
             result = set.intersection(
                 *(self._execute_entities(branch) for branch in program.inputs)
             )
         elif isinstance(program, Union):
-            result = set().union(
-                *(self._execute_entities(branch) for branch in program.inputs)
-            )
+            result = set().union(*(self._execute_entities(branch) for branch in program.inputs))
         elif isinstance(program, FilterType):
             if isinstance(program.input, AllEntities):
                 result = self._filter_all_entities_by_type(
@@ -287,18 +412,21 @@ class SQLiteGraphBackend:
                 for batch in _chunks(sorted(candidates), batch_size):
                     placeholders = ",".join("?" for _ in batch)
                     rows = self.connection.execute(
-                        f"SELECT entity_id, value, datatype FROM attributes "
+                        f"SELECT entity_id, value, datatype, unit FROM attributes "
                         f"WHERE entity_id IN ({placeholders}) AND key = ?",
                         (*batch, program.relation),
                     ).fetchall()
                     result.update(
                         str(entity_id)
-                        for entity_id, value, datatype in rows
+                        for entity_id, value, datatype, unit in rows
                         if _compare(
                             str(value),
                             str(datatype),
                             program.comparator,
                             program.value.value,
+                            program.value.datatype,
+                            None if unit is None else str(unit),
+                            program.value.unit,
                         )
                     )
         elif isinstance(program, Count):
@@ -314,11 +442,78 @@ class SQLiteGraphBackend:
             return self._answer_cache[program]
         if isinstance(program, Count):
             result = AnswerSet.count(len(self._execute_entities(program.input)))
+        elif isinstance(program, QueryAttribute):
+            rows = self._attribute_rows(self._execute_entities(program.input), program.attribute)
+            result = AnswerSet.literals(
+                {format_attribute_value(value, datatype, unit) for _, value, datatype, unit in rows}
+            )
+        elif isinstance(program, QueryRelation):
+            subjects = self._execute_entities(program.subject)
+            objects = self._execute_entities(program.object)
+            relations: set[str] = set()
+            for batch in _chunks(sorted(subjects), self._sql_variable_limit() - 1):
+                placeholders = ",".join("?" for _ in batch)
+                relation_rows = self.connection.execute(
+                    f"SELECT relation, object FROM triples WHERE subject IN ({placeholders})",
+                    tuple(batch),
+                ).fetchall()
+                relations.update(
+                    str(relation)
+                    for relation, object_id in relation_rows
+                    if str(object_id) in objects
+                )
+            result = AnswerSet.literals(relations)
+        elif isinstance(program, SelectBetween):
+            candidates = {
+                *self._execute_entities(program.left),
+                *self._execute_entities(program.right),
+            }
+            result = AnswerSet.entities(
+                [self._select_by_attribute(candidates, program.attribute, program.mode)]
+            )
+        elif isinstance(program, SelectAmong):
+            result = AnswerSet.entities(
+                [
+                    self._select_by_attribute(
+                        self._execute_entities(program.input),
+                        program.attribute,
+                        program.mode,
+                    )
+                ]
+            )
         else:
             result = AnswerSet.entities(self._execute_entities(program))
         if self._cache_enabled:
             self._answer_cache[program] = result
         return result
+
+    def _attribute_rows(
+        self, entity_ids: set[str], attribute: str
+    ) -> list[tuple[str, str, str, str | None]]:
+        result: list[tuple[str, str, str, str | None]] = []
+        for batch in _chunks(sorted(entity_ids), self._sql_variable_limit() - 1):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.connection.execute(
+                f"SELECT entity_id, value, datatype, unit FROM attributes "
+                f"WHERE entity_id IN ({placeholders}) AND key = ?",
+                (*batch, attribute),
+            ).fetchall()
+            result.extend(
+                (str(entity_id), str(value), str(datatype), None if unit is None else str(unit))
+                for entity_id, value, datatype, unit in rows
+            )
+        return result
+
+    def _select_by_attribute(self, entity_ids: set[str], attribute: str, mode: str) -> str:
+        rows = self._attribute_rows(entity_ids, attribute)
+        if not rows:
+            raise ValueError(f"no candidate has attribute {attribute!r}")
+        candidates = [
+            (attribute_sort_key(value, datatype, unit), entity_id)
+            for entity_id, value, datatype, unit in rows
+        ]
+        ordered = sorted(candidates, key=lambda item: (item[0], item[1]))
+        return ordered[0][1] if mode == "min" else ordered[-1][1]
 
     def execute_sparql(self, sparql: str) -> AnswerSet:
         marker = "# graphtask-program:"
@@ -343,11 +538,7 @@ class SQLiteGraphBackend:
     def entity_infos(self, entity_ids: Sequence[str]) -> tuple[EntityInfo, ...]:
         ordered_ids = tuple(entity_ids)
         missing = sorted(
-            {
-                entity_id
-                for entity_id in ordered_ids
-                if entity_id not in self._entity_info_cache
-            }
+            {entity_id for entity_id in ordered_ids if entity_id not in self._entity_info_cache}
         )
         loaded: dict[str, EntityInfo] = {}
         for batch in _chunks(missing, self._sql_variable_limit()):
@@ -389,12 +580,55 @@ class SQLiteGraphBackend:
         row = self.connection.execute(
             "SELECT label FROM relation_labels WHERE relation_id = ?", (relation_id,)
         ).fetchone()
-        result = RelationInfo(
-            relation_id=relation_id, label=str(row[0]) if row else relation_id
-        )
+        result = RelationInfo(relation_id=relation_id, label=str(row[0]) if row else relation_id)
         if self._cache_enabled:
             self._relation_info_cache[relation_id] = result
         return result
+
+    def search_text(
+        self,
+        query: str,
+        *,
+        limit: int = 3,
+        max_chars: int = 2_000,
+        trace_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search an optional KILT FTS5 passage sidecar without changing graph semantics."""
+
+        del trace_id
+        normalized_limit = max(0, min(limit, 100))
+        normalized_max_chars = max(1, min(max_chars, 20_000))
+        cache_key = (query, normalized_limit, normalized_max_chars)
+        if self._cache_enabled and cache_key in self._text_search_cache:
+            return [dict(value) for value in self._text_search_cache[cache_key]]
+        available = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'passage_fts'"
+        ).fetchone()
+        if available is None:
+            raise ValueError(f"snapshot {self.snapshot_id} has no text index")
+        tokens = tuple(dict.fromkeys(re.findall(r"[^\W_]+", query.casefold(), flags=re.UNICODE)))
+        if not tokens or normalized_limit == 0:
+            return []
+        expression = " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+        rows = self.connection.execute(
+            "SELECT page_id, paragraph_id, title, substr(text, 1, ?), bm25(passage_fts) "
+            "FROM passage_fts WHERE passage_fts MATCH ? "
+            "ORDER BY bm25(passage_fts), page_id, paragraph_id LIMIT ?",
+            (normalized_max_chars, expression, normalized_limit),
+        ).fetchall()
+        result = tuple(
+            {
+                "page_id": str(page_id),
+                "paragraph_id": int(paragraph_id),
+                "title": str(title),
+                "text": str(text),
+                "score": float(score),
+            }
+            for page_id, paragraph_id, title, text, score in rows
+        )
+        if self._cache_enabled:
+            self._text_search_cache[cache_key] = result
+        return [dict(value) for value in result]
 
     def extract_witness(self, program: Program, answers: AnswerSet) -> list[Witness]:
         graph_slice = self.materialize(program)

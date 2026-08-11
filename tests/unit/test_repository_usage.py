@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -32,16 +34,22 @@ def test_runtime_requirements_do_not_manage_gpu_stack() -> None:
         for line in (PROJECT_ROOT / "requirements.txt").read_text().splitlines()
     }
 
-    externally_managed = ("torch", "verl", "sglang", "ray", "flash-attn")
+    externally_managed = ("torch", "sglang", "ray", "flash-attn")
     for package in externally_managed:
         assert not any(line.startswith(package) for line in requirements)
 
 
-def test_cuda124_sft_uses_json_compatible_dataset() -> None:
-    script = (PROJECT_ROOT / "scripts/train_sft.sh").read_text()
-    assert "cuda124)" in script
-    assert "graphtask_r1/training/verl_sft_dataset.py" in script
-    assert "data.custom_cls.name=GraphTaskMultiTurnSFTDataset" in script
+def test_only_ms_swift_training_scripts_remain() -> None:
+    scripts = {path.name for path in (PROJECT_ROOT / "scripts").glob("train_*.sh")}
+    assert scripts == {"train_ms_swift_sft.sh", "train_ms_swift_grpo.sh"}
+
+
+def test_all_gpu_profiles_use_ms_swift_graphscript_v02() -> None:
+    for path in sorted((PROJECT_ROOT / "configs/experiments").glob("qwen*.yaml")):
+        config = yaml.safe_load(path.read_text())
+        assert config["training_backend"] == "ms_swift", path
+        assert config["interaction_mode"] == "graphscript", path
+        assert config["graphscript_version"] == "0.2", path
 
 
 def test_ms_swift_sft_reads_existing_parquet_through_runtime_plugin() -> None:
@@ -50,6 +58,8 @@ def test_ms_swift_sft_reads_existing_parquet_through_runtime_plugin() -> None:
     assert "graphtask_r1/training/ms_swift_plugin.py" in script
     assert ': "${MODEL_TYPE:=qwen3}"' in script
     assert '--model_type "$MODEL_TYPE"' in script
+    assert 'MAX_LENGTH="${MAX_LENGTH:-32768}"' in script
+    assert "MAX_LENGTH > 40960" in script
     assert "data export-sft" not in script
     assert "data prepare" not in script
 
@@ -57,19 +67,21 @@ def test_ms_swift_sft_reads_existing_parquet_through_runtime_plugin() -> None:
 def test_ms_swift_grpo_keeps_rollout_and_trainer_gpus_separate() -> None:
     rollout = (PROJECT_ROOT / "scripts/rollout_ms_swift.sh").read_text()
     trainer = (PROJECT_ROOT / "scripts/train_ms_swift_grpo.sh").read_text()
-    assert 'ROLLOUT_CUDA_VISIBLE_DEVICES:-0' in rollout
-    assert 'TRAIN_CUDA_VISIBLE_DEVICES:-1,2,3' in trainer
+    assert "ROLLOUT_CUDA_VISIBLE_DEVICES:-0" in rollout
+    assert "TRAIN_CUDA_VISIBLE_DEVICES:-1,2,3" in trainer
     assert '--model_type "$MODEL_TYPE"' in rollout
     assert '--model_type "$MODEL_TYPE"' in trainer
+    assert 'INTERACTION_MODE="${INTERACTION_MODE:-graphscript}"' in trainer
+    assert "export INTERACTION_MODE" in trainer
     assert "multi_turn_scheduler graphtask_solver" in trainer
     assert "multi_turn_scheduler graphtask_solver" in rollout
 
 
 def test_main_readme_links_dedicated_ms_swift_cuda124_guide() -> None:
     main_readme = (PROJECT_ROOT / "README.md").read_text()
-    guide = PROJECT_ROOT / "README_MS_SWIFT_CUDA124.md"
+    guide = PROJECT_ROOT / "docs/MS_SWIFT_CUDA_12_4.md"
 
-    assert "README_MS_SWIFT_CUDA124.md" in main_readme
+    assert "docs/MS_SWIFT_CUDA_12_4.md" in main_readme
     assert guide.is_file()
     assert "qwen3_4b_sft_ms_swift_cuda124.yaml" in guide.read_text()
 

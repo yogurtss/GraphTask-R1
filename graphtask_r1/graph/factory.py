@@ -17,6 +17,14 @@ def backend_from_snapshot(snapshot: str) -> GraphBackend:
             os.environ.get("GRAPHTASK_KQAPRO_DB", "data/processed/kqapro/kqapro-v1/graph.sqlite")
         )
         return SQLiteGraphBackend(path, snapshot_id=snapshot)
+    if snapshot == "kilt-2019-08-01-v1":
+        path = Path(
+            os.environ.get(
+                "GRAPHTASK_KILT_DB",
+                "data/processed/kilt/kilt-2019-08-01-v1/graph.sqlite",
+            )
+        )
+        return SQLiteGraphBackend(path, snapshot_id=snapshot)
     if snapshot == "freebase-v1":
         endpoint = os.environ.get("FREEBASE_ENDPOINT", "")
         if not endpoint:

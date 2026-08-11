@@ -67,7 +67,9 @@ def plugin(monkeypatch: pytest.MonkeyPatch) -> Any:
     sys.modules.pop(module_name, None)
 
 
-def _choice(name: str | None) -> SimpleNamespace:
+def _choice_with_arguments(
+    name: str | None, arguments: dict[str, object] | None = None
+) -> SimpleNamespace:
     calls = []
     if name:
         calls.append(
@@ -75,7 +77,8 @@ def _choice(name: str | None) -> SimpleNamespace:
                 function=SimpleNamespace(
                     name=name,
                     arguments=json.dumps(
-                        {
+                        arguments
+                        or {
                             "entity_ids": ["alice"],
                             "direction": "out",
                             "relation_ids": ["works_at"],
@@ -86,6 +89,31 @@ def _choice(name: str | None) -> SimpleNamespace:
             )
         )
     return SimpleNamespace(message=SimpleNamespace(tool_calls=calls))
+
+
+def _choice(name: str | None) -> SimpleNamespace:
+    return _choice_with_arguments(name)
+
+
+def test_graphscript_mode_does_not_register_multi_turn_scheduler(plugin: Any) -> None:
+    del plugin
+    from swift.plugin import multi_turns
+
+    assert "graphtask_solver" not in multi_turns
+
+
+def test_tool_mode_registers_multi_turn_scheduler(
+    plugin: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del plugin
+    monkeypatch.setenv("INTERACTION_MODE", "tool")
+    module_name = "graphtask_r1.training.ms_swift_plugin"
+    sys.modules.pop(module_name, None)
+
+    importlib.import_module(module_name)
+    from swift.plugin import multi_turns
+
+    assert multi_turns["graphtask_solver"].__name__ == "GraphTaskSolverScheduler"
 
 
 def test_solver_scheduler_keeps_json_session_state_per_request(plugin: Any) -> None:
@@ -128,6 +156,89 @@ def test_solver_scheduler_returns_structured_invalid_call(plugin: Any) -> None:
     assert request.data_dict["_graphtask_session"]["invalid_calls"] == 1
     error = json.loads(request.messages[-1]["content"])["error"]
     assert error["reason_code"] == "INVALID_TOOL_CALL"
+
+
+def test_solver_scheduler_executes_compact_query(plugin: Any) -> None:
+    scheduler = plugin.GraphTaskSolverScheduler(max_turns=8)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "solver",
+                "graph_snapshot": "toy-v1",
+                "task_id": "task-compact",
+                "max_returned_entities": 10,
+            }
+        },
+    )
+    choice = _choice_with_arguments(
+        "graph_search",
+        {
+            "query": {
+                "root": {"kind": "all_entities"},
+                "steps": [{"op": "filter_type", "type_ids": ["person"]}],
+                "return_count": True,
+            }
+        },
+    )
+
+    scheduler.step(request, choice, 1)
+
+    payload = json.loads(request.messages[-1]["content"])
+    assert payload["count"] == 3
+    assert payload["truncated"] is False
+
+
+def test_solver_scheduler_executes_bounded_text_search(plugin: Any) -> None:
+    class SearchBackend:
+        def search_text(
+            self,
+            query: str,
+            *,
+            limit: int,
+            max_chars: int,
+            trace_id: str | None,
+        ) -> list[dict[str, object]]:
+            assert query == "Caledonian Brewery"
+            assert limit == 2
+            assert max_chars == 1000
+            assert trace_id == "openqa-1:1"
+            return [
+                {
+                    "page_id": "123",
+                    "paragraph_id": 0,
+                    "title": "Caledonian Brewery",
+                    "text": "The brewery is in Edinburgh.",
+                    "score": -1.0,
+                }
+            ]
+
+    scheduler = plugin.GraphTaskSolverScheduler(max_turns=8)
+    scheduler._backends["kilt-2019-08-01-v1"] = SearchBackend()
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "solver",
+                "graph_snapshot": "kilt-2019-08-01-v1",
+                "task_id": "openqa-1",
+                "topic_entity_ids": [],
+                "text_search_enabled": True,
+                "max_text_search_results": 3,
+                "max_passage_chars": 1000,
+            }
+        },
+    )
+
+    scheduler.step(
+        request,
+        _choice_with_arguments("text_search", {"query": "Caledonian Brewery", "limit": 2}),
+        1,
+    )
+
+    payload = json.loads(request.messages[-1]["content"])
+    assert payload[0]["page_id"] == "123"
+    assert request.data_dict["_graphtask_session"]["visible_entities"] == ["123"]
 
 
 def test_ms_swift_reward_reuses_existing_gold_and_logs_components(

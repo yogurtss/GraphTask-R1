@@ -17,7 +17,7 @@ from graphtask_r1.rewards import challenger_reward
 from graphtask_r1.schema import AnswerSet, TaskProposal
 from graphtask_r1.training.opponent import request_opponent
 from graphtask_r1.training.parsing import parse_solver_output, parse_task_proposal
-from graphtask_r1.training.prompts import InteractionMode
+from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode
 from graphtask_r1.verification import verify_task
 
 
@@ -27,7 +27,7 @@ async def compute_score(
     ground_truth: str,
     extra_info: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    """verl custom reward entrypoint; returns total score plus auditable components."""
+    """ms-swift reward entrypoint returning the score and auditable components."""
     info = extra_info or {}
     backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
     role_weight = float(info.get("role_weight", 1.0))
@@ -40,17 +40,28 @@ async def compute_score(
             graph_usage: dict[str, float] = {}
             if interaction_mode == "graphscript":
                 topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
-                if len(topic_ids) != 1:
+                raw_version = str(info.get("graphscript_version", "0.1"))
+                if raw_version not in {"0.1", "0.2"}:
+                    raise GraphScriptError(
+                        "UNSUPPORTED_VERSION", f"unsupported version: {raw_version}"
+                    )
+                graphscript_version = cast(GraphScriptVersion, raw_version)
+                if graphscript_version == "0.1" and len(topic_ids) != 1:
                     raise GraphScriptError(
                         "INVALID_SEED", "GraphScript v0.1 requires exactly one topic entity"
                     )
                 script = parse_graphscript(
                     solution_str, max_follow_limit=int(info.get("max_follow_limit", 100))
                 )
+                if script.version != graphscript_version:
+                    raise GraphScriptError(
+                        "VERSION_MISMATCH",
+                        f"expected {graphscript_version}, got {script.version}",
+                    )
                 execution = execute_graphscript(
                     script,
                     backend,
-                    seed_entity=topic_ids[0],
+                    seed_entity=topic_ids[0] if len(topic_ids) == 1 else None,
                     allowed_relations=frozenset(
                         str(value) for value in info.get("allowed_relations", [])
                     ),
@@ -68,6 +79,7 @@ async def compute_score(
                     "edge_visits": float(execution.usage.edge_visits),
                     "graph_calls": float(execution.usage.graph_calls),
                     "program_operators": float(execution.usage.operators),
+                    "passage_searches": float(execution.usage.passage_searches),
                 }
             else:
                 proposal = parse_task_proposal(solution_str)
@@ -123,6 +135,9 @@ async def compute_score(
                     samples=int(info.get("opponent_samples", 8)),
                     round_index=int(info["round"]) if info.get("round") is not None else None,
                     interaction_mode=interaction_mode,
+                    graphscript_version=cast(
+                        GraphScriptVersion, str(info.get("graphscript_version", "0.1"))
+                    ),
                     allowed_relations=tuple(
                         str(value) for value in info.get("allowed_relations", [])
                     ),
@@ -165,17 +180,28 @@ async def compute_score(
             graph_usage = {}
             if interaction_mode == "graphscript":
                 topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
-                if len(topic_ids) != 1:
+                raw_version = str(info.get("graphscript_version", "0.1"))
+                if raw_version not in {"0.1", "0.2"}:
+                    raise GraphScriptError(
+                        "UNSUPPORTED_VERSION", f"unsupported version: {raw_version}"
+                    )
+                graphscript_version = cast(GraphScriptVersion, raw_version)
+                if graphscript_version == "0.1" and len(topic_ids) != 1:
                     raise GraphScriptError(
                         "INVALID_SEED", "GraphScript v0.1 requires exactly one topic entity"
                     )
                 script = parse_graphscript(
                     solution_str, max_follow_limit=int(info.get("max_follow_limit", 100))
                 )
+                if script.version != graphscript_version:
+                    raise GraphScriptError(
+                        "VERSION_MISMATCH",
+                        f"expected {graphscript_version}, got {script.version}",
+                    )
                 execution = execute_graphscript(
                     script,
                     backend,
-                    seed_entity=topic_ids[0],
+                    seed_entity=topic_ids[0] if len(topic_ids) == 1 else None,
                     allowed_relations=frozenset(
                         str(value) for value in info.get("allowed_relations", [])
                     ),
@@ -188,6 +214,7 @@ async def compute_score(
                     "edge_visits": float(execution.usage.edge_visits),
                     "graph_calls": float(execution.usage.graph_calls),
                     "program_operators": float(execution.usage.operators),
+                    "passage_searches": float(execution.usage.passage_searches),
                 }
             else:
                 count = bool(gold.answers and gold.answers[0].kind == "count")

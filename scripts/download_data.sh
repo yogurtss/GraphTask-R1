@@ -10,6 +10,21 @@ case "${1:-help}" in
     hf download caobiao24/kqa_pro --repo-type dataset --local-dir "$DATA_ROOT/kqa_pro"
     echo "Verify attribution against the official KQA Pro CC BY-SA 4.0 release."
     ;;
+  kilt)
+    mkdir -p "$DATA_ROOT/kilt/2019-08-01"
+    curl -L --fail --retry 3 --continue-at - \
+      -o "$DATA_ROOT/kilt/2019-08-01/kilt_knowledgesource.json" \
+      http://dl.fbaipublicfiles.com/KILT/kilt_knowledgesource.json
+    ;;
+  ssp)
+    REVISION=ce7a0dfbc862f923ad1668a471c409b2e023b73f
+    mkdir -p "$DATA_ROOT/ssp/$REVISION"
+    curl -L --fail --retry 3 \
+      -o "$DATA_ROOT/ssp/$REVISION/test.jsonl" \
+      "https://huggingface.co/datasets/Quark-LLM/SSP/resolve/$REVISION/test.jsonl"
+    echo "871c7b7cdec2e090e8597ef26a9a973a46aad0830bb1e016679dddd748462f50  $DATA_ROOT/ssp/$REVISION/test.jsonl" \
+      | sha256sum --check --strict
+    ;;
   freebase)
     if [[ ! -d "$DATA_ROOT/freebase_setup/.git" ]]; then
       git clone --depth 1 https://github.com/dki-lab/Freebase-Setup.git "$DATA_ROOT/freebase_setup"
@@ -29,6 +44,6 @@ case "${1:-help}" in
     echo "Place files under $DATA_ROOT/grailqa/"
     ;;
   help|*)
-    echo "Usage: DATA_ROOT=data/raw $0 {kqapro|freebase|webqsp|cwq|grailqa}"
+    echo "Usage: DATA_ROOT=data/raw $0 {kqapro|kilt|ssp|freebase|webqsp|cwq|grailqa}"
     ;;
 esac

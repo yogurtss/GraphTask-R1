@@ -4,7 +4,7 @@ import time
 
 from graphtask_r1.dsl import necessity_scores
 from graphtask_r1.graph import GraphBackend, InMemoryGraphBackend, SQLiteGraphBackend
-from graphtask_r1.schema import Program, VerifierResult
+from graphtask_r1.schema import Program, SelectBetween, VerifierResult
 from graphtask_r1.verification.lexical import answer_leak
 from graphtask_r1.verification.shortcut import bounded_shortcut_search
 
@@ -70,14 +70,15 @@ def verify_task(
     necessity_ms = (time.perf_counter() - necessity_started) * 1000
     if necessity_min < necessity_min_threshold:
         reasons.append("REDUNDANT_CONDITION")
+    explicit_selection = isinstance(program, SelectBetween)
     shortcut_started = time.perf_counter()
     shortcut = bounded_shortcut_search(program, working_backend, max_candidates=shortcut_budget)
     shortcut_ms = (time.perf_counter() - shortcut_started) * 1000
-    if shortcut.found is True and reject_shortcuts:
+    if shortcut.found is True and reject_shortcuts and not explicit_selection:
         reasons.append("SHORTCUT_FOUND")
-    if shortcut.found is None:
+    if shortcut.found is None and not explicit_selection:
         reasons.append("SHORTCUT_UNKNOWN")
-    leaked = answer_leak(question, answers, working_backend)
+    leaked = answer_leak(question, answers, working_backend) and not explicit_selection
     if leaked:
         reasons.append("ANSWER_LEAK")
     return VerifierResult(

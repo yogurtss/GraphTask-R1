@@ -37,14 +37,28 @@ class BenchmarkExample(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     example_id: str
-    dataset: Literal["webqsp", "cwq", "grailqa"]
+    dataset: Literal[
+        "webqsp",
+        "cwq",
+        "grailqa",
+        "nq",
+        "triviaqa",
+        "popqa",
+        "hotpotqa",
+        "2wikimultihopqa",
+        "bamboogle",
+        "musique",
+    ]
     split: str
     question: str
     topic_entity_ids: tuple[str, ...]
     gold_answers: AnswerSet
+    # Each inner tuple is an equivalence class: matching any alias is correct.
+    # Graph benchmarks leave this empty and retain exact entity-set scoring.
+    answer_aliases: tuple[tuple[str, ...], ...] = ()
     logical_form: str | None = None
     sparql: str | None = None
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskCertificate(BaseModel):

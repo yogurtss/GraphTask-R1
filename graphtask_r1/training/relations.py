@@ -11,7 +11,11 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
     RelationInfo,
+    SelectAmong,
+    SelectBetween,
     TaskCertificate,
     Union,
 )
@@ -23,6 +27,14 @@ def program_relations(program: Program) -> frozenset[str]:
         return program_relations(program.input) | {program.relation}
     if isinstance(program, FilterLiteral):
         return program_relations(program.input) | {program.relation}
+    if isinstance(program, QueryAttribute | SelectAmong):
+        return program_relations(program.input) | {program.attribute}
+    if isinstance(program, QueryRelation):
+        return program_relations(program.subject) | program_relations(program.object)
+    if isinstance(program, SelectBetween):
+        return (
+            program_relations(program.left) | program_relations(program.right) | {program.attribute}
+        )
     if isinstance(program, Intersect | Union):
         return frozenset().union(*(program_relations(branch) for branch in program.inputs))
     if isinstance(program, FilterType | Count):

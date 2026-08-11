@@ -10,6 +10,10 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     Union,
 )
 
@@ -36,6 +40,22 @@ def _phrase(program: Program, backend: GraphBackend) -> str:
         )
     if isinstance(program, Count):
         return _phrase(program.input, backend)
+    if isinstance(program, QueryAttribute):
+        return f"the {program.attribute} of {_phrase(program.input, backend)}"
+    if isinstance(program, QueryRelation):
+        return (
+            f"the relation from {_phrase(program.subject, backend)} "
+            f"to {_phrase(program.object, backend)}"
+        )
+    if isinstance(program, SelectAmong):
+        extreme = "smallest" if program.mode == "min" else "largest"
+        return f"the {extreme} by {program.attribute} among {_phrase(program.input, backend)}"
+    if isinstance(program, SelectBetween):
+        extreme = "smaller" if program.mode == "min" else "larger"
+        return (
+            f"the {extreme} by {program.attribute} between "
+            f"{_phrase(program.left, backend)} and {_phrase(program.right, backend)}"
+        )
     raise TypeError(type(program).__name__)
 
 
@@ -43,4 +63,6 @@ def verbalize(program: Program, backend: GraphBackend) -> str:
     phrase = _phrase(program, backend)
     if isinstance(program, Count):
         return f"How many {phrase} are there?"
+    if isinstance(program, QueryAttribute | QueryRelation):
+        return f"What is {phrase}?"
     return f"Which {phrase}?"

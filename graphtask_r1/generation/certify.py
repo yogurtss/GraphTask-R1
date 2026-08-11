@@ -12,6 +12,10 @@ from graphtask_r1.schema import (
     Hop,
     Intersect,
     Program,
+    QueryAttribute,
+    QueryRelation,
+    SelectAmong,
+    SelectBetween,
     TaskCertificate,
     TaskProposal,
     TaskProvenance,
@@ -90,6 +94,10 @@ def _topic_ids(program: Program) -> tuple[str, ...]:
         return ()
     if isinstance(program, Intersect | Union):
         return tuple(sorted({value for branch in program.inputs for value in _topic_ids(branch)}))
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count):
+    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
         return _topic_ids(program.input)
+    if isinstance(program, QueryRelation):
+        return tuple(sorted({*_topic_ids(program.subject), *_topic_ids(program.object)}))
+    if isinstance(program, SelectBetween):
+        return tuple(sorted({*_topic_ids(program.left), *_topic_ids(program.right)}))
     raise TypeError(type(program).__name__)
