@@ -44,12 +44,13 @@ def test_only_ms_swift_training_scripts_remain() -> None:
     assert scripts == {"train_ms_swift_sft.sh", "train_ms_swift_grpo.sh"}
 
 
-def test_all_gpu_profiles_use_ms_swift_graphscript_v02() -> None:
+def test_gpu_profiles_keep_kqapro_and_kilt_graphscript_versions_separate() -> None:
     for path in sorted((PROJECT_ROOT / "configs/experiments").glob("qwen*.yaml")):
         config = yaml.safe_load(path.read_text())
         assert config["training_backend"] == "ms_swift", path
         assert config["interaction_mode"] == "graphscript", path
-        assert config["graphscript_version"] == "0.2", path
+        expected_version = "0.2" if "kilt" in path.name else "0.3"
+        assert config["graphscript_version"] == expected_version, path
 
 
 def test_ms_swift_sft_reads_existing_parquet_through_runtime_plugin() -> None:

@@ -12,12 +12,17 @@ from graphtask_r1.envs.graph_query import (
     CompactGraphQuery,
     EntityQueryRoot,
     FilterLiteralQueryStep,
+    FilterQualifierQueryStep,
     FilterTypeQueryStep,
     HopQueryStep,
+    QueryAttributeQualifierQueryStep,
     QueryAttributeQueryStep,
+    QueryAttributeUnderConditionQueryStep,
+    QueryRelationQualifierQueryStep,
     QueryRelationQueryStep,
     QueryStep,
     SelectAttributeQueryStep,
+    VerifyQueryStep,
     execute_compact_query,
 )
 from graphtask_r1.graph import GraphBackend
@@ -28,17 +33,22 @@ from graphtask_r1.schema import (
     Entity,
     EpisodeInput,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     ToolCall,
     Trajectory,
     Union,
+    Verify,
 )
 
 
@@ -79,7 +89,18 @@ def _as_compact_query(program: Program) -> CompactGraphQuery | None:
     node = program.input if isinstance(program, Count) else program
     steps: list[QueryStep] = []
 
-    while isinstance(node, Hop | FilterType | FilterLiteral | QueryAttribute | SelectAmong):
+    while isinstance(
+        node,
+        Hop
+        | FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         if isinstance(node, Hop):
             steps.append(HopQueryStep(relation=node.relation, direction=node.direction))
         elif isinstance(node, FilterType):
@@ -92,8 +113,34 @@ def _as_compact_query(program: Program) -> CompactGraphQuery | None:
                     value=node.value,
                 )
             )
+        elif isinstance(node, FilterQualifier):
+            steps.append(
+                FilterQualifierQueryStep(
+                    qualifier=node.qualifier,
+                    comparator=node.comparator,
+                    value=node.value,
+                )
+            )
         elif isinstance(node, QueryAttribute):
             steps.append(QueryAttributeQueryStep(attribute=node.attribute))
+        elif isinstance(node, QueryAttributeUnderCondition):
+            steps.append(
+                QueryAttributeUnderConditionQueryStep(
+                    attribute=node.attribute,
+                    qualifier=node.qualifier,
+                    qualifier_value=node.qualifier_value,
+                )
+            )
+        elif isinstance(node, QueryAttributeQualifier):
+            steps.append(
+                QueryAttributeQualifierQueryStep(
+                    attribute=node.attribute,
+                    attribute_value=node.attribute_value,
+                    qualifier=node.qualifier,
+                )
+            )
+        elif isinstance(node, Verify):
+            steps.append(VerifyQueryStep(comparator=node.comparator, value=node.value))
         else:
             steps.append(SelectAttributeQueryStep(attribute=node.attribute, mode=node.mode))
         node = node.input
@@ -247,7 +294,7 @@ def _compile_searches(
                 )
         return expected
 
-    if isinstance(program, QueryRelation):
+    if isinstance(program, QueryRelation | QueryRelationQualifier):
         subjects = _compile_searches(
             program.subject,
             backend,
@@ -266,7 +313,15 @@ def _compile_searches(
         ).entity_ids()
         query = _query_from_entities(
             subjects,
-            QueryRelationQueryStep(object_entity_ids=objects),
+            (
+                QueryRelationQueryStep(object_entity_ids=objects)
+                if isinstance(program, QueryRelation)
+                else QueryRelationQualifierQueryStep(
+                    object_entity_ids=objects,
+                    relation=program.relation,
+                    qualifier=program.qualifier,
+                )
+            ),
             limit=max_query_results,
         )
         _append_query(
@@ -314,7 +369,29 @@ def _compile_searches(
         )
         return expected
 
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+    if isinstance(program, Verify):
+        _compile_searches(
+            program.input,
+            backend,
+            task_id,
+            calls,
+            max_tool_calls=max_tool_calls,
+            max_query_results=max_query_results,
+        )
+        return expected
+
+    if isinstance(
+        program,
+        Hop
+        | FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | SelectAmong,
+    ):
         inputs = _compile_searches(
             program.input,
             backend,
@@ -338,8 +415,26 @@ def _compile_searches(
                 comparator=program.comparator,
                 value=program.value,
             )
+        elif isinstance(program, FilterQualifier):
+            step = FilterQualifierQueryStep(
+                qualifier=program.qualifier,
+                comparator=program.comparator,
+                value=program.value,
+            )
         elif isinstance(program, QueryAttribute):
             step = QueryAttributeQueryStep(attribute=program.attribute)
+        elif isinstance(program, QueryAttributeUnderCondition):
+            step = QueryAttributeUnderConditionQueryStep(
+                attribute=program.attribute,
+                qualifier=program.qualifier,
+                qualifier_value=program.qualifier_value,
+            )
+        elif isinstance(program, QueryAttributeQualifier):
+            step = QueryAttributeQualifierQueryStep(
+                attribute=program.attribute,
+                attribute_value=program.attribute_value,
+                qualifier=program.qualifier,
+            )
         elif isinstance(program, SelectAmong):
             step = SelectAttributeQueryStep(
                 attribute=program.attribute,
@@ -447,9 +542,21 @@ def _topic_entities(program: Program) -> tuple[str, ...]:
         return tuple(
             sorted({entity for branch in program.inputs for entity in _topic_entities(branch)})
         )
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+    if isinstance(
+        program,
+        Hop
+        | FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         return _topic_entities(program.input)
-    if isinstance(program, QueryRelation):
+    if isinstance(program, QueryRelation | QueryRelationQualifier):
         return tuple(sorted({*_topic_entities(program.subject), *_topic_entities(program.object)}))
     if isinstance(program, SelectBetween):
         return tuple(sorted({*_topic_entities(program.left), *_topic_entities(program.right)}))

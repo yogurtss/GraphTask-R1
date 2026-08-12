@@ -5,6 +5,6 @@ train_data: ${SFT_TRAIN_DATA}
 val_data: ${SFT_VAL_DATA}
 output_dir: ${SFT_OUTPUT_DIR}
 num_gpus: 4
-experiment_name: qwen3-4b-shared-sft-ms-swift-cu124
+experiment_name: qwen3-4b-kqapro-sft-ms-swift-cu124
 interaction_mode: graphscript
-graphscript_version: "0.2"
+graphscript_version: "0.3"

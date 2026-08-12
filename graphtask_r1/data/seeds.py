@@ -8,8 +8,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from graphtask_r1.graph import backend_from_snapshot
+from graphtask_r1.graphscript import graphscript_operators
 from graphtask_r1.schema import RelationInfo
-from graphtask_r1.training.prompts import InteractionMode, role_prompt
+from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
 from graphtask_r1.utils import ProgressLogger, write_json
 
 
@@ -32,6 +33,7 @@ def sample_questioner_seeds(
     opponent_url: str | None = None,
     opponent_samples: int = 8,
     interaction_mode: InteractionMode = "tool",
+    graphscript_version: GraphScriptVersion = "0.3",
     relation_catalog: tuple[RelationInfo, ...] = (),
     max_follow_limit: int = 100,
     max_edge_visits: int = 200,
@@ -72,10 +74,18 @@ def sample_questioner_seeds(
             "opponent_url": opponent_url,
             "opponent_samples": opponent_samples,
             "interaction_mode": interaction_mode,
+            "graphscript_version": graphscript_version,
+            "operator_set": list(graphscript_operators(graphscript_version)),
             "allowed_relations": [value.relation_id for value in relation_catalog],
             "max_follow_limit": max_follow_limit,
             "max_edge_visits": max_edge_visits,
             "max_returned_entities": max_returned_entities,
+            "program_profile": (
+                f"graphscript_v{graphscript_version.replace('.', '_')}"
+                if interaction_mode == "graphscript"
+                else "full"
+            ),
+            "text_search_enabled": graphscript_version == "0.2",
         }
         rows.append(
             {
@@ -85,6 +95,7 @@ def sample_questioner_seeds(
                     f"Explore from this seed entity and construct one certified task: {entity_id}",
                     interaction_mode=interaction_mode,
                     relation_catalog=relation_catalog,
+                    graphscript_version=graphscript_version,
                 ),
                 "ability": "graph_task_generation",
                 "reward_model": {"style": "rule", "ground_truth": "{}"},
@@ -102,6 +113,7 @@ def sample_questioner_seeds(
         "selected": len(selected),
         "seed": seed,
         "interaction_mode": interaction_mode,
+        "graphscript_version": graphscript_version,
     }
     write_json(output_path.with_suffix(".metrics.json"), metrics)
     return metrics

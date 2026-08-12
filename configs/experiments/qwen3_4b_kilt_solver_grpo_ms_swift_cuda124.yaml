@@ -1,11 +1,11 @@
 training_backend: ms_swift
 model_path: Qwen/Qwen3-4B-Instruct-2507
 model_type: qwen3
-lora_adapter_path: ${KQAPRO_SFT_ADAPTER}
+lora_adapter_path: ${KILT_SFT_ADAPTER}
 train_data: ${KILT_GRPO_TRAIN_DATA}
 val_data: ${KILT_GRPO_VAL_DATA}
 output_dir: ${KILT_GRPO_OUTPUT_DIR}
 num_gpus: 3
-experiment_name: qwen3-4b-kqapro-sft-to-kilt-grpo-ms-swift-cu124
+experiment_name: qwen3-4b-kilt-sft-to-kilt-grpo-ms-swift-cu124
 interaction_mode: graphscript
 graphscript_version: "0.2"

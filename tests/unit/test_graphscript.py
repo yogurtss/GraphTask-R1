@@ -20,6 +20,7 @@ from graphtask_r1.schema import (
     Hop,
     QueryAttribute,
     SelectBetween,
+    parse_program,
 )
 from graphtask_r1.training.ms_swift_reward import compute_score
 
@@ -178,7 +179,7 @@ def test_graphscript_v02_resolves_question_entity_and_queries_literal() -> None:
     execution = execute_graphscript(
         script,
         graph,
-        allowed_relations=frozenset(),
+        allowed_relations=frozenset({"age"}),
         max_edge_visits=10,
     )
 
@@ -201,13 +202,42 @@ def test_graphscript_v02_round_trips_new_program_operator() -> None:
     execution = execute_graphscript(
         parse_graphscript(script.model_dump(mode="json", by_alias=True)),
         graph,
-        allowed_relations=frozenset(),
+        allowed_relations=frozenset({"age"}),
         max_edge_visits=10,
     )
 
     assert script.version == "0.2"
     assert execution.program == program
     assert execution.answers == AnswerSet.entities(["alice"])
+
+
+def test_graphscript_kqapro_and_kilt_profiles_are_separate() -> None:
+    qualifier_program = parse_program(
+        {
+            "op": "filter_qualifier",
+            "input": {
+                "op": "hop",
+                "input": {"op": "entity", "entity_id": "alice"},
+                "relation": "friend",
+            },
+            "qualifier": "since",
+            "value": {"value": 2020, "datatype": "year"},
+        }
+    )
+
+    assert program_to_graphscript(qualifier_program, version="0.3").version == "0.3"
+    with pytest.raises(GraphScriptError, match="OP_NOT_IN_PROFILE"):
+        program_to_graphscript(qualifier_program, version="0.2")
+    with pytest.raises(GraphScriptError, match="OP_NOT_IN_PROFILE"):
+        parse_graphscript(
+            {
+                "version": "0.3",
+                "ops": [
+                    {"op": "search_passage", "query": "Alice", "out": "h0"},
+                    {"op": "emit", "in": "h0"},
+                ],
+            }
+        )
 
 
 def test_graphscript_v02_supports_bounded_global_filter_program() -> None:
@@ -265,6 +295,30 @@ def test_graphscript_v02_solver_reward_does_not_require_topic_seed() -> None:
             },
         )
     )
+    assert score["score"] == 1.0
+    assert score["edge_visits"] == 1.0
+
+
+def test_graphscript_v03_solver_reward_uses_kqapro_profile() -> None:
+    program = Hop(input=Entity(entity_id="alice"), relation="works_at")
+    script = program_to_graphscript(program, version="0.3")
+
+    score = asyncio.run(
+        compute_score(
+            "graphtask/solver",
+            script.model_dump_json(by_alias=True),
+            AnswerSet.entities(["acme"]).model_dump_json(),
+            {
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.3",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": [],
+                "allowed_relations": ["works_at"],
+                "max_edge_visits": 10,
+            },
+        )
+    )
+
     assert score["score"] == 1.0
     assert score["edge_visits"] == 1.0
 

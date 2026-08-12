@@ -1,6 +1,7 @@
 # 交互模式与统一程序接口
 
-主实验只使用 `GraphScript v0.2` 作为模型输出。显式工具调用保留为消融模式，但它通过同一个
+KQAPro 主实验只使用 `GraphScript v0.3` 作为模型输出；KILT passage-search 单独保留 v0.2。
+显式工具调用保留为消融模式，但它通过同一个
 ms-swift 数据加载器、图后端和 reward 运行，不拥有独立数据 schema 或训练入口。
 
 | 模式 | 模型行为 | ms-swift 调度 | 用途 |
@@ -8,16 +9,16 @@ ms-swift 数据加载器、图后端和 reward 运行，不拥有独立数据 sc
 | `graphscript` | 一次生成完整 JSON 程序，执行器返回答案 | 单轮 | SFT、GRPO、self-play、最终验证 |
 | `tool` | 多轮调用 `graph_search`、`inspect_entity`、`text_search` | `graphtask_solver` | 消融与兼容性检查 |
 
-## GraphScript v0.2
+## KQAPro GraphScript v0.3
 
-输入只保证自然语言问题，不保证 topic entity。程序可用 `resolve_entity` 或 `search_passage` 建立
-入口，再使用统一算子：
+输入只保证自然语言问题，不保证 topic entity。程序用 `resolve_entity` 或 `all_entities` 建立
+入口：
 
 ```text
-start, all_entities, resolve_entity, search_passage, passage_pages,
-follow, intersect, union, filter_type, filter_literal, count,
-query_attribute, query_relation, select_between, select_among,
-require_unique, emit
+all_entities, resolve_entity, follow, intersect, union, filter_type, filter_literal,
+filter_qualifier, count, query_attribute, query_attribute_under_condition,
+query_attribute_qualifier, query_relation, query_relation_qualifier, verify,
+select_between, select_among, emit
 ```
 
 约束如下：
@@ -30,7 +31,7 @@ require_unique, emit
 - 模型不得输出自由文本答案，gold 只能来自执行器；
 - SFT、GRPO 和 benchmark 使用同一个 parser、schema、operator set 与 executor。
 
-v0.1 只用于固定两跳的历史公平对比，不混入主实验。
+v0.2 的 `search_passage`/`passage_pages` 仅属于 KILT；v0.1 只用于固定两跳消融。
 
 ## 数据字段
 
@@ -50,14 +51,14 @@ GraphScript 行加载后不附加 tool schema。`tool` 行则由
 ```bash
 python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/training/kqapro_graphscript_v02_sft_train.parquet \
-  --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
+  --output data/training/kqapro_graphscript_v03_sft_train.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli data export-rl \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/training/kqapro_graphscript_v02_rl.parquet \
-  --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
+  --output data/training/kqapro_graphscript_v03_rl.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
 

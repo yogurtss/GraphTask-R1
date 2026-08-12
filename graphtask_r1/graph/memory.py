@@ -13,18 +13,23 @@ from graphtask_r1.schema import (
     Entity,
     EntityInfo,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     GraphSlice,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     RelationInfo,
     SelectAmong,
     SelectBetween,
     Triple,
     Union,
+    Verify,
     Witness,
     parse_program,
 )
@@ -184,6 +189,8 @@ class InMemoryGraphBackend:
                 ):
                     result.add(entity_id)
             return result
+        if isinstance(program, FilterQualifier):
+            raise ValueError("in-memory triples do not carry fact qualifiers")
         if isinstance(program, Count):
             raise TypeError("Count produces a scalar, not an entity set")
         raise TypeError(f"unsupported program type: {type(program).__name__}")
@@ -199,6 +206,8 @@ class InMemoryGraphBackend:
                 and triple.relation == program.attribute
             }
             return AnswerSet.literals(values)
+        if isinstance(program, QueryAttributeUnderCondition | QueryAttributeQualifier):
+            raise ValueError("in-memory triples do not carry attribute qualifiers")
         if isinstance(program, QueryRelation):
             subjects = self._execute_entities(program.subject)
             objects = self._execute_entities(program.object)
@@ -208,6 +217,20 @@ class InMemoryGraphBackend:
                     for triple in self._triples
                     if triple.subject in subjects and triple.object in objects
                 }
+            )
+        if isinstance(program, QueryRelationQualifier):
+            raise ValueError("in-memory triples do not carry relation qualifiers")
+        if isinstance(program, Verify):
+            verify_values = self.execute_program(program.input).values()
+            return AnswerSet.literals(
+                [
+                    "yes"
+                    if any(
+                        _compare(_literal(str(value)), program.comparator, program.value.value)
+                        for value in verify_values
+                    )
+                    else "no"
+                ]
             )
         if isinstance(program, SelectBetween):
             candidates = {
@@ -280,21 +303,31 @@ class InMemoryGraphBackend:
     def _program_facts(self, program: Program) -> tuple[Triple, ...]:
         if isinstance(program, Entity | AllEntities):
             return ()
-        if isinstance(program, FilterType | Count):
+        if isinstance(program, FilterType | FilterQualifier | Count | Verify):
             return self._program_facts(program.input)
-        if isinstance(program, QueryAttribute | SelectAmong):
+        if isinstance(
+            program,
+            QueryAttribute
+            | QueryAttributeUnderCondition
+            | QueryAttributeQualifier
+            | SelectAmong,
+        ):
             inputs = self._execute_entities(program.input)
             own = self.neighbors(sorted(inputs), direction="out", relation_ids=[program.attribute])
             return tuple(
                 sorted(set(self._program_facts(program.input)) | set(own), key=Triple.sort_key)
             )
-        if isinstance(program, QueryRelation):
+        if isinstance(program, QueryRelation | QueryRelationQualifier):
             subjects = self._execute_entities(program.subject)
             objects = self._execute_entities(program.object)
             relation_facts = {
                 triple
                 for triple in self._triples
                 if triple.subject in subjects and triple.object in objects
+                and (
+                    not isinstance(program, QueryRelationQualifier)
+                    or triple.relation == program.relation
+                )
             }
             inherited = set(self._program_facts(program.subject)) | set(
                 self._program_facts(program.object)

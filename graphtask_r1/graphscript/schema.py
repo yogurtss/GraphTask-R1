@@ -27,10 +27,34 @@ GRAPHSCRIPT_V02_OPERATORS = (
     "require_unique",
     "emit",
 )
+GRAPHSCRIPT_V03_OPERATORS = (
+    "all_entities",
+    "resolve_entity",
+    "follow",
+    "intersect",
+    "union",
+    "filter_type",
+    "filter_literal",
+    "filter_qualifier",
+    "count",
+    "query_attribute",
+    "query_attribute_under_condition",
+    "query_attribute_qualifier",
+    "query_relation",
+    "query_relation_qualifier",
+    "verify",
+    "select_between",
+    "select_among",
+    "emit",
+)
 
 
-def graphscript_operators(version: Literal["0.1", "0.2"]) -> tuple[str, ...]:
-    return GRAPHSCRIPT_V01_OPERATORS if version == "0.1" else GRAPHSCRIPT_V02_OPERATORS
+def graphscript_operators(version: Literal["0.1", "0.2", "0.3"]) -> tuple[str, ...]:
+    if version == "0.1":
+        return GRAPHSCRIPT_V01_OPERATORS
+    if version == "0.2":
+        return GRAPHSCRIPT_V02_OPERATORS
+    return GRAPHSCRIPT_V03_OPERATORS
 
 
 class GraphScriptError(ValueError):
@@ -121,6 +145,15 @@ class FilterLiteralOp(_Op):
     out: str
 
 
+class FilterQualifierOp(_Op):
+    op: Literal["filter_qualifier"] = "filter_qualifier"
+    input_handle: str = Field(alias="in")
+    qualifier: str = Field(min_length=1)
+    comparator: Literal["eq", "ne", "lt", "le", "gt", "ge", "contains"] = "eq"
+    value: ScriptLiteralValue
+    out: str
+
+
 class CountOp(_Op):
     op: Literal["count"] = "count"
     input_handle: str = Field(alias="in")
@@ -134,10 +167,45 @@ class QueryAttributeOp(_Op):
     out: str
 
 
+class QueryAttributeUnderConditionOp(_Op):
+    op: Literal["query_attribute_under_condition"] = "query_attribute_under_condition"
+    input_handle: str = Field(alias="in")
+    attribute: str = Field(min_length=1)
+    qualifier: str = Field(min_length=1)
+    qualifier_value: ScriptLiteralValue
+    out: str
+
+
+class QueryAttributeQualifierOp(_Op):
+    op: Literal["query_attribute_qualifier"] = "query_attribute_qualifier"
+    input_handle: str = Field(alias="in")
+    attribute: str = Field(min_length=1)
+    attribute_value: ScriptLiteralValue
+    qualifier: str = Field(min_length=1)
+    out: str
+
+
 class QueryRelationOp(_Op):
     op: Literal["query_relation"] = "query_relation"
     subject: str
     object: str
+    out: str
+
+
+class QueryRelationQualifierOp(_Op):
+    op: Literal["query_relation_qualifier"] = "query_relation_qualifier"
+    subject: str
+    object: str
+    relation: str = Field(min_length=1)
+    qualifier: str = Field(min_length=1)
+    out: str
+
+
+class VerifyOp(_Op):
+    op: Literal["verify"] = "verify"
+    input_handle: str = Field(alias="in")
+    comparator: Literal["eq", "ne", "lt", "le", "gt", "ge", "contains"] = "eq"
+    value: ScriptLiteralValue
     out: str
 
 
@@ -179,9 +247,14 @@ GraphScriptOp: TypeAlias = Annotated[
     | UnionOp
     | FilterTypeOp
     | FilterLiteralOp
+    | FilterQualifierOp
     | CountOp
     | QueryAttributeOp
+    | QueryAttributeUnderConditionOp
+    | QueryAttributeQualifierOp
     | QueryRelationOp
+    | QueryRelationQualifierOp
+    | VerifyOp
     | SelectBetweenOp
     | SelectAmongOp
     | RequireUniqueOp
@@ -194,7 +267,7 @@ OP_ADAPTER: TypeAdapter[GraphScriptOp] = TypeAdapter(GraphScriptOp)
 class GraphScript(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: Literal["0.1", "0.2"] = "0.1"
+    version: Literal["0.1", "0.2", "0.3"] = "0.1"
     ops: tuple[GraphScriptOp, ...] = Field(min_length=1, max_length=64)
 
 
@@ -298,16 +371,38 @@ def _require_handle(handle: str, defined: set[str]) -> None:
 
 def _validate_v02(script: GraphScript, *, max_follow_limit: int) -> None:
     if len(script.ops) < 2:
-        raise GraphScriptError("INVALID_SHAPE", "v0.2 requires a root and emit")
-    if not isinstance(script.ops[0], StartOp | AllEntitiesOp | ResolveEntityOp | SearchPassageOp):
+        raise GraphScriptError(
+            "INVALID_SHAPE", f"v{script.version} requires a root and emit"
+        )
+    unavailable = sorted(
+        {op.op for op in script.ops if op.op not in graphscript_operators(script.version)}
+    )
+    if unavailable:
+        raise GraphScriptError(
+            "OP_NOT_IN_PROFILE",
+            f"operators unavailable in GraphScript v{script.version}: {', '.join(unavailable)}",
+        )
+    roots = (
+        StartOp | AllEntitiesOp | ResolveEntityOp | SearchPassageOp
+        if script.version == "0.2"
+        else AllEntitiesOp | ResolveEntityOp
+    )
+    if not isinstance(script.ops[0], roots):
+        root_description = (
+            "start, all_entities, resolve_entity, or search_passage"
+            if script.version == "0.2"
+            else "all_entities or resolve_entity"
+        )
         raise GraphScriptError(
             "INVALID_SHAPE",
-            "v0.2 must start with start, all_entities, resolve_entity, or search_passage",
+            f"v{script.version} must start with {root_description}",
         )
     if not isinstance(script.ops[-1], EmitOp):
-        raise GraphScriptError("INVALID_SHAPE", "v0.2 must end with emit")
+        raise GraphScriptError("INVALID_SHAPE", f"v{script.version} must end with emit")
     if sum(isinstance(op, EmitOp) for op in script.ops) != 1:
-        raise GraphScriptError("INVALID_SHAPE", "v0.2 requires exactly one emit")
+        raise GraphScriptError(
+            "INVALID_SHAPE", f"v{script.version} requires exactly one emit"
+        )
 
     defined: set[str] = set()
     kinds: dict[str, Literal["entity", "passage", "answer"]] = {}
@@ -335,17 +430,24 @@ def _validate_v02(script: GraphScript, *, max_follow_limit: int) -> None:
                 _require_kind(handle, defined, kinds, "entity")
             _define_handle(op.out, defined)
             kinds[op.out] = "entity"
-        elif isinstance(op, FilterTypeOp | FilterLiteralOp | SelectAmongOp):
+        elif isinstance(op, FilterTypeOp | FilterLiteralOp | FilterQualifierOp | SelectAmongOp):
             _require_kind(op.input_handle, defined, kinds, "entity")
             _define_handle(op.out, defined)
             kinds[op.out] = "entity"
-        elif isinstance(op, CountOp | QueryAttributeOp):
+        elif isinstance(
+            op,
+            CountOp | QueryAttributeOp | QueryAttributeUnderConditionOp | QueryAttributeQualifierOp,
+        ):
             _require_kind(op.input_handle, defined, kinds, "entity")
             _define_handle(op.out, defined)
             kinds[op.out] = "answer"
-        elif isinstance(op, QueryRelationOp):
+        elif isinstance(op, QueryRelationOp | QueryRelationQualifierOp):
             _require_kind(op.subject, defined, kinds, "entity")
             _require_kind(op.object, defined, kinds, "entity")
+            _define_handle(op.out, defined)
+            kinds[op.out] = "answer"
+        elif isinstance(op, VerifyOp):
+            _require_kind(op.input_handle, defined, kinds, "answer")
             _define_handle(op.out, defined)
             kinds[op.out] = "answer"
         elif isinstance(op, SelectBetweenOp):

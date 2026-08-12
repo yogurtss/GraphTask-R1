@@ -85,6 +85,17 @@ class FilterLiteral(BaseModel):
         return {"value": value, "datatype": datatype}
 
 
+class FilterQualifier(BaseModel):
+    """Filter the facts selected by an immediately preceding hop/literal filter."""
+
+    model_config = ConfigDict(frozen=True)
+    op: Literal["filter_qualifier"] = "filter_qualifier"
+    input: Program
+    qualifier: str = Field(min_length=1)
+    comparator: Literal["eq", "ne", "lt", "le", "gt", "ge", "contains"] = "eq"
+    value: LiteralValue
+
+
 class Count(BaseModel):
     model_config = ConfigDict(frozen=True)
     op: Literal["count"] = "count"
@@ -98,11 +109,46 @@ class QueryAttribute(BaseModel):
     attribute: str = Field(min_length=1)
 
 
+class QueryAttributeUnderCondition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["query_attribute_under_condition"] = "query_attribute_under_condition"
+    input: Program
+    attribute: str = Field(min_length=1)
+    qualifier: str = Field(min_length=1)
+    qualifier_value: LiteralValue
+
+
+class QueryAttributeQualifier(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["query_attribute_qualifier"] = "query_attribute_qualifier"
+    input: Program
+    attribute: str = Field(min_length=1)
+    attribute_value: LiteralValue
+    qualifier: str = Field(min_length=1)
+
+
 class QueryRelation(BaseModel):
     model_config = ConfigDict(frozen=True)
     op: Literal["query_relation"] = "query_relation"
     subject: Program
     object: Program
+
+
+class QueryRelationQualifier(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["query_relation_qualifier"] = "query_relation_qualifier"
+    subject: Program
+    object: Program
+    relation: str = Field(min_length=1)
+    qualifier: str = Field(min_length=1)
+
+
+class Verify(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    op: Literal["verify"] = "verify"
+    input: Program
+    comparator: Literal["eq", "ne", "lt", "le", "gt", "ge", "contains"] = "eq"
+    value: LiteralValue
 
 
 class SelectBetween(BaseModel):
@@ -130,9 +176,14 @@ Program: TypeAlias = Annotated[
     | Union
     | FilterType
     | FilterLiteral
+    | FilterQualifier
     | Count
     | QueryAttribute
+    | QueryAttributeUnderCondition
+    | QueryAttributeQualifier
     | QueryRelation
+    | QueryRelationQualifier
+    | Verify
     | SelectBetween
     | SelectAmong,
     Field(discriminator="op"),
@@ -143,9 +194,14 @@ Intersect.model_rebuild()
 Union.model_rebuild()
 FilterType.model_rebuild()
 FilterLiteral.model_rebuild()
+FilterQualifier.model_rebuild()
 Count.model_rebuild()
 QueryAttribute.model_rebuild()
+QueryAttributeUnderCondition.model_rebuild()
+QueryAttributeQualifier.model_rebuild()
 QueryRelation.model_rebuild()
+QueryRelationQualifier.model_rebuild()
+Verify.model_rebuild()
 SelectBetween.model_rebuild()
 SelectAmong.model_rebuild()
 PROGRAM_ADAPTER: TypeAdapter[Program] = TypeAdapter(Program)

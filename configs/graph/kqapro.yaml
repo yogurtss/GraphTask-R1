@@ -1,0 +1,5 @@
+backend: sqlite
+snapshot_id: kqapro-v1
+database: ${GRAPHTASK_KQAPRO_DB}
+timeout_s: 5
+max_neighbors: 1000

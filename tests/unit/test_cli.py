@@ -185,10 +185,10 @@ def test_relation_catalog_unions_multiple_task_inputs(tmp_path: Path) -> None:
     ]
 
 
-def test_kilt_grpo_profile_starts_from_kqapro_sft_adapter(
+def test_kilt_grpo_profile_starts_from_separate_kilt_sft_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KQAPRO_SFT_ADAPTER", "/models/kqapro-sft")
+    monkeypatch.setenv("KILT_SFT_ADAPTER", "/models/kilt-sft")
     monkeypatch.setenv("KILT_GRPO_TRAIN_DATA", "/data/kilt/train.parquet")
     monkeypatch.setenv("KILT_GRPO_VAL_DATA", "/data/kilt/val.parquet")
     monkeypatch.setenv("KILT_GRPO_OUTPUT_DIR", "/outputs/kilt-grpo")
@@ -200,7 +200,7 @@ def test_kilt_grpo_profile_starts_from_kqapro_sft_adapter(
     )
 
     assert result["training_backend"] == "ms_swift"
-    assert result["environment"]["LORA_ADAPTER_PATH"] == "/models/kqapro-sft"
+    assert result["environment"]["LORA_ADAPTER_PATH"] == "/models/kilt-sft"
     assert result["environment"]["TRAIN_DATA"] == "/data/kilt/train.parquet"
     assert result["environment"]["VAL_DATA"] == "/data/kilt/val.parquet"
 
@@ -209,6 +209,7 @@ def test_sample_seeds_defaults_to_kqapro_snapshot() -> None:
     args = build_parser().parse_args(["data", "sample-seeds", "--output", "seeds.parquet"])
     assert args.snapshot == "kqapro-v1"
     assert args.count == 256
+    assert args.graphscript_version == "0.3"
 
 
 def test_training_launcher_defaults_to_ms_swift(

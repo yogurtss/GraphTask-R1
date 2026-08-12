@@ -32,7 +32,7 @@ class SelfPlayConfig(BaseModel):
     base_tasks: Path
     val_data: Path
     questioner_seeds: Path
-    graph_snapshot: str = "kilt-2019-08-01-v1"
+    graph_snapshot: str = "kqapro-v1"
     rounds: int = Field(default=3, gt=0)
     solver_episodes: int = Field(default=256, gt=0)
     opponent_samples: int = Field(default=8, gt=0)
@@ -47,16 +47,16 @@ class SelfPlayConfig(BaseModel):
     train_script: Path = Path("scripts/train_ms_swift_grpo.sh")
     sglang_start_timeout_s: int = 300
     interaction_mode: Literal["tool", "graphscript"] = "graphscript"
-    graphscript_version: GraphScriptVersion = "0.2"
+    graphscript_version: GraphScriptVersion = "0.3"
     relation_catalog: Path | None = None
     relation_catalogs: dict[str, Path] = Field(default_factory=dict)
     max_follow_limit: int = Field(default=100, gt=0, le=1_000)
     max_edge_visits: int = Field(default=200, gt=0)
     max_returned_entities: int = Field(default=1_000, gt=0)
     max_completion_tokens: int = Field(default=32_768, gt=0, le=40_960)
-    program_profile: Literal["full", "graphscript_v0_1", "graphscript_v0_2"] = (
-        "graphscript_v0_2"
-    )
+    program_profile: Literal[
+        "full", "graphscript_v0_1", "graphscript_v0_2", "graphscript_v0_3"
+    ] = "graphscript_v0_3"
 
     @model_validator(mode="after")
     def validate_interaction_contract(self) -> SelfPlayConfig:

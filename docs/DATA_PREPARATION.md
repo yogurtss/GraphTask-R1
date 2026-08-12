@@ -100,9 +100,10 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 
 转换器执行以下步骤：
 
-1. 将 `kb.json` 构建为带 subject/object/type/attribute 索引的 `graph.sqlite`；
+1. 将 `kb.json` 构建为带 subject/object/type/attribute/fact/qualifier 索引的 `graph.sqlite`；
 2. 将 `Find/FindAll/Relate/And/Or/FilterConcept/Filter*/Count/What`，以及
-   `QueryAttr/QueryRelation/SelectBetween/SelectAmong` 映射到 typed DSL；
+   `QueryAttr/QueryRelation/SelectBetween/SelectAmong`，以及全部 `QFilter*`、qualifier query 和
+   `Verify*` 映射到 typed DSL；
 3. 重新执行 DSL 产生 gold answer；
 4. 将实体 ID 对应标签与原 KQA answer 对账；
 5. 运行局部物化、必要性、shortcut、answer leakage 和 canonical trace replay；
@@ -116,9 +117,8 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 `generation.witness_truncated=true`。提高该上限不会增加可训练样本数，只会增加图查询、I/O 和
 存储，通常不应为 SFT 开启。
 
-当前仍未支持 qualifier 查询、`QFilter*`、`QueryAttrUnderCondition` 和 `Verify*`。这些操作
-不会被猜测性转换，而是保留原程序并标记 `UNSUPPORTED_KOPL_OPERATOR`。属性投影、关系查询和
-属性极值选择已经由确定性的 typed program、后端执行和 compact trace 共同支持。
+KQAPro 官方 27 个 KoPL 函数均有确定性映射；qualifier 依附于稳定 fact ID，避免将同一实体的
+不同 relation/attribute statement 错配。gold 仍只由认证程序执行产生。
 
 ### 2.3 产物审计
 
@@ -143,8 +143,8 @@ python -m graphtask_r1.cli data build-relation-catalog \
 for split in train val; do
   python -m graphtask_r1.cli data export-sft \
     --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v02_sft_$split.parquet \
-    --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
+    --output data/training/kqapro_graphscript_v03_sft_$split.parquet \
+    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
     --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 done
 ```

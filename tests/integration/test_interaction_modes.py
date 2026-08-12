@@ -266,7 +266,7 @@ def test_graph_schema_catalog_is_independent_of_task_sample(tmp_path: Path) -> N
     }
 
 
-def test_selfplay_defaults_use_unified_graphscript_profile() -> None:
+def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     config = SelfPlayConfig.model_validate(
         {
             "initial_adapter": "adapter",
@@ -275,15 +275,15 @@ def test_selfplay_defaults_use_unified_graphscript_profile() -> None:
             "questioner_seeds": "seeds.parquet",
         }
     )
-    assert config.graph_snapshot == "kilt-2019-08-01-v1"
+    assert config.graph_snapshot == "kqapro-v1"
     assert config.interaction_mode == "graphscript"
-    assert config.graphscript_version == "0.2"
-    assert config.program_profile == "graphscript_v0_2"
+    assert config.graphscript_version == "0.3"
+    assert config.program_profile == "graphscript_v0_3"
 
 
-def test_default_selfplay_file_uses_kilt_snapshot() -> None:
+def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
     config_path = Path(__file__).parents[2] / "configs/training/selfplay.yaml"
-    assert load_selfplay_config(config_path).graph_snapshot == "kilt-2019-08-01-v1"
+    assert load_selfplay_config(config_path).graph_snapshot == "kqapro-v1"
 
 
 def test_comparison_profile_requires_relation_catalog() -> None:
@@ -439,6 +439,7 @@ def test_graphscript_selfplay_assembles_mixed_single_turn_dataset(tmp_path: Path
         seed=42,
         min_degree=1,
         interaction_mode="graphscript",
+        graphscript_version="0.1",
         relation_catalog=_catalog(),
     )
     config = SelfPlayConfig(
@@ -467,3 +468,22 @@ def test_graphscript_selfplay_assembles_mixed_single_turn_dataset(tmp_path: Path
     assert table.num_rows == 2
     assert "agent_name" not in table.column_names
     assert "tools_kwargs" not in table.column_names
+
+
+def test_kqapro_questioner_seeds_default_to_graphscript_v03(tmp_path: Path) -> None:
+    output = tmp_path / "seeds.parquet"
+    sample_questioner_seeds(
+        "toy-v1",
+        output,
+        count=1,
+        seed=42,
+        min_degree=1,
+        interaction_mode="graphscript",
+        relation_catalog=_catalog(),
+    )
+
+    row = pq.read_table(output).to_pylist()[0]
+    assert "KQAPro graph self-play" in row["prompt"][0]["content"]
+    assert row["extra_info"]["graphscript_version"] == "0.3"
+    assert row["extra_info"]["program_profile"] == "graphscript_v0_3"
+    assert "filter_qualifier" in row["extra_info"]["operator_set"]

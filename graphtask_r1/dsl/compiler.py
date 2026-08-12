@@ -9,15 +9,21 @@ from graphtask_r1.schema import (
     Count,
     Entity,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
+    LiteralValue,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     Union,
+    Verify,
     program_to_dict,
 )
 
@@ -28,13 +34,13 @@ def escape_iri(value: str) -> str:
     return value
 
 
-def _sparql_literal(program: FilterLiteral) -> str:
-    value = program.value.value
-    if program.value.datatype in {"quantity", "number"} and isinstance(value, int | float):
+def _sparql_literal(literal: LiteralValue) -> str:
+    value = literal.value
+    if literal.datatype in {"quantity", "number"} and isinstance(value, int | float):
         return str(value)
-    if program.value.datatype == "year":
+    if literal.datatype == "year":
         return str(int(value))
-    if program.value.datatype == "date":
+    if literal.datatype == "date":
         normalized = str(value).replace("/", "-")
         if not re.fullmatch(r"-?\d{1,6}-\d{1,2}-\d{1,2}", normalized):
             raise ValueError(f"invalid date literal: {value!r}")
@@ -93,7 +99,7 @@ class _Builder:
         if isinstance(program, FilterLiteral):
             variable, input_clauses = self.compile(program.input)
             literal = self.var()
-            value = _sparql_literal(program)
+            value = _sparql_literal(program.value)
             operators = {"eq": "=", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}
             if program.comparator == "contains":
                 expression = f"CONTAINS(LCASE(STR({literal})), LCASE(STR({value})))"
@@ -102,6 +108,23 @@ class _Builder:
             return variable, [
                 *input_clauses,
                 f"{variable} <{escape_iri(program.relation)}> {literal} .",
+                f"FILTER({expression})",
+            ]
+        if isinstance(program, FilterQualifier):
+            variable, input_clauses = self.compile(program.input)
+            fact = self.var()
+            qualifier_value = self.var()
+            value = _sparql_literal(program.value)
+            operators = {"eq": "=", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}
+            expression = (
+                f"CONTAINS(LCASE(STR({qualifier_value})), LCASE(STR({value})))"
+                if program.comparator == "contains"
+                else f"{qualifier_value} {operators[program.comparator]} {value}"
+            )
+            return variable, [
+                *input_clauses,
+                f"{fact} <urn:graphtask:qualifier/{escape_iri(program.qualifier)}> "
+                f"{qualifier_value} .",
                 f"FILTER({expression})",
             ]
         if isinstance(program, Count):
@@ -113,6 +136,30 @@ class _Builder:
                 *input_clauses,
                 f"{entity} <{escape_iri(program.attribute)}> {value} .",
             ]
+        if isinstance(program, QueryAttributeUnderCondition):
+            entity, input_clauses = self.compile(program.input)
+            fact, value, qualifier_value = self.var(), self.var(), self.var()
+            return value, [
+                *input_clauses,
+                f"{fact} <urn:graphtask:subject> {entity} .",
+                f"{fact} <urn:graphtask:predicate> <{escape_iri(program.attribute)}> .",
+                f"{fact} <urn:graphtask:value> {value} .",
+                f"{fact} <urn:graphtask:qualifier/{escape_iri(program.qualifier)}> "
+                f"{qualifier_value} .",
+                f"FILTER({qualifier_value} = {_sparql_literal(program.qualifier_value)})",
+            ]
+        if isinstance(program, QueryAttributeQualifier):
+            entity, input_clauses = self.compile(program.input)
+            fact, attribute_value, qualifier_value = self.var(), self.var(), self.var()
+            return qualifier_value, [
+                *input_clauses,
+                f"{fact} <urn:graphtask:subject> {entity} .",
+                f"{fact} <urn:graphtask:predicate> <{escape_iri(program.attribute)}> .",
+                f"{fact} <urn:graphtask:value> {attribute_value} .",
+                f"FILTER({attribute_value} = {_sparql_literal(program.attribute_value)})",
+                f"{fact} <urn:graphtask:qualifier/{escape_iri(program.qualifier)}> "
+                f"{qualifier_value} .",
+            ]
         if isinstance(program, QueryRelation):
             subject, subject_clauses = self.compile(program.subject)
             object_, object_clauses = self.compile(program.object)
@@ -122,6 +169,31 @@ class _Builder:
                 *object_clauses,
                 f"{subject} {relation} {object_} .",
             ]
+        if isinstance(program, QueryRelationQualifier):
+            subject, subject_clauses = self.compile(program.subject)
+            object_, object_clauses = self.compile(program.object)
+            fact, qualifier_value = self.var(), self.var()
+            return qualifier_value, [
+                *subject_clauses,
+                *object_clauses,
+                f"{fact} <urn:graphtask:subject> {subject} .",
+                f"{fact} <urn:graphtask:predicate> <{escape_iri(program.relation)}> .",
+                f"{fact} <urn:graphtask:object> {object_} .",
+                f"{fact} <urn:graphtask:qualifier/{escape_iri(program.qualifier)}> "
+                f"{qualifier_value} .",
+            ]
+        if isinstance(program, Verify):
+            value, input_clauses = self.compile(program.input)
+            expected = _sparql_literal(program.value)
+            operators = {"eq": "=", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}
+            expression = (
+                f"CONTAINS(LCASE(STR({value})), LCASE(STR({expected})))"
+                if program.comparator == "contains"
+                else f"{value} {operators[program.comparator]} {expected}"
+            )
+            verified = self.var()
+            verify_clause = f'BIND(IF({expression}, "yes", "no") AS {verified})'
+            return verified, [*input_clauses, verify_clause]
         if isinstance(program, SelectAmong):
             entity, input_clauses = self.compile(program.input)
             value = self.var()

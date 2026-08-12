@@ -8,12 +8,16 @@ from graphtask_r1.schema import (
     Count,
     Entity,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     TaskCertificate,
@@ -21,6 +25,7 @@ from graphtask_r1.schema import (
     TaskProvenance,
     Union,
     VerificationSummary,
+    Verify,
 )
 from graphtask_r1.utils import stable_hash
 from graphtask_r1.verification import verify_task
@@ -94,9 +99,21 @@ def _topic_ids(program: Program) -> tuple[str, ...]:
         return ()
     if isinstance(program, Intersect | Union):
         return tuple(sorted({value for branch in program.inputs for value in _topic_ids(branch)}))
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+    if isinstance(
+        program,
+        Hop
+        | FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         return _topic_ids(program.input)
-    if isinstance(program, QueryRelation):
+    if isinstance(program, QueryRelation | QueryRelationQualifier):
         return tuple(sorted({*_topic_ids(program.subject), *_topic_ids(program.object)}))
     if isinstance(program, SelectBetween):
         return tuple(sorted({*_topic_ids(program.left), *_topic_ids(program.right)}))

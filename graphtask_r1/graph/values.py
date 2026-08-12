@@ -5,9 +5,7 @@ from datetime import date
 
 def format_attribute_value(value: str, datatype: str, unit: str | None) -> str:
     if datatype == "quantity":
-        number = float(value)
-        rendered = str(int(number)) if number.is_integer() else str(number)
-        return rendered if unit in {None, "", "1"} else f"{rendered} {unit}"
+        return value if unit in {None, "", "1"} else f"{value} {unit}"
     if datatype == "year":
         return str(int(value))
     if datatype == "date":

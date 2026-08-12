@@ -5,15 +5,20 @@ from graphtask_r1.schema import (
     Count,
     Entity,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     Union,
+    Verify,
 )
 
 
@@ -37,14 +42,40 @@ def canonical_signature(program: Program) -> str:
             f"filter_literal({canonical_signature(program.input)},{program.relation},"
             f"{program.comparator},{program.value.model_dump_json()})"
         )
+    if isinstance(program, FilterQualifier):
+        return (
+            f"filter_qualifier({canonical_signature(program.input)},{program.qualifier},"
+            f"{program.comparator},{program.value.model_dump_json()})"
+        )
     if isinstance(program, Count):
         return f"count({canonical_signature(program.input)})"
     if isinstance(program, QueryAttribute):
         return f"query_attribute({canonical_signature(program.input)},{program.attribute})"
+    if isinstance(program, QueryAttributeUnderCondition):
+        return (
+            f"query_attribute_under_condition({canonical_signature(program.input)},"
+            f"{program.attribute},{program.qualifier},{program.qualifier_value.model_dump_json()})"
+        )
+    if isinstance(program, QueryAttributeQualifier):
+        return (
+            f"query_attribute_qualifier({canonical_signature(program.input)},"
+            f"{program.attribute},{program.attribute_value.model_dump_json()},"
+            f"{program.qualifier})"
+        )
     if isinstance(program, QueryRelation):
         return (
             f"query_relation({canonical_signature(program.subject)},"
             f"{canonical_signature(program.object)})"
+        )
+    if isinstance(program, QueryRelationQualifier):
+        return (
+            f"query_relation_qualifier({canonical_signature(program.subject)},"
+            f"{canonical_signature(program.object)},{program.relation},{program.qualifier})"
+        )
+    if isinstance(program, Verify):
+        return (
+            f"verify({canonical_signature(program.input)},{program.comparator},"
+            f"{program.value.model_dump_json()})"
         )
     if isinstance(program, SelectAmong):
         return (
@@ -66,9 +97,20 @@ def canonicalize(program: Program) -> Program:
     if isinstance(program, Intersect | Union):
         branches = tuple(sorted((canonicalize(p) for p in program.inputs), key=canonical_signature))
         return program.model_copy(update={"inputs": branches})
-    if isinstance(program, FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+    if isinstance(
+        program,
+        FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         return program.model_copy(update={"input": canonicalize(program.input)})
-    if isinstance(program, QueryRelation):
+    if isinstance(program, QueryRelation | QueryRelationQualifier):
         return program.model_copy(
             update={
                 "subject": canonicalize(program.subject),
@@ -92,9 +134,20 @@ def operator_tags(program: Program) -> tuple[str, ...]:
         elif isinstance(node, Intersect | Union):
             for branch in node.inputs:
                 visit(branch)
-        elif isinstance(node, FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+        elif isinstance(
+            node,
+            FilterType
+            | FilterLiteral
+            | FilterQualifier
+            | Count
+            | QueryAttribute
+            | QueryAttributeUnderCondition
+            | QueryAttributeQualifier
+            | Verify
+            | SelectAmong,
+        ):
             visit(node.input)
-        elif isinstance(node, QueryRelation):
+        elif isinstance(node, QueryRelation | QueryRelationQualifier):
             visit(node.subject)
             visit(node.object)
         elif isinstance(node, SelectBetween):

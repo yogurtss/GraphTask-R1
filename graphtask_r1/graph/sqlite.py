@@ -19,18 +19,23 @@ from graphtask_r1.schema import (
     Entity,
     EntityInfo,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     GraphSlice,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     RelationInfo,
     SelectAmong,
     SelectBetween,
     Triple,
     Union,
+    Verify,
     Witness,
     parse_program,
 )
@@ -77,6 +82,28 @@ def _compare(
 ) -> bool:
     if comparator == "contains":
         return str(right).casefold() in left.casefold()
+    if target_datatype == "string" and datatype == "quantity":
+        parts = str(right).split(maxsplit=1)
+        try:
+            right = float(parts[0])
+        except ValueError:
+            pass
+        else:
+            target_datatype = "quantity"
+            target_unit = parts[1] if len(parts) == 2 else None
+    elif target_datatype == "string" and datatype == "year":
+        try:
+            right = int(str(right))
+        except ValueError:
+            pass
+        else:
+            target_datatype = "year"
+    elif target_datatype == "string" and datatype == "date":
+        normalized = str(right).replace("-", "/").lstrip("/")
+        if len(normalized.split("/")) == 3 and all(
+            part.isdigit() for part in normalized.split("/")
+        ):
+            target_datatype = "date"
     if (
         datatype == "quantity"
         and target_datatype in {"quantity", "number"}
@@ -85,13 +112,17 @@ def _compare(
         return False
     lhs: Any
     rhs: Any
-    if datatype in {"year", "date"} and target_datatype in {"year", "date"}:
+    if datatype in {"year", "date"} and target_datatype in {
+        "year",
+        "date",
+        "number",
+    }:
         left_parts = _time_parts(left)
         right_parts = _time_parts(right)
         left_year = left_parts[0]
         right_year = right_parts[0]
         if comparator in {"eq", "ne"}:
-            if target_datatype == "year":
+            if target_datatype in {"year", "number"}:
                 equal = left_year == right_year
             else:
                 equal = datatype == "date" and left_parts == right_parts
@@ -380,6 +411,79 @@ class SQLiteGraphBackend:
             found.update((str(row[0]), str(row[1]), str(row[2])) for row in rows)
         return {row[output_index] for row in sorted(found)[:1_000_000]}
 
+    def _source_fact_rows(self, program: Program) -> list[tuple[str, str]]:
+        """Return (fact_id, projected entity) for a KoPL fact-producing operation."""
+
+        if isinstance(program, Hop):
+            inputs = self._execute_entities(program.input)
+            input_column = "subject" if program.direction == "out" else "object_entity"
+            output_column = "object_entity" if program.direction == "out" else "subject"
+            result: list[tuple[str, str]] = []
+            for batch in _chunks(sorted(inputs), self._sql_variable_limit() - 1):
+                placeholders = ",".join("?" for _ in batch)
+                rows = self.connection.execute(
+                    f"SELECT fact_id, {output_column} FROM facts "
+                    f"WHERE kind = 'relation' AND {input_column} IN ({placeholders}) "
+                    "AND predicate = ? ORDER BY fact_id",
+                    (*batch, program.relation),
+                ).fetchall()
+                result.extend((str(fact_id), str(entity_id)) for fact_id, entity_id in rows)
+            return result
+        if isinstance(program, FilterLiteral):
+            candidates = self._execute_entities(program.input)
+            result = []
+            for batch in _chunks(sorted(candidates), self._sql_variable_limit() - 1):
+                placeholders = ",".join("?" for _ in batch)
+                rows = self.connection.execute(
+                    "SELECT fact_id, subject, value, datatype, unit FROM facts "
+                    f"WHERE kind = 'attribute' AND subject IN ({placeholders}) AND predicate = ? "
+                    "ORDER BY fact_id",
+                    (*batch, program.relation),
+                ).fetchall()
+                result.extend(
+                    (str(fact_id), str(subject))
+                    for fact_id, subject, value, datatype, unit in rows
+                    if _compare(
+                        str(value),
+                        str(datatype),
+                        program.comparator,
+                        program.value.value,
+                        program.value.datatype,
+                        None if unit is None else str(unit),
+                        program.value.unit,
+                    )
+                )
+            return result
+        raise ValueError(
+            "filter_qualifier requires an immediately preceding hop or literal filter"
+        )
+
+    def _execute_filter_qualifier(self, program: FilterQualifier) -> set[str]:
+        source_rows = self._source_fact_rows(program.input)
+        by_fact = {fact_id: entity_id for fact_id, entity_id in source_rows}
+        selected: set[str] = set()
+        for batch in _chunks(sorted(by_fact), self._sql_variable_limit() - 1):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.connection.execute(
+                "SELECT fact_id, value, datatype, unit FROM qualifiers "
+                f"WHERE fact_id IN ({placeholders}) AND key = ? ORDER BY fact_id",
+                (*batch, program.qualifier),
+            ).fetchall()
+            selected.update(
+                by_fact[str(fact_id)]
+                for fact_id, value, datatype, unit in rows
+                if _compare(
+                    str(value),
+                    str(datatype),
+                    program.comparator,
+                    program.value.value,
+                    program.value.datatype,
+                    None if unit is None else str(unit),
+                    program.value.unit,
+                )
+            )
+        return selected
+
     def _execute_entities(self, program: Program) -> set[str]:
         if self._cache_enabled and program in self._entity_results_cache:
             return set(self._entity_results_cache[program])
@@ -442,6 +546,8 @@ class SQLiteGraphBackend:
                             program.value.unit,
                         )
                     )
+        elif isinstance(program, FilterQualifier):
+            result = self._execute_filter_qualifier(program)
         elif isinstance(program, Count):
             raise TypeError("Count produces a scalar")
         else:
@@ -455,10 +561,16 @@ class SQLiteGraphBackend:
             return self._answer_cache[program]
         if isinstance(program, Count):
             result = AnswerSet.count(len(self._execute_entities(program.input)))
-        elif isinstance(program, QueryAttribute):
-            rows = self._attribute_rows(self._execute_entities(program.input), program.attribute)
+        elif isinstance(
+            program,
+            QueryAttribute
+            | QueryAttributeUnderCondition
+            | QueryAttributeQualifier
+            | QueryRelationQualifier,
+        ):
+            rows = self._literal_rows(program)
             result = AnswerSet.literals(
-                {format_attribute_value(value, datatype, unit) for _, value, datatype, unit in rows}
+                {format_attribute_value(value, datatype, unit) for value, datatype, unit in rows}
             )
         elif isinstance(program, QueryRelation):
             subjects = self._execute_entities(program.subject)
@@ -476,6 +588,21 @@ class SQLiteGraphBackend:
                     if str(object_id) in objects
                 )
             result = AnswerSet.literals(relations)
+        elif isinstance(program, Verify):
+            rows = self._literal_rows(program.input)
+            verified = any(
+                _compare(
+                    value,
+                    datatype,
+                    program.comparator,
+                    program.value.value,
+                    program.value.datatype,
+                    unit,
+                    program.value.unit,
+                )
+                for value, datatype, unit in rows
+            )
+            result = AnswerSet.literals(["yes" if verified else "no"])
         elif isinstance(program, SelectBetween):
             candidates = {
                 *self._execute_entities(program.left),
@@ -561,6 +688,132 @@ class SQLiteGraphBackend:
                 for entity_id, value, datatype, unit in rows
             )
         return result
+
+    def _attribute_fact_rows(
+        self, entity_ids: set[str], attribute: str
+    ) -> list[tuple[str, str, str, str, str | None]]:
+        result: list[tuple[str, str, str, str, str | None]] = []
+        for batch in _chunks(sorted(entity_ids), self._sql_variable_limit() - 1):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.connection.execute(
+                "SELECT fact_id, subject, value, datatype, unit FROM facts "
+                f"WHERE kind = 'attribute' AND subject IN ({placeholders}) AND predicate = ? "
+                "ORDER BY fact_id",
+                (*batch, attribute),
+            ).fetchall()
+            result.extend(
+                (
+                    str(fact_id),
+                    str(entity_id),
+                    str(value),
+                    str(datatype),
+                    None if unit is None else str(unit),
+                )
+                for fact_id, entity_id, value, datatype, unit in rows
+            )
+        return result
+
+    def _qualifier_rows(
+        self, fact_ids: Sequence[str], qualifier: str
+    ) -> list[tuple[str, str, str, str | None]]:
+        result: list[tuple[str, str, str, str | None]] = []
+        for batch in _chunks(sorted(set(fact_ids)), self._sql_variable_limit() - 1):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.connection.execute(
+                "SELECT fact_id, value, datatype, unit FROM qualifiers "
+                f"WHERE fact_id IN ({placeholders}) AND key = ? ORDER BY fact_id",
+                (*batch, qualifier),
+            ).fetchall()
+            result.extend(
+                (str(fact_id), str(value), str(datatype), None if unit is None else str(unit))
+                for fact_id, value, datatype, unit in rows
+            )
+        return result
+
+    def _literal_rows(self, program: Program) -> list[tuple[str, str, str | None]]:
+        if isinstance(program, QueryAttribute):
+            return [
+                (value, datatype, unit)
+                for _, value, datatype, unit in self._attribute_rows(
+                    self._execute_entities(program.input), program.attribute
+                )
+            ]
+        if isinstance(program, QueryAttributeUnderCondition):
+            facts = self._attribute_fact_rows(
+                self._execute_entities(program.input), program.attribute
+            )
+            allowed = {
+                fact_id
+                for fact_id, value, datatype, unit in self._qualifier_rows(
+                    [fact_id for fact_id, *_ in facts], program.qualifier
+                )
+                if _compare(
+                    value,
+                    datatype,
+                    "eq",
+                    program.qualifier_value.value,
+                    program.qualifier_value.datatype,
+                    unit,
+                    program.qualifier_value.unit,
+                )
+            }
+            return [
+                (value, datatype, unit)
+                for fact_id, _, value, datatype, unit in facts
+                if fact_id in allowed
+            ]
+        if isinstance(program, QueryAttributeQualifier):
+            facts = self._attribute_fact_rows(
+                self._execute_entities(program.input), program.attribute
+            )
+            matching = [
+                fact_id
+                for fact_id, _, value, datatype, unit in facts
+                if _compare(
+                    value,
+                    datatype,
+                    "eq",
+                    program.attribute_value.value,
+                    program.attribute_value.datatype,
+                    unit,
+                    program.attribute_value.unit,
+                )
+            ]
+            return [
+                (value, datatype, unit)
+                for _, value, datatype, unit in self._qualifier_rows(
+                    matching, program.qualifier
+                )
+            ]
+        if isinstance(program, QueryRelationQualifier):
+            subjects = self._execute_entities(program.subject)
+            objects = self._execute_entities(program.object)
+            fact_ids: list[str] = []
+            for batch in _chunks(sorted(subjects), self._sql_variable_limit() - 1):
+                placeholders = ",".join("?" for _ in batch)
+                rows = self.connection.execute(
+                    "SELECT fact_id, object_entity FROM facts WHERE kind = 'relation' "
+                    f"AND subject IN ({placeholders}) AND predicate = ? ORDER BY fact_id",
+                    (*batch, program.relation),
+                ).fetchall()
+                fact_ids.extend(
+                    str(fact_id)
+                    for fact_id, object_id in rows
+                    if str(object_id) in objects
+                )
+            return [
+                (value, datatype, unit)
+                for _, value, datatype, unit in self._qualifier_rows(
+                    fact_ids, program.qualifier
+                )
+            ]
+        if isinstance(program, QueryRelation):
+            return [
+                (str(value), "string", None)
+                for value in self.execute_program(program).values()
+            ]
+        answers = self.execute_program(program)
+        return [(str(value), "string", None) for value in answers.values()]
 
     def _select_by_attribute(self, entity_ids: set[str], attribute: str, mode: str) -> str:
         rows = self._attribute_rows(entity_ids, attribute)

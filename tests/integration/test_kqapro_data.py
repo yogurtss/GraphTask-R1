@@ -8,6 +8,7 @@ import pytest
 from graphtask_r1.data.kqapro import KoPLConversionError, KoPLMapper, prepare_kqapro
 from graphtask_r1.generation import compile_trace
 from graphtask_r1.graph import SQLiteGraphBackend
+from graphtask_r1.graphscript import execute_graphscript, parse_graphscript, program_to_graphscript
 from graphtask_r1.schema import (
     AllEntities,
     Entity,
@@ -38,7 +39,9 @@ def _write_fixture(raw_dir: Path) -> None:
                         "predicate": "friend",
                         "direction": "forward",
                         "object": "e_bob",
-                        "qualifiers": {},
+                        "qualifiers": {
+                            "since": [{"type": "year", "value": 2020}],
+                        },
                     }
                 ],
             },
@@ -49,7 +52,10 @@ def _write_fixture(raw_dir: Path) -> None:
                     {
                         "key": "age",
                         "value": {"type": "quantity", "value": 30, "unit": "year"},
-                        "qualifiers": {},
+                        "qualifiers": {
+                            "point in time": [{"type": "year", "value": 2020}],
+                            "source": [{"type": "string", "value": "census"}],
+                        },
                     }
                 ],
                 "relations": [],
@@ -140,6 +146,9 @@ def test_sqlite_shortcut_primitives_avoid_full_answer_materialization(tmp_path: 
         assert {relation.relation_id for relation in backend.all_relation_infos()} == {
             "age",
             "friend",
+            "point in time",
+            "since",
+            "source",
         }
     finally:
         backend.close()
@@ -238,7 +247,7 @@ def test_kopl_mapper_supports_query_and_selection_operators(tmp_path: Path) -> N
     assert select_between.op == "select_between"
 
 
-def test_mapper_rejects_non_core_kopl(tmp_path: Path) -> None:
+def test_mapper_rejects_unknown_kopl(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     _write_fixture(raw_dir)
     output_dir = tmp_path / "processed"
@@ -246,11 +255,102 @@ def test_mapper_rejects_non_core_kopl(tmp_path: Path) -> None:
     backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
     mapper = KoPLMapper(backend)
     try:
-        mapper.convert([{"function": "VerifyStr", "dependencies": [], "inputs": ["x"]}])
+        mapper.convert([{"function": "NotAKoPLOperator", "dependencies": [], "inputs": ["x"]}])
     except KoPLConversionError as exc:
         assert exc.reason_code == "UNSUPPORTED_KOPL_OPERATOR"
     else:
         raise AssertionError("unsupported KoPL must be rejected")
+
+
+def test_kqapro_qualifier_and_verify_operators_execute_and_replay(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    mapper = KoPLMapper(backend)
+    programs = {
+        "qfilter": (
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Alice"]},
+                {
+                    "function": "Relate",
+                    "dependencies": [0],
+                    "inputs": ["friend", "forward"],
+                },
+                {
+                    "function": "QFilterYear",
+                    "dependencies": [1],
+                    "inputs": ["since", "2020", "="],
+                },
+            ],
+            ("e_bob",),
+        ),
+        "attribute_condition": (
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Bob"]},
+                {
+                    "function": "QueryAttrUnderCondition",
+                    "dependencies": [0],
+                    "inputs": ["age", "point in time", "2020"],
+                },
+            ],
+            ("30 year",),
+        ),
+        "attribute_qualifier": (
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Bob"]},
+                {
+                    "function": "QueryAttrQualifier",
+                    "dependencies": [0],
+                    "inputs": ["age", "30 year", "source"],
+                },
+            ],
+            ("census",),
+        ),
+        "relation_qualifier": (
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Alice"]},
+                {"function": "Find", "dependencies": [], "inputs": ["Bob"]},
+                {
+                    "function": "QueryRelationQualifier",
+                    "dependencies": [0, 1],
+                    "inputs": ["friend", "since"],
+                },
+            ],
+            ("2020",),
+        ),
+        "verify": (
+            [
+                {"function": "Find", "dependencies": [], "inputs": ["Bob"]},
+                {"function": "QueryAttr", "dependencies": [0], "inputs": ["age"]},
+                {
+                    "function": "VerifyNum",
+                    "dependencies": [1],
+                    "inputs": ["20 year", ">"],
+                },
+            ],
+            ("yes",),
+        ),
+    }
+    try:
+        for name, (steps, expected) in programs.items():
+            program = mapper.convert(steps)
+            assert backend.execute_program(program).values() == expected, name
+            script = parse_graphscript(program_to_graphscript(program, version="0.3").model_dump())
+            execution = execute_graphscript(
+                script,
+                backend,
+                allowed_relations=frozenset(
+                    {"age", "friend", "point in time", "since", "source"}
+                ),
+                max_edge_visits=100,
+            )
+            assert execution.answers.values() == expected, name
+            trace = compile_trace(name, name, program, backend, seed=7)
+            assert trace.final_answers.values() == expected, name
+    finally:
+        backend.close()
 
 
 def test_sqlite_backend_batches_queries_below_runtime_variable_limit(tmp_path: Path) -> None:

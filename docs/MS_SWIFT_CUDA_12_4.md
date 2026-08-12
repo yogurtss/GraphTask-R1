@@ -95,7 +95,7 @@ NumPy/Arrow 值转换为 JSON 原生类型。
 
 先运行 `scripts/preflight_ms_swift_sft.py` 查看结构化 rejection。若主要原因为
 `SFT_MAX_LENGTH_EXCEEDED`，把 `MAX_LENGTH` 与预检 `--max-length` 同时提高到 20000–40960；若
-是 tool trace 过长，优先导出 GraphScript v0.2 单程序样本，并提高 KQAPro prepare 的
+是 tool trace 过长，优先导出 KQAPro GraphScript v0.3 单程序样本，并提高 KQAPro prepare 的
 `--max-trace-tool-calls` 与 `--max-trace-query-results`。不得依赖静默截断，因为它可能删除 `emit`
 或最终答案监督。
 

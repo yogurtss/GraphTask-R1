@@ -6,6 +6,6 @@ train_data: ${SOLVER_RL_TRAIN_DATA}
 val_data: ${SOLVER_RL_VAL_DATA}
 output_dir: ${SOLVER_GRPO_OUTPUT_DIR}
 num_gpus: 3
-experiment_name: qwen3-4b-solver-grpo-ms-swift-cu124
+experiment_name: qwen3-4b-kqapro-solver-grpo-ms-swift-cu124
 interaction_mode: graphscript
-graphscript_version: "0.2"
+graphscript_version: "0.3"

@@ -14,6 +14,7 @@ from graphtask_r1.graphscript.schema import (
     CountOp,
     EmitOp,
     FilterLiteralOp,
+    FilterQualifierOp,
     FilterTypeOp,
     FollowOp,
     GraphScript,
@@ -21,7 +22,10 @@ from graphtask_r1.graphscript.schema import (
     IntersectOp,
     PassagePagesOp,
     QueryAttributeOp,
+    QueryAttributeQualifierOp,
+    QueryAttributeUnderConditionOp,
     QueryRelationOp,
+    QueryRelationQualifierOp,
     RequireUniqueOp,
     ResolveEntityOp,
     SearchPassageOp,
@@ -29,6 +33,8 @@ from graphtask_r1.graphscript.schema import (
     SelectBetweenOp,
     StartOp,
     UnionOp,
+    VerifyOp,
+    graphscript_operators,
 )
 from graphtask_r1.schema import (
     AllEntities,
@@ -36,6 +42,7 @@ from graphtask_r1.schema import (
     Count,
     Entity,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
@@ -43,11 +50,15 @@ from graphtask_r1.schema import (
     PassageHit,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     Triple,
     Union,
+    Verify,
 )
 
 
@@ -109,9 +120,21 @@ def _contains_all_entities(program: Program) -> bool:
         return True
     if isinstance(program, Intersect | Union):
         return any(_contains_all_entities(branch) for branch in program.inputs)
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+    if isinstance(
+        program,
+        Hop
+        | FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         return _contains_all_entities(program.input)
-    if isinstance(program, QueryRelation):
+    if isinstance(program, QueryRelation | QueryRelationQualifier):
         return _contains_all_entities(program.subject) or _contains_all_entities(program.object)
     if isinstance(program, SelectBetween):
         return _contains_all_entities(program.left) or _contains_all_entities(program.right)
@@ -146,7 +169,7 @@ def graphscript_to_program(
     seed_entity: str | None = None,
     backend: GraphBackend | None = None,
 ) -> Program:
-    """Compile v0.1 statically and v0.2 through the same bounded runtime semantics."""
+    """Compile v0.1 statically and v0.2/v0.3 with bounded runtime semantics."""
 
     if script.version == "0.1":
         if seed_entity is None:
@@ -221,7 +244,7 @@ def program_to_graphscript(
                 ],
             }
         )
-    if version != "0.2":
+    if version not in {"0.2", "0.3"}:
         raise GraphScriptError("UNSUPPORTED_VERSION", f"unsupported version: {version}")
 
     ops: list[dict[str, object]] = []
@@ -307,6 +330,20 @@ def program_to_graphscript(
                 }
             )
             return output
+        if isinstance(node, FilterQualifier):
+            source = compile_node(node.input)
+            output = allocate()
+            ops.append(
+                {
+                    "op": "filter_qualifier",
+                    "in": source,
+                    "qualifier": node.qualifier,
+                    "comparator": node.comparator,
+                    "value": node.value.model_dump(mode="json"),
+                    "out": output,
+                }
+            )
+            return output
         if isinstance(node, Count):
             source = compile_node(node.input)
             output = allocate()
@@ -324,6 +361,34 @@ def program_to_graphscript(
                 }
             )
             return output
+        if isinstance(node, QueryAttributeUnderCondition):
+            source = compile_node(node.input)
+            output = allocate()
+            ops.append(
+                {
+                    "op": "query_attribute_under_condition",
+                    "in": source,
+                    "attribute": node.attribute,
+                    "qualifier": node.qualifier,
+                    "qualifier_value": node.qualifier_value.model_dump(mode="json"),
+                    "out": output,
+                }
+            )
+            return output
+        if isinstance(node, QueryAttributeQualifier):
+            source = compile_node(node.input)
+            output = allocate()
+            ops.append(
+                {
+                    "op": "query_attribute_qualifier",
+                    "in": source,
+                    "attribute": node.attribute,
+                    "attribute_value": node.attribute_value.model_dump(mode="json"),
+                    "qualifier": node.qualifier,
+                    "out": output,
+                }
+            )
+            return output
         if isinstance(node, QueryRelation):
             subject = compile_node(node.subject)
             object_ = compile_node(node.object)
@@ -333,6 +398,34 @@ def program_to_graphscript(
                     "op": "query_relation",
                     "subject": subject,
                     "object": object_,
+                    "out": output,
+                }
+            )
+            return output
+        if isinstance(node, QueryRelationQualifier):
+            subject = compile_node(node.subject)
+            object_ = compile_node(node.object)
+            output = allocate()
+            ops.append(
+                {
+                    "op": "query_relation_qualifier",
+                    "subject": subject,
+                    "object": object_,
+                    "relation": node.relation,
+                    "qualifier": node.qualifier,
+                    "out": output,
+                }
+            )
+            return output
+        if isinstance(node, Verify):
+            source = compile_node(node.input)
+            output = allocate()
+            ops.append(
+                {
+                    "op": "verify",
+                    "in": source,
+                    "comparator": node.comparator,
+                    "value": node.value.model_dump(mode="json"),
                     "out": output,
                 }
             )
@@ -366,12 +459,20 @@ def program_to_graphscript(
             )
             return output
         raise GraphScriptError(
-            "UNSUPPORTED_PROGRAM", f"cannot convert {type(node).__name__} to v0.2"
+            "UNSUPPORTED_PROGRAM", f"cannot convert {type(node).__name__} to v{version}"
         )
 
     final_handle = compile_node(program)
     ops.append({"op": "emit", "in": final_handle})
-    return GraphScript.model_validate({"version": "0.2", "ops": ops})
+    script = GraphScript.model_validate({"version": version, "ops": ops})
+    allowed = frozenset(graphscript_operators(script.version))
+    unavailable = sorted({op.op for op in script.ops if op.op not in allowed})
+    if unavailable:
+        raise GraphScriptError(
+            "OP_NOT_IN_PROFILE",
+            f"operators unavailable in GraphScript v{version}: {', '.join(unavailable)}",
+        )
+    return script
 
 
 def execute_graphscript(
@@ -421,6 +522,14 @@ def execute_graphscript(
         edge_visits += len(additions)
         account_answers(answers)
         return answers
+
+    def require_catalog(*relation_ids: str) -> None:
+        missing = sorted(set(relation_ids) - allowed_relations)
+        if missing:
+            raise GraphScriptError(
+                "RELATION_NOT_ALLOWED",
+                f"relation or qualifier is not in the episode catalog: {', '.join(missing)}",
+            )
 
     for index, op in enumerate(script.ops):
         op_trace = f"{trace_id or 'graphscript'}:{index}"
@@ -515,10 +624,21 @@ def execute_graphscript(
             program = FilterType(input=_require_program(source), type_id=op.type_id)
             handles[op.out] = _Handle(program=program, answers=execute_program(program))
         elif isinstance(op, FilterLiteralOp):
+            require_catalog(op.relation)
             source = handles[op.input_handle]
             program = FilterLiteral(
                 input=_require_program(source),
                 relation=op.relation,
+                comparator=op.comparator,
+                value=LiteralValue.model_validate(op.value.model_dump()),
+            )
+            handles[op.out] = _Handle(program=program, answers=execute_program(program))
+        elif isinstance(op, FilterQualifierOp):
+            require_catalog(op.qualifier)
+            source = handles[op.input_handle]
+            program = FilterQualifier(
+                input=_require_program(source),
+                qualifier=op.qualifier,
                 comparator=op.comparator,
                 value=LiteralValue.model_validate(op.value.model_dump()),
             )
@@ -533,8 +653,29 @@ def execute_graphscript(
             )
             handles[op.out] = _Handle(program=program, answers=answers)
         elif isinstance(op, QueryAttributeOp):
+            require_catalog(op.attribute)
             source = handles[op.input_handle]
             program = QueryAttribute(input=_require_program(source), attribute=op.attribute)
+            handles[op.out] = _Handle(program=program, answers=execute_program(program))
+        elif isinstance(op, QueryAttributeUnderConditionOp):
+            require_catalog(op.attribute, op.qualifier)
+            source = handles[op.input_handle]
+            program = QueryAttributeUnderCondition(
+                input=_require_program(source),
+                attribute=op.attribute,
+                qualifier=op.qualifier,
+                qualifier_value=LiteralValue.model_validate(op.qualifier_value.model_dump()),
+            )
+            handles[op.out] = _Handle(program=program, answers=execute_program(program))
+        elif isinstance(op, QueryAttributeQualifierOp):
+            require_catalog(op.attribute, op.qualifier)
+            source = handles[op.input_handle]
+            program = QueryAttributeQualifier(
+                input=_require_program(source),
+                attribute=op.attribute,
+                attribute_value=LiteralValue.model_validate(op.attribute_value.model_dump()),
+                qualifier=op.qualifier,
+            )
             handles[op.out] = _Handle(program=program, answers=execute_program(program))
         elif isinstance(op, QueryRelationOp):
             subject = handles[op.subject]
@@ -543,7 +684,27 @@ def execute_graphscript(
                 subject=_require_program(subject), object=_require_program(object_)
             )
             handles[op.out] = _Handle(program=program, answers=execute_program(program))
+        elif isinstance(op, QueryRelationQualifierOp):
+            require_catalog(op.relation, op.qualifier)
+            subject = handles[op.subject]
+            object_ = handles[op.object]
+            program = QueryRelationQualifier(
+                subject=_require_program(subject),
+                object=_require_program(object_),
+                relation=op.relation,
+                qualifier=op.qualifier,
+            )
+            handles[op.out] = _Handle(program=program, answers=execute_program(program))
+        elif isinstance(op, VerifyOp):
+            source = handles[op.input_handle]
+            program = Verify(
+                input=_require_program(source),
+                comparator=op.comparator,
+                value=LiteralValue.model_validate(op.value.model_dump()),
+            )
+            handles[op.out] = _Handle(program=program, answers=execute_program(program))
         elif isinstance(op, SelectBetweenOp):
+            require_catalog(op.attribute)
             left = handles[op.left]
             right = handles[op.right]
             program = SelectBetween(
@@ -554,6 +715,7 @@ def execute_graphscript(
             )
             handles[op.out] = _Handle(program=program, answers=execute_program(program))
         elif isinstance(op, SelectAmongOp):
+            require_catalog(op.attribute)
             source = handles[op.input_handle]
             program = SelectAmong(
                 input=_require_program(source), attribute=op.attribute, mode=op.mode

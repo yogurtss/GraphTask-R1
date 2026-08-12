@@ -12,19 +12,19 @@
 - `data prepare` 记录的 canonical trace replay 通过；
 - gold answer 全部由 certified program 执行产生；
 - SFT 使用真实 tokenizer/template 完成长度预检；
-- SFT、GRPO 与评测均记录 `interaction_mode=graphscript`、`graphscript_version=0.2`；
-- KILT GRPO train/val 与 SSP 最终测试完全隔离；
-- 先用 ToyGraph 或 bounded KILT smoke 数据跑通，再扩大数据和 GPU 数。
+- SFT、GRPO 与评测均记录 `interaction_mode=graphscript`、`graphscript_version=0.3`；
+- KQAPro train 用于 SFT/GRPO/self-play，KQAPro val 只用于模型选择；
+- KILT v0.2 passage-search 路线与 KQAPro v0.3 完全隔离；
+- 先用 ToyGraph 或 bounded KQAPro 数据跑通，再扩大数据和 GPU 数。
 
 推荐目录：
 
 ```text
 data/training/
-├── kqapro_graphscript_v02_sft_train.parquet
-├── kqapro_graphscript_v02_sft_val.parquet
-└── kilt-certified-grpo-v2/
-    ├── train/solver_grpo.parquet
-    └── val/solver_grpo.parquet
+├── kqapro_graphscript_v03_sft_train.parquet
+├── kqapro_graphscript_v03_sft_val.parquet
+├── kqapro_graphscript_v03_grpo_train.parquet
+└── kqapro_graphscript_v03_grpo_val.parquet
 ```
 
 ## 2. SFT 长度预检
@@ -39,7 +39,7 @@ Parquet。
 
 ```bash
 python scripts/preflight_ms_swift_sft.py \
-  --input data/training/kqapro_graphscript_v02_sft_train.parquet \
+  --input data/training/kqapro_graphscript_v03_sft_train.parquet \
   --accepted-output outputs/preflight/kqapro-train-accepted.parquet \
   --rejected-output outputs/preflight/kqapro-train-rejected.parquet \
   --summary-output outputs/preflight/kqapro-train-summary.json \
@@ -54,8 +54,8 @@ python scripts/preflight_ms_swift_sft.py \
 
 ```bash
 export SFT_TRAIN_DATA=$PWD/outputs/preflight/kqapro-train-accepted.parquet
-export SFT_VAL_DATA=$PWD/data/training/kqapro_graphscript_v02_sft_val.parquet
-export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b-kqapro-v02
+export SFT_VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_sft_val.parquet
+export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b-kqapro-v03
 export NUM_GPUS=4
 export MAX_LENGTH=32768
 
@@ -69,36 +69,37 @@ python -m graphtask_r1.cli train sft \
 脚本使用 LoRA、BF16、SDPA 和显式 seed。显存不足时依次降低 `MAX_LENGTH`、
 `MICRO_BATCH_SIZE`，再提高 `GRADIENT_ACCUMULATION_STEPS`；不要让模板自动截断程序尾部。
 
-## 4. KILT GRPO
+## 4. KQAPro GRPO
 
-先生成 bounded、可回放的数据：
+从认证的 KQAPro train/val 分别导出 Solver GRPO 数据：
 
 ```bash
-export GRAPHTASK_KILT_DB=$PWD/data/processed/kilt/kilt-2019-08-01-v1/graph.sqlite
-
-python -m graphtask_r1.cli data bootstrap-kilt-grpo \
-  --output-dir data/training/kilt-certified-grpo-v2 \
-  --count 20608 --pool-limit 1000000 --val-ratio 0.02484472 --seed 42 \
-  --interaction-mode graphscript --graphscript-version 0.2
+for split in train val; do
+  python -m graphtask_r1.cli data export-rl \
+    --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
+    --output data/training/kqapro_graphscript_v03_grpo_$split.parquet \
+    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+    --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+done
 ```
 
 ### colocate smoke test
 
 ```bash
-export KQAPRO_SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v02/checkpoint-last
-export KILT_GRPO_TRAIN_DATA=$PWD/data/training/kilt-certified-grpo-v2/train/solver_grpo.parquet
-export KILT_GRPO_VAL_DATA=$PWD/data/training/kilt-certified-grpo-v2/val/solver_grpo.parquet
-export KILT_GRPO_OUTPUT_DIR=$PWD/outputs/grpo/kilt-v02-smoke
+export MS_SWIFT_SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
+export SOLVER_RL_TRAIN_DATA=$PWD/data/training/kqapro_graphscript_v03_grpo_train.parquet
+export SOLVER_RL_VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_grpo_val.parquet
+export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/grpo/kqapro-v03-smoke
 export NUM_GPUS=1
 export VLLM_MODE=colocate
 export ROLLOUT_N=2
 export MAX_COMPLETION_LENGTH=4096
 
 python -m graphtask_r1.cli train solver-grpo \
-  --config configs/experiments/qwen3_4b_kilt_solver_grpo_ms_swift_cuda124.yaml --dry-run
+  --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml --dry-run
 
 python -m graphtask_r1.cli train solver-grpo \
-  --config configs/experiments/qwen3_4b_kilt_solver_grpo_ms_swift_cuda124.yaml
+  --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml
 ```
 
 确认 smoke test 后再提高 completion length、generation 数和 GPU 数。正式 server 模式先在独立
@@ -107,14 +108,13 @@ GPU 上运行 `scripts/rollout_ms_swift.sh`，再以 `VLLM_MODE=server` 启动 G
 
 ## 5. Self-play
 
-默认配置是 KILT + GraphScript v0.2：
+默认配置是 KQAPro + GraphScript v0.3：
 
 ```bash
-export INITIAL_ADAPTER=$KQAPRO_SFT_ADAPTER
-export BASE_TASKS=$PWD/data/training/kilt-certified-grpo-v2/train/tasks.parquet
-export VAL_DATA=$KILT_GRPO_VAL_DATA
-export QUESTIONER_SEEDS=$PWD/data/training/kilt_questioner_seeds.parquet
-export KILT_RELATION_CATALOG=$PWD/data/training/kilt-certified-grpo-v2/relation_catalog.json
+export INITIAL_ADAPTER=$MS_SWIFT_SFT_ADAPTER
+export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/training_tasks.parquet
+export VAL_DATA=$SOLVER_RL_VAL_DATA
+export QUESTIONER_SEEDS=$PWD/data/training/kqapro_questioner_seeds.parquet
 export KQAPRO_RELATION_CATALOG=$PWD/data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli train self-play \
@@ -127,18 +127,11 @@ ms-swift GRPO、查找新 LoRA adapter，并写入 round manifest。配置 hash�
 路径和 ms-swift 版本用于恢复；修改配置后不能从旧 manifest 继续。外部图调用保留 timeout、retry、
 cache 和 trace ID。
 
-## 6. 最终验证
+## 6. KQAPro val 验证
 
-HotpotQA、TriviaQA 和 NaturalQuestions 统一转换为 `BenchmarkExample`，但不转换为训练
-`TaskCertificate`。启动冻结 solver 服务后：
-
-```bash
-python -m graphtask_r1.cli evaluate benchmark \
-  --input data/processed/ssp/hotpotqa/examples.parquet \
-  --output-dir outputs/eval/hotpotqa \
-  --solver-url http://127.0.0.1:18080 \
-  --snapshot kilt-2019-08-01-v1 --graphscript-version 0.2
-```
+本阶段只用 `kqapro_graphscript_v03_grpo_val.parquet` 的冻结 val 行评测并选择 checkpoint；它由
+官方 `val.json` 的认证程序产生，不从隐藏 test 构造标签。KILT/HotpotQA 的检索型评测等独立路线
+完成设计后再启用，不能替代当前 KQAPro val checkpoint 选择。
 
 除 EM/F1 外必须报告 program parse rate、execution rate、operator count、passage search count 和
 latency，避免把“代码格式失败”“执行失败”和“程序语义错误”混为一类。

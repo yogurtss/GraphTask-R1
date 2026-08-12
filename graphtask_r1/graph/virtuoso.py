@@ -19,18 +19,23 @@ from graphtask_r1.schema import (
     Entity,
     EntityInfo,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     GraphSlice,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     RelationInfo,
     SelectAmong,
     SelectBetween,
     Triple,
     Union,
+    Verify,
     Witness,
 )
 
@@ -70,6 +75,13 @@ def _expand_program(program: Program) -> Program:
         return program.model_copy(
             update={"input": _expand_program(program.input), "relation": _expand(program.relation)}
         )
+    if isinstance(program, FilterQualifier):
+        return program.model_copy(
+            update={
+                "input": _expand_program(program.input),
+                "qualifier": _expand(program.qualifier),
+            }
+        )
     if isinstance(program, Count):
         return program.model_copy(update={"input": _expand_program(program.input)})
     if isinstance(program, QueryAttribute):
@@ -79,6 +91,22 @@ def _expand_program(program: Program) -> Program:
                 "attribute": _expand(program.attribute),
             }
         )
+    if isinstance(program, QueryAttributeUnderCondition):
+        return program.model_copy(
+            update={
+                "input": _expand_program(program.input),
+                "attribute": _expand(program.attribute),
+                "qualifier": _expand(program.qualifier),
+            }
+        )
+    if isinstance(program, QueryAttributeQualifier):
+        return program.model_copy(
+            update={
+                "input": _expand_program(program.input),
+                "attribute": _expand(program.attribute),
+                "qualifier": _expand(program.qualifier),
+            }
+        )
     if isinstance(program, QueryRelation):
         return program.model_copy(
             update={
@@ -86,6 +114,17 @@ def _expand_program(program: Program) -> Program:
                 "object": _expand_program(program.object),
             }
         )
+    if isinstance(program, QueryRelationQualifier):
+        return program.model_copy(
+            update={
+                "subject": _expand_program(program.subject),
+                "object": _expand_program(program.object),
+                "relation": _expand(program.relation),
+                "qualifier": _expand(program.qualifier),
+            }
+        )
+    if isinstance(program, Verify):
+        return program.model_copy(update={"input": _expand_program(program.input)})
     if isinstance(program, SelectAmong):
         return program.model_copy(
             update={

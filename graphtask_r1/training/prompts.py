@@ -5,7 +5,7 @@ from typing import Literal
 from graphtask_r1.schema import RelationInfo
 
 InteractionMode = Literal["tool", "graphscript"]
-GraphScriptVersion = Literal["0.1", "0.2"]
+GraphScriptVersion = Literal["0.1", "0.2", "0.3"]
 
 
 QUESTIONER_SYSTEM_PROMPT = """You are the Questioner in graph self-play. Explore only with the
@@ -34,17 +34,15 @@ the answer."""
 
 
 QUESTIONER_GRAPHSCRIPT_V02_PROMPT = """You are the Questioner in graph self-play. Produce one
-bounded, typed GraphScript v0.2 JSON program. The program may resolve entities, search passages,
-traverse allowed relations, combine or filter entity handles, query attributes or relations,
-select extrema, count, and emit an answer. Output exactly one JSON object with no prose or markdown.
-Never embed or emit a guessed gold answer; program execution must supply the answer."""
+bounded, typed KILT GraphScript v0.2 JSON program. It may resolve entities, search passages,
+traverse allowed Wikipedia relations, combine handles, and emit an answer. Output exactly one JSON
+object with no prose or markdown. Never embed a guessed gold answer; execution supplies it."""
 
 
 SOLVER_GRAPHSCRIPT_V02_PROMPT = """You are the Solver in graph self-play. Compile the natural
 language question into one bounded, typed GraphScript v0.2 JSON program. No topic seed is
-guaranteed: use resolve_entity or search_passage when needed, convert passage results with
-passage_pages, and use only relations in the provided catalog. Output exactly one JSON object with
-no prose or markdown.
+guaranteed: use resolve_entity or search_passage when needed, convert passages with passage_pages,
+and use only relations in the provided KILT catalog. Output exactly one JSON object with no prose.
 The executor, not a free-form answer or parametric recall, must produce the answer."""
 
 
@@ -54,11 +52,39 @@ all_entities(max_results, out) [must be immediately restricted before materializ
 resolve_entity(query, match=id|exact|search, limit, out); search_passage(query, limit, max_chars,
 out); passage_pages(in, out); start(entity="$seed", out); follow(in, relation, direction=out|in,
 limit, out); intersect(inputs, out); union(inputs, out); filter_type(in, type_id, out);
-filter_literal(in, relation, comparator, value={value,datatype,unit}, out); count(in, out);
-query_attribute(in, attribute, out); query_relation(subject, object, out);
+filter_literal(in, relation, comparator, value={value,datatype,unit}, out);
+count(in, out); query_attribute(in, attribute, out); query_relation(subject, object, out);
 select_between(left, right, attribute, mode=min|max, out); select_among(in, attribute,
 mode=min|max, out); require_unique(in); emit(in). The first operation must be start,
 all_entities, resolve_entity, or search_passage, and the last must be emit."""
+
+
+QUESTIONER_GRAPHSCRIPT_V03_PROMPT = """You are the Questioner in KQAPro graph self-play. Produce
+one bounded, typed GraphScript v0.3 JSON program. It may resolve entities, traverse allowed
+relations, combine or filter entity handles, use fact qualifiers, query attributes, relations or
+their qualifiers, verify values, select extrema, count, and emit an answer. Output exactly one JSON
+object with no prose or markdown. Never embed a guessed gold answer; execution supplies it."""
+
+
+SOLVER_GRAPHSCRIPT_V03_PROMPT = """You are the Solver in KQAPro graph self-play. Compile the
+natural-language question into one bounded, typed GraphScript v0.3 JSON program. Use
+resolve_entity or all_entities and only relation/qualifier IDs in the KQAPro catalog. Output exactly
+one JSON object with no prose or markdown. Program execution must produce the answer."""
+
+
+GRAPHSCRIPT_V03_GRAMMAR = """
+Use at most 64 operations and SSA handles h0..h63. Valid signatures are:
+all_entities(max_results, out) [immediately restrict before materialization];
+resolve_entity(query, match=id|exact|search, limit, out); follow(in, relation, direction=out|in,
+limit, out); intersect(inputs, out); union(inputs, out); filter_type(in, type_id, out);
+filter_literal(in, relation, comparator, value={value,datatype,unit}, out);
+filter_qualifier(in, qualifier, comparator, value={value,datatype,unit}, out); count(in, out);
+query_attribute(in, attribute, out); query_attribute_under_condition(in, attribute, qualifier,
+qualifier_value, out); query_attribute_qualifier(in, attribute, attribute_value, qualifier, out);
+query_relation(subject, object, out); query_relation_qualifier(subject, object, relation, qualifier,
+out); verify(in, comparator, value={value,datatype,unit}, out); select_between(left, right,
+attribute, mode=min|max, out); select_among(in, attribute, mode=min|max, out); emit(in). The first
+operation must be all_entities or resolve_entity, and the last must be emit."""
 
 
 def relation_catalog_text(relations: tuple[RelationInfo, ...]) -> str:
@@ -80,23 +106,25 @@ def role_prompt(
         if interaction_mode == "tool":
             system = QUESTIONER_SYSTEM_PROMPT
         else:
-            system = (
-                QUESTIONER_GRAPHSCRIPT_PROMPT
-                if graphscript_version == "0.1"
-                else QUESTIONER_GRAPHSCRIPT_V02_PROMPT
-            )
+            system = {
+                "0.1": QUESTIONER_GRAPHSCRIPT_PROMPT,
+                "0.2": QUESTIONER_GRAPHSCRIPT_V02_PROMPT,
+                "0.3": QUESTIONER_GRAPHSCRIPT_V03_PROMPT,
+            }[graphscript_version]
     elif role == "solver":
         if interaction_mode == "tool":
             system = SOLVER_SYSTEM_PROMPT
         else:
-            system = (
-                SOLVER_GRAPHSCRIPT_PROMPT
-                if graphscript_version == "0.1"
-                else SOLVER_GRAPHSCRIPT_V02_PROMPT
-            )
+            system = {
+                "0.1": SOLVER_GRAPHSCRIPT_PROMPT,
+                "0.2": SOLVER_GRAPHSCRIPT_V02_PROMPT,
+                "0.3": SOLVER_GRAPHSCRIPT_V03_PROMPT,
+            }[graphscript_version]
     else:
         raise ValueError(f"unknown role: {role}")
     if interaction_mode == "graphscript" and graphscript_version == "0.2":
         system += GRAPHSCRIPT_V02_GRAMMAR
+    if interaction_mode == "graphscript" and graphscript_version == "0.3":
+        system += GRAPHSCRIPT_V03_GRAMMAR
     content = payload + relation_catalog_text(relation_catalog)
     return [{"role": "system", "content": system}, {"role": "user", "content": content}]

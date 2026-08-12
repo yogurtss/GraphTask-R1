@@ -9,16 +9,21 @@ from graphtask_r1.schema import (
     Count,
     Entity,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     Triple,
     Union,
+    Verify,
 )
 
 
@@ -30,18 +35,26 @@ class ProgramIntervention:
 
 def atomic_interventions(program: Program) -> list[ProgramIntervention]:
     results: list[ProgramIntervention] = []
-    if isinstance(program, FilterType | FilterLiteral | Hop):
+    if isinstance(program, FilterType | FilterLiteral | FilterQualifier | Hop):
         results.append(ProgramIntervention(f"bypass_{program.op}", program.input))
         for child in atomic_interventions(program.input):
             results.append(
                 ProgramIntervention(child.code, program.model_copy(update={"input": child.program}))
             )
-    elif isinstance(program, Count | QueryAttribute | SelectAmong):
+    elif isinstance(
+        program,
+        Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         for child in atomic_interventions(program.input):
             results.append(
                 ProgramIntervention(child.code, program.model_copy(update={"input": child.program}))
             )
-    elif isinstance(program, QueryRelation):
+    elif isinstance(program, QueryRelation | QueryRelationQualifier):
         for field in ("subject", "object"):
             branch = getattr(program, field)
             for child in atomic_interventions(branch):

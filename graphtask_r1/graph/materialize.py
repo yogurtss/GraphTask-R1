@@ -8,17 +8,22 @@ from graphtask_r1.schema import (
     Entity,
     EntityInfo,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     GraphSlice,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     Triple,
     Union,
+    Verify,
 )
 
 if TYPE_CHECKING:
@@ -102,10 +107,20 @@ def materialize_program(
                 edges = edges[:remaining]
             facts.update(edges)
             return
+        if isinstance(node, FilterQualifier):
+            visit(node.input)
+            nodes.update(backend.execute_program(node).entity_ids())
+            return
         if isinstance(node, Count):
             visit(node.input)
             return
-        if isinstance(node, QueryAttribute | SelectAmong):
+        if isinstance(
+            node,
+            QueryAttribute
+            | QueryAttributeUnderCondition
+            | QueryAttributeQualifier
+            | SelectAmong,
+        ):
             visit(node.input)
             inputs = backend.execute_program(node.input).entity_ids()
             nodes.update(inputs)
@@ -122,7 +137,7 @@ def materialize_program(
                 edges = edges[:remaining]
             facts.update(edges)
             return
-        if isinstance(node, QueryRelation):
+        if isinstance(node, QueryRelation | QueryRelationQualifier):
             visit(node.subject)
             visit(node.object)
             subjects = backend.execute_program(node.subject).entity_ids()
@@ -130,9 +145,11 @@ def materialize_program(
             nodes.update(subjects)
             nodes.update(objects)
             remaining = max_edges - len(facts)
+            relation_ids = [node.relation] if isinstance(node, QueryRelationQualifier) else None
             edges = backend.neighbors(
                 subjects,
                 direction="out",
+                relation_ids=relation_ids,
                 limit=max(0, remaining + 1),
             )
             selected = [edge for edge in edges if edge.object in objects]
@@ -140,6 +157,9 @@ def materialize_program(
                 truncated = True
                 selected = selected[:remaining]
             facts.update(selected)
+            return
+        if isinstance(node, Verify):
+            visit(node.input)
             return
         if isinstance(node, SelectBetween):
             visit(node.left)

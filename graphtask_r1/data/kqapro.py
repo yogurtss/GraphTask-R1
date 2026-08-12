@@ -18,13 +18,17 @@ from graphtask_r1.schema import (
     Count,
     Entity,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
     LiteralValue,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     TaskCertificate,
@@ -32,6 +36,7 @@ from graphtask_r1.schema import (
     Triple,
     Union,
     VerificationSummary,
+    Verify,
 )
 from graphtask_r1.utils import (
     ProgressLogger,
@@ -46,21 +51,9 @@ from graphtask_r1.utils import (
 )
 from graphtask_r1.verification import verify_task
 
-GRAPH_CONVERTER_VERSION = "kqapro-core-v2"
-TASK_CONVERTER_VERSION = "kqapro-core-v4"
-UNSUPPORTED_KOPL = {
-    "QFilterStr",
-    "QFilterNum",
-    "QFilterYear",
-    "QFilterDate",
-    "QueryAttrUnderCondition",
-    "VerifyStr",
-    "VerifyNum",
-    "VerifyYear",
-    "VerifyDate",
-    "QueryAttrQualifier",
-    "QueryRelationQualifier",
-}
+GRAPH_CONVERTER_VERSION = "kqapro-qualified-facts-v3"
+TASK_CONVERTER_VERSION = "kqapro-complete-kopl-v5"
+UNSUPPORTED_KOPL: set[str] = set()
 
 
 class KoPLConversionError(ValueError):
@@ -105,12 +98,19 @@ def build_kqapro_database(
             PRIMARY KEY(subject, relation, object));
         CREATE TABLE attributes(entity_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
             datatype TEXT NOT NULL, unit TEXT, PRIMARY KEY(entity_id, key, value, datatype, unit));
+        CREATE TABLE facts(fact_id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL,
+            predicate TEXT NOT NULL, object_entity TEXT, value TEXT, datatype TEXT, unit TEXT);
+        CREATE TABLE qualifiers(fact_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+            datatype TEXT NOT NULL, unit TEXT);
         CREATE TABLE relation_labels(relation_id TEXT PRIMARY KEY, label TEXT NOT NULL);
         CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE INDEX idx_triples_subject_relation ON triples(subject, relation);
         CREATE INDEX idx_triples_object_relation ON triples(object, relation);
         CREATE INDEX idx_types_type_entity ON entity_types(type_id, entity_id);
         CREATE INDEX idx_attributes_entity_key ON attributes(entity_id, key);
+        CREATE INDEX idx_facts_relation ON facts(kind, subject, predicate, object_entity);
+        CREATE INDEX idx_facts_attribute ON facts(kind, subject, predicate, value);
+        CREATE INDEX idx_qualifiers_fact_key ON qualifiers(fact_id, key);
         """
     )
     progress = ProgressLogger(
@@ -144,7 +144,7 @@ def build_kqapro_database(
             connection.execute(
                 "INSERT OR IGNORE INTO entity_types VALUES (?, ?)", (entity_id, type_id)
             )
-        for relation in info.get("relations", []):
+        for relation_index, relation in enumerate(info.get("relations", [])):
             predicate = str(relation["predicate"])
             relation_ids.add(predicate)
             if relation.get("direction") == "backward":
@@ -155,7 +155,13 @@ def build_kqapro_database(
                 "INSERT OR IGNORE INTO triples VALUES (?, ?, ?)",
                 (subject, predicate, object_id),
             )
-        for attribute in info.get("attributes", []):
+            fact_id = f"relation:{entity_id}:{relation_index}"
+            connection.execute(
+                "INSERT INTO facts VALUES (?, 'relation', ?, ?, ?, NULL, NULL, NULL)",
+                (fact_id, subject, predicate, object_id),
+            )
+            _insert_qualifiers(connection, fact_id, relation.get("qualifiers", {}), relation_ids)
+        for attribute_index, attribute in enumerate(info.get("attributes", [])):
             key = str(attribute["key"])
             relation_ids.add(key)
             raw_value = attribute["value"]
@@ -169,17 +175,27 @@ def build_kqapro_database(
             connection.execute(
                 "INSERT OR IGNORE INTO triples VALUES (?, ?, ?)", (entity_id, key, value)
             )
+            fact_id = f"attribute:{entity_id}:{attribute_index}"
+            connection.execute(
+                "INSERT INTO facts VALUES (?, 'attribute', ?, ?, NULL, ?, ?, ?)",
+                (fact_id, entity_id, key, value, datatype, unit),
+            )
+            _insert_qualifiers(connection, fact_id, attribute.get("qualifiers", {}), relation_ids)
         completed += 1
         progress.update(completed, stage="entities", relations=len(relation_ids))
     connection.executemany(
         "INSERT INTO relation_labels VALUES (?, ?)", ((value, value) for value in relation_ids)
     )
+    fact_count = int(connection.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
+    qualifier_count = int(connection.execute("SELECT COUNT(*) FROM qualifiers").fetchone()[0])
     metadata = {
         "snapshot_id": "kqapro-v1",
         "converter_version": GRAPH_CONVERTER_VERSION,
         "source_hash": source_hash if source_hash is not None else file_hash(kb_path),
         "entities": len(entities),
         "concepts": len(concepts),
+        "facts": fact_count,
+        "qualifiers": qualifier_count,
     }
     connection.executemany(
         "INSERT INTO metadata VALUES (?, ?)",
@@ -191,6 +207,28 @@ def build_kqapro_database(
     temporary.replace(output_path)
     progress.finish(completed, relations=len(relation_ids), output=str(output_path))
     return metadata
+
+
+def _insert_qualifiers(
+    connection: sqlite3.Connection,
+    fact_id: str,
+    qualifiers: dict[str, list[dict[str, Any]]],
+    relation_ids: set[str],
+) -> None:
+    for key, raw_values in qualifiers.items():
+        qualifier = str(key)
+        relation_ids.add(qualifier)
+        for raw_value in raw_values:
+            connection.execute(
+                "INSERT INTO qualifiers VALUES (?, ?, ?, ?, ?)",
+                (
+                    fact_id,
+                    qualifier,
+                    str(raw_value["value"]),
+                    str(raw_value["type"]),
+                    raw_value.get("unit"),
+                ),
+            )
 
 
 def _existing_kqapro_database_metadata(database_path: Path) -> dict[str, Any] | None:
@@ -292,14 +330,66 @@ class KoPLMapper:
                     comparator=comparator,
                     value=LiteralValue(value=value, datatype=datatype, unit=unit),
                 )
+            elif function in {"QFilterStr", "QFilterNum", "QFilterYear", "QFilterDate"}:
+                datatype = cast(
+                    Literal["string", "quantity", "year", "date", "number"],
+                    {
+                        "QFilterStr": "string",
+                        "QFilterNum": "quantity",
+                        "QFilterYear": "year",
+                        "QFilterDate": "date",
+                    }[function],
+                )
+                output = FilterQualifier(
+                    input=args[0],
+                    qualifier=inputs[0],
+                    comparator="eq" if function == "QFilterStr" else _comparator(inputs[2]),
+                    value=_kopl_literal(inputs[1], datatype=datatype),
+                )
             elif function == "Count":
                 output = Count(input=args[0])
             elif function == "What":
                 output = args[0]
             elif function == "QueryAttr":
                 output = QueryAttribute(input=args[0], attribute=inputs[0])
+            elif function == "QueryAttrUnderCondition":
+                output = QueryAttributeUnderCondition(
+                    input=args[0],
+                    attribute=inputs[0],
+                    qualifier=inputs[1],
+                    qualifier_value=_kopl_literal(inputs[2]),
+                )
+            elif function == "QueryAttrQualifier":
+                output = QueryAttributeQualifier(
+                    input=args[0],
+                    attribute=inputs[0],
+                    attribute_value=_kopl_literal(inputs[1]),
+                    qualifier=inputs[2],
+                )
             elif function == "QueryRelation":
                 output = QueryRelation(subject=args[0], object=args[1])
+            elif function == "QueryRelationQualifier":
+                output = QueryRelationQualifier(
+                    subject=args[0],
+                    object=args[1],
+                    relation=inputs[0],
+                    qualifier=inputs[1],
+                )
+            elif function in {"VerifyStr", "VerifyNum", "VerifyYear", "VerifyDate"}:
+                datatype = cast(
+                    Literal["string", "quantity", "year", "date", "number"],
+                    {
+                        "VerifyStr": "string",
+                        "VerifyNum": "quantity",
+                        "VerifyYear": "year",
+                        "VerifyDate": "date",
+                    }[function],
+                )
+                output = Verify(
+                    input=args[0],
+                    comparator="eq" if function == "VerifyStr" else _comparator(inputs[1]),
+                    value=_kopl_literal(inputs[0], datatype=datatype),
+                )
             elif function == "SelectBetween":
                 output = SelectBetween(
                     left=args[0],
@@ -330,6 +420,30 @@ def _comparator(
     return cast(Literal["eq", "ne", "lt", "le", "gt", "ge", "contains"], mapping[value])
 
 
+def _kopl_literal(
+    raw_value: str,
+    *,
+    datatype: str | None = None,
+) -> LiteralValue:
+    inferred = datatype
+    value: str | int | float = raw_value
+    unit: str | None = None
+    if inferred is None:
+        inferred = "string"
+    elif inferred in {"quantity", "number"}:
+        parts = raw_value.split(maxsplit=1)
+        try:
+            number = float(parts[0])
+            value = int(number) if number.is_integer() else number
+        except ValueError:
+            value = parts[0]
+        unit = parts[1] if len(parts) == 2 else None
+    elif inferred == "year":
+        with suppress(ValueError):
+            value = int(raw_value)
+    return LiteralValue(value=value, datatype=cast(Any, inferred), unit=unit)
+
+
 def _topic_ids(program: Program) -> tuple[str, ...]:
     if isinstance(program, Entity):
         return (program.entity_id,)
@@ -337,9 +451,21 @@ def _topic_ids(program: Program) -> tuple[str, ...]:
         return ()
     if isinstance(program, Intersect | Union):
         return tuple(sorted({value for branch in program.inputs for value in _topic_ids(branch)}))
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+    if isinstance(
+        program,
+        Hop
+        | FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         return _topic_ids(program.input)
-    if isinstance(program, QueryRelation):
+    if isinstance(program, QueryRelation | QueryRelationQualifier):
         return tuple(sorted({*_topic_ids(program.subject), *_topic_ids(program.object)}))
     if isinstance(program, SelectBetween):
         return tuple(sorted({*_topic_ids(program.left), *_topic_ids(program.right)}))

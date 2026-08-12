@@ -206,7 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--opponent-url")
     export.add_argument("--opponent-samples", type=int, default=8)
     export.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
-    export.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.1")
+    export.add_argument(
+        "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.1"
+    )
     export.add_argument("--relation-catalog", type=Path)
     _add_common(export)
 
@@ -215,7 +217,9 @@ def build_parser() -> argparse.ArgumentParser:
     export_sft.add_argument("--output", type=Path, required=True)
     export_sft.add_argument("--roles", choices=["both", "questioner", "solver"], default="both")
     export_sft.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
-    export_sft.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.1")
+    export_sft.add_argument(
+        "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.1"
+    )
     export_sft.add_argument("--relation-catalog", type=Path)
     _add_common(export_sft)
 
@@ -229,6 +233,9 @@ def build_parser() -> argparse.ArgumentParser:
     seeds.add_argument("--opponent-samples", type=int, default=8)
     seeds.add_argument("--seed", type=int, default=42)
     seeds.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
+    seeds.add_argument(
+        "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.3"
+    )
     seeds.add_argument("--relation-catalog", type=Path)
 
     select_interaction = data_actions.add_parser("select-interaction-tasks")
@@ -285,7 +292,9 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--snapshot", default="freebase-v1")
     benchmark.add_argument("--samples", type=int, default=1)
     benchmark.add_argument("--concurrency", type=int, default=16)
-    benchmark.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.2")
+    benchmark.add_argument(
+        "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.2"
+    )
     return parser
 
 
@@ -537,6 +546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             opponent_url=args.opponent_url,
             opponent_samples=args.opponent_samples,
             interaction_mode=args.interaction_mode,
+            graphscript_version=args.graphscript_version,
             relation_catalog=load_relation_catalog(args.relation_catalog),
         )
     elif args.group == "data" and args.action == "select-interaction-tasks":

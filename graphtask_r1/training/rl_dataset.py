@@ -57,7 +57,11 @@ def export_role_dataset(
                 raise ValueError(
                     f"GraphScript RL export requires a relation catalog for {graph_snapshot}"
                 )
-            if program_profile in {"graphscript_v0_1", "graphscript_v0_2"}:
+            if program_profile in {
+                "graphscript_v0_1",
+                "graphscript_v0_2",
+                "graphscript_v0_3",
+            }:
                 if program_profile == "graphscript_v0_1" and not task_catalog:
                     raise ValueError(
                         f"comparison RL export requires a relation catalog for {graph_snapshot}"

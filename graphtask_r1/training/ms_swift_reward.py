@@ -41,7 +41,7 @@ async def compute_score(
             if interaction_mode == "graphscript":
                 topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
                 raw_version = str(info.get("graphscript_version", "0.1"))
-                if raw_version not in {"0.1", "0.2"}:
+                if raw_version not in {"0.1", "0.2", "0.3"}:
                     raise GraphScriptError(
                         "UNSUPPORTED_VERSION", f"unsupported version: {raw_version}"
                     )
@@ -181,7 +181,7 @@ async def compute_score(
             if interaction_mode == "graphscript":
                 topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
                 raw_version = str(info.get("graphscript_version", "0.1"))
-                if raw_version not in {"0.1", "0.2"}:
+                if raw_version not in {"0.1", "0.2", "0.3"}:
                     raise GraphScriptError(
                         "UNSUPPORTED_VERSION", f"unsupported version: {raw_version}"
                     )

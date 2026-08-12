@@ -290,9 +290,7 @@ class FrozenSolverService:
                 for value in allowed_relations
             )
         topic_ids = [entity.entity_id for entity in task.topic_entities]
-        effective_version = graphscript_version or (
-            "0.2" if not topic_ids else self.graphscript_version
-        )
+        effective_version = graphscript_version or self.graphscript_version
         payload = f"Question: {task.question}"
         if effective_version == "0.1":
             payload += f"\nTopic entities: {', '.join(topic_ids)}"
@@ -453,7 +451,7 @@ class FrozenSolverService:
             raise ValueError(f"unsupported interaction mode: {raw_mode}")
         mode = cast(InteractionMode, raw_mode)
         raw_version = str(payload.get("graphscript_version", self.graphscript_version))
-        if raw_version not in {"0.1", "0.2"}:
+        if raw_version not in {"0.1", "0.2", "0.3"}:
             raise ValueError(f"unsupported GraphScript version: {raw_version}")
         graphscript_version = cast(GraphScriptVersion, raw_version)
         allowed_relations = tuple(str(value) for value in payload.get("allowed_relations", []))
@@ -522,7 +520,7 @@ class FrozenSolverService:
         raw_version = str(payload.get("graphscript_version", self.graphscript_version))
         if not example.topic_entity_ids and raw_version == "0.1":
             raw_version = "0.2"
-        if raw_version not in {"0.1", "0.2"}:
+        if raw_version not in {"0.1", "0.2", "0.3"}:
             raise ValueError(f"unsupported GraphScript version: {raw_version}")
         graphscript_version = cast(GraphScriptVersion, raw_version)
         results = await asyncio.gather(
@@ -584,7 +582,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--max-turns", type=int, default=8)
     parser.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
-    parser.add_argument("--graphscript-version", choices=["0.1", "0.2"], default="0.1")
+    parser.add_argument("--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.1")
     parser.add_argument("--relation-catalog", type=Path)
     parser.add_argument("--max-follow-limit", type=int, default=100)
     parser.add_argument("--max-edge-visits", type=int)

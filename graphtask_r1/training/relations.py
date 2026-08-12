@@ -8,18 +8,23 @@ from graphtask_r1.graph import GraphBackend
 from graphtask_r1.schema import (
     Count,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     RelationInfo,
     SelectAmong,
     SelectBetween,
     TaskCertificate,
     TaskTrainingRecord,
     Union,
+    Verify,
 )
 from graphtask_r1.utils import ProgressLogger, write_json
 
@@ -29,17 +34,29 @@ def program_relations(program: Program) -> frozenset[str]:
         return program_relations(program.input) | {program.relation}
     if isinstance(program, FilterLiteral):
         return program_relations(program.input) | {program.relation}
+    if isinstance(program, FilterQualifier):
+        return program_relations(program.input) | {program.qualifier}
     if isinstance(program, QueryAttribute | SelectAmong):
         return program_relations(program.input) | {program.attribute}
+    if isinstance(program, QueryAttributeUnderCondition):
+        return program_relations(program.input) | {program.attribute, program.qualifier}
+    if isinstance(program, QueryAttributeQualifier):
+        return program_relations(program.input) | {program.attribute, program.qualifier}
     if isinstance(program, QueryRelation):
         return program_relations(program.subject) | program_relations(program.object)
+    if isinstance(program, QueryRelationQualifier):
+        return (
+            program_relations(program.subject)
+            | program_relations(program.object)
+            | {program.relation, program.qualifier}
+        )
     if isinstance(program, SelectBetween):
         return (
             program_relations(program.left) | program_relations(program.right) | {program.attribute}
         )
     if isinstance(program, Intersect | Union):
         return frozenset().union(*(program_relations(branch) for branch in program.inputs))
-    if isinstance(program, FilterType | Count):
+    if isinstance(program, FilterType | Count | Verify):
         return program_relations(program.input)
     return frozenset()
 

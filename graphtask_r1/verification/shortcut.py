@@ -11,15 +11,20 @@ from graphtask_r1.schema import (
     Count,
     Entity,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     Intersect,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     SelectBetween,
     Union,
+    Verify,
 )
 
 HopDirection = Literal["out", "in"]
@@ -40,9 +45,21 @@ def topic_entities(program: Program) -> tuple[str, ...]:
         return tuple(
             sorted({entity for branch in program.inputs for entity in topic_entities(branch)})
         )
-    if isinstance(program, Hop | FilterType | FilterLiteral | Count | QueryAttribute | SelectAmong):
+    if isinstance(
+        program,
+        Hop
+        | FilterType
+        | FilterLiteral
+        | FilterQualifier
+        | Count
+        | QueryAttribute
+        | QueryAttributeUnderCondition
+        | QueryAttributeQualifier
+        | Verify
+        | SelectAmong,
+    ):
         return topic_entities(program.input)
-    if isinstance(program, QueryRelation):
+    if isinstance(program, QueryRelation | QueryRelationQualifier):
         return tuple(sorted({*topic_entities(program.subject), *topic_entities(program.object)}))
     if isinstance(program, SelectBetween):
         return tuple(sorted({*topic_entities(program.left), *topic_entities(program.right)}))

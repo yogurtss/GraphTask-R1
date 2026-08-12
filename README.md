@@ -1,6 +1,6 @@
 # GraphTask-R1
 
-GraphTask-R1 训练模型把自然语言问题编译为可执行的 `GraphScript v0.2`，再由受限执行器产生
+GraphTask-R1 训练模型把自然语言问题编译为可执行程序，再由受限执行器产生
 答案。主线训练运行时统一为 **ms-swift 3.6.4**；仓库不再维护第二套训练后端、数据字段或启动
 脚本。
 
@@ -8,15 +8,18 @@ GraphTask-R1 训练模型把自然语言问题编译为可执行的 `GraphScript
 
 | 阶段 | 数据 | 输出 | 目的 |
 | --- | --- | --- | --- |
-| SFT | KQAPro train/val | GraphScript v0.2 | 建立 question-to-code 能力 |
-| GRPO / self-play | KILT train | GraphScript v0.2 | 优化可解析、可执行和答案 reward |
-| 最终验证 | HotpotQA、TriviaQA、NaturalQuestions | 执行结果 | 测量开放域迁移能力 |
+| SFT | KQAPro train | GraphScript v0.3 | 建立完整 KoPL-to-code 能力 |
+| GRPO / self-play | KQAPro train | GraphScript v0.3 | 提高 Questioner 与 Solver 的推理能力 |
+| 模型选择 | KQAPro val | 执行结果 | 只用于评测与 checkpoint 选择 |
 
-三个阶段使用同一个 GraphScript schema、算子表、执行器和答案归一化逻辑。最终验证集只读，不能
-进入 relation catalog、seed pool、reward 调参或 self-play archive。KILT 也可以同时用于 SFT 与
-GRPO；这样可作为去掉 KQAPro domain gap 的对照实验，但默认配置保留 KQAPro 冷启动。
+KQAPro 三个阶段使用同一个 v0.3 算子表与执行器；`val` 的 question、program 和 answer 只读，
+不能进入训练数据、reward 或 self-play archive。Questioner 仍可从共享 KQAPro 图采样任意实体，
+包括恰好也出现在 val 中的实体。KILT/OpenQA 保留为独立的 v0.2 passage-search 路线，暂不混入
+KQAPro 的 SFT、GRPO、relation catalog 或 checkpoint。
 
-完整数据边界和算子表见 [Code-first 数据契约](docs/CODE_SELF_PLAY_DATA_CONTRACT.md)。
+从原始数据到 SFT、GRPO、self-play 与 val 选模的命令见
+[KQAPro 训练流程](docs/KQAPRO_TRAINING.md)。完整数据边界和算子表见
+[Code-first 数据契约](docs/CODE_SELF_PLAY_DATA_CONTRACT.md)。
 
 ## 目录约定
 
@@ -80,15 +83,14 @@ done
 python -m graphtask_r1.cli data build-relation-catalog \
   --input \
     data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-    data/processed/kqapro/kqapro-v1/val/training_tasks.parquet \
   --scope graph \
   --output data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 for split in train val; do
   python -m graphtask_r1.cli data export-sft \
     --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v02_sft_$split.parquet \
-    --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
+    --output data/training/kqapro_graphscript_v03_sft_$split.parquet \
+    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
     --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 done
 ```
@@ -100,7 +102,7 @@ done
 
 ```bash
 python scripts/preflight_ms_swift_sft.py \
-  --input data/training/kqapro_graphscript_v02_sft_train.parquet \
+  --input data/training/kqapro_graphscript_v03_sft_train.parquet \
   --accepted-output outputs/preflight/accepted.parquet \
   --rejected-output outputs/preflight/rejected.parquet \
   --summary-output outputs/preflight/summary.json \
@@ -111,13 +113,13 @@ python scripts/preflight_ms_swift_sft.py \
 
 ```bash
 export SFT_TRAIN_DATA=$PWD/outputs/preflight/accepted.parquet
-export SFT_VAL_DATA=$PWD/data/training/kqapro_graphscript_v02_sft_val.parquet
+export SFT_VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_sft_val.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b
 
 python -m graphtask_r1.cli train sft \
   --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml --dry-run
 ```
 
-KILT GRPO、frozen-opponent self-play 和验证命令见 [训练手册](docs/TRAINING.md)。完整原始数据准备
+KQAPro GRPO、frozen-opponent self-play 和 val 验证命令见 [训练手册](docs/TRAINING.md)。完整原始数据准备
 见 [数据准备](docs/DATA_PREPARATION.md)，GraphScript 与显式工具模式的边界见
 [交互模式](docs/INTERACTION_MODES.md)。

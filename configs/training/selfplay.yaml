@@ -4,7 +4,7 @@ initial_adapter: ${INITIAL_ADAPTER}
 base_tasks: ${BASE_TASKS}
 val_data: ${VAL_DATA}
 questioner_seeds: ${QUESTIONER_SEEDS}
-graph_snapshot: kilt-2019-08-01-v1
+graph_snapshot: kqapro-v1
 rounds: 3
 solver_episodes: 256
 opponent_samples: 8
@@ -19,13 +19,12 @@ opponent_port: 18080
 train_script: scripts/train_ms_swift_grpo.sh
 sglang_start_timeout_s: 300
 interaction_mode: graphscript
-graphscript_version: "0.2"
-relation_catalog: ${KILT_RELATION_CATALOG}
+graphscript_version: "0.3"
+relation_catalog: ${KQAPRO_RELATION_CATALOG}
 relation_catalogs:
   kqapro-v1: ${KQAPRO_RELATION_CATALOG}
-  kilt-2019-08-01-v1: ${KILT_RELATION_CATALOG}
 max_follow_limit: 100
 max_edge_visits: 200
 max_returned_entities: 1000
 max_completion_tokens: 32768
-program_profile: graphscript_v0_2
+program_profile: graphscript_v0_3

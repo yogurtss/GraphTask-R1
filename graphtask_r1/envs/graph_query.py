@@ -11,14 +11,19 @@ from graphtask_r1.schema import (
     Entity,
     EntityInfo,
     FilterLiteral,
+    FilterQualifier,
     FilterType,
     Hop,
     LiteralValue,
     Program,
     QueryAttribute,
+    QueryAttributeQualifier,
+    QueryAttributeUnderCondition,
     QueryRelation,
+    QueryRelationQualifier,
     SelectAmong,
     Union,
+    Verify,
 )
 
 MAX_COMPACT_QUERY_STEPS = 32
@@ -80,6 +85,15 @@ class FilterLiteralQueryStep(BaseModel):
     value: LiteralValue
 
 
+class FilterQualifierQueryStep(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    op: Literal["filter_qualifier"] = "filter_qualifier"
+    qualifier: str = Field(min_length=1)
+    comparator: Literal["eq", "ne", "lt", "le", "gt", "ge", "contains"] = "eq"
+    value: LiteralValue
+
+
 class QueryAttributeQueryStep(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -87,11 +101,46 @@ class QueryAttributeQueryStep(BaseModel):
     attribute: str = Field(min_length=1)
 
 
+class QueryAttributeUnderConditionQueryStep(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    op: Literal["query_attribute_under_condition"] = "query_attribute_under_condition"
+    attribute: str = Field(min_length=1)
+    qualifier: str = Field(min_length=1)
+    qualifier_value: LiteralValue
+
+
+class QueryAttributeQualifierQueryStep(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    op: Literal["query_attribute_qualifier"] = "query_attribute_qualifier"
+    attribute: str = Field(min_length=1)
+    attribute_value: LiteralValue
+    qualifier: str = Field(min_length=1)
+
+
 class QueryRelationQueryStep(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     op: Literal["query_relation"] = "query_relation"
     object_entity_ids: tuple[str, ...] = Field(min_length=1, max_length=MAX_COMPACT_QUERY_ENTITIES)
+
+
+class QueryRelationQualifierQueryStep(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    op: Literal["query_relation_qualifier"] = "query_relation_qualifier"
+    object_entity_ids: tuple[str, ...] = Field(min_length=1, max_length=MAX_COMPACT_QUERY_ENTITIES)
+    relation: str = Field(min_length=1)
+    qualifier: str = Field(min_length=1)
+
+
+class VerifyQueryStep(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    op: Literal["verify"] = "verify"
+    comparator: Literal["eq", "ne", "lt", "le", "gt", "ge", "contains"] = "eq"
+    value: LiteralValue
 
 
 class SelectAttributeQueryStep(BaseModel):
@@ -106,8 +155,13 @@ QueryStep = Annotated[
     HopQueryStep
     | FilterTypeQueryStep
     | FilterLiteralQueryStep
+    | FilterQualifierQueryStep
     | QueryAttributeQueryStep
+    | QueryAttributeUnderConditionQueryStep
+    | QueryAttributeQualifierQueryStep
     | QueryRelationQueryStep
+    | QueryRelationQualifierQueryStep
+    | VerifyQueryStep
     | SelectAttributeQueryStep,
     Field(discriminator="op"),
 ]
@@ -133,12 +187,24 @@ class CompactGraphQuery(BaseModel):
             for index, step in enumerate(self.steps)
             if isinstance(
                 step,
-                QueryAttributeQueryStep | QueryRelationQueryStep | SelectAttributeQueryStep,
+                QueryAttributeQueryStep
+                | QueryAttributeUnderConditionQueryStep
+                | QueryAttributeQualifierQueryStep
+                | QueryRelationQueryStep
+                | QueryRelationQualifierQueryStep
+                | SelectAttributeQueryStep,
             )
         )
-        if terminal and terminal != (len(self.steps) - 1,):
+        verify = tuple(
+            index for index, step in enumerate(self.steps) if isinstance(step, VerifyQueryStep)
+        )
+        valid_terminal = (len(self.steps) - 1,)
+        valid_verified = (len(self.steps) - 2,) if verify == (len(self.steps) - 1,) else ()
+        if terminal and terminal not in {valid_terminal, valid_verified}:
             raise ValueError("query/select steps must appear exactly once and be terminal")
-        if self.return_count and terminal:
+        if verify and (verify != (len(self.steps) - 1,) or terminal != valid_verified):
+            raise ValueError("verify must follow one literal query as the terminal step")
+        if self.return_count and (terminal or verify):
             raise ValueError("return_count cannot be combined with a query/select terminal step")
         return self
 
@@ -184,18 +250,50 @@ def compact_query_to_program(query: CompactGraphQuery) -> Program:
                 comparator=step.comparator,
                 value=step.value,
             )
+        elif isinstance(step, FilterQualifierQueryStep):
+            program = FilterQualifier(
+                input=program,
+                qualifier=step.qualifier,
+                comparator=step.comparator,
+                value=step.value,
+            )
         elif isinstance(step, QueryAttributeQueryStep):
             program = QueryAttribute(input=program, attribute=step.attribute)
+        elif isinstance(step, QueryAttributeUnderConditionQueryStep):
+            program = QueryAttributeUnderCondition(
+                input=program,
+                attribute=step.attribute,
+                qualifier=step.qualifier,
+                qualifier_value=step.qualifier_value,
+            )
+        elif isinstance(step, QueryAttributeQualifierQueryStep):
+            program = QueryAttributeQualifier(
+                input=program,
+                attribute=step.attribute,
+                attribute_value=step.attribute_value,
+                qualifier=step.qualifier,
+            )
         elif isinstance(step, QueryRelationQueryStep):
             objects = tuple(Entity(entity_id=value) for value in step.object_entity_ids)
             object_program: Program = objects[0] if len(objects) == 1 else Union(inputs=objects)
             program = QueryRelation(subject=program, object=object_program)
+        elif isinstance(step, QueryRelationQualifierQueryStep):
+            objects = tuple(Entity(entity_id=value) for value in step.object_entity_ids)
+            object_program = objects[0] if len(objects) == 1 else Union(inputs=objects)
+            program = QueryRelationQualifier(
+                subject=program,
+                object=object_program,
+                relation=step.relation,
+                qualifier=step.qualifier,
+            )
         elif isinstance(step, SelectAttributeQueryStep):
             program = SelectAmong(
                 input=program,
                 attribute=step.attribute,
                 mode=step.mode,
             )
+        elif isinstance(step, VerifyQueryStep):
+            program = Verify(input=program, comparator=step.comparator, value=step.value)
         else:  # pragma: no cover - the discriminated union prevents this
             raise TypeError(type(step).__name__)
     return Count(input=program) if query.return_count else program
