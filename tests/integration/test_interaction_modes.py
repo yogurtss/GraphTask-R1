@@ -246,6 +246,26 @@ def test_interaction_task_selection_and_catalog_are_deterministic(tmp_path: Path
     assert load_relation_catalog(catalog_path) == relations
 
 
+def test_graph_schema_catalog_is_independent_of_task_sample(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "graph_relations.json"
+
+    relations = build_relation_catalog(
+        [_task()],
+        toy_graph(),
+        catalog_path,
+        include_graph_schema=True,
+    )
+
+    assert {relation.relation_id for relation in relations} == {
+        "age",
+        "country",
+        "friend",
+        "friend_of_friend",
+        "located_in",
+        "works_at",
+    }
+
+
 def test_selfplay_defaults_use_unified_graphscript_profile() -> None:
     config = SelfPlayConfig.model_validate(
         {

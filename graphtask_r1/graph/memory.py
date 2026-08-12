@@ -267,6 +267,12 @@ class InMemoryGraphBackend:
             relation_id, RelationInfo(relation_id=relation_id, label=relation_id.replace("_", " "))
         )
 
+    def all_relation_infos(self) -> tuple[RelationInfo, ...]:
+        relation_ids = sorted(
+            {*self._relations, *(triple.relation for triple in self._triples)}
+        )
+        return tuple(self.relation_info(relation_id) for relation_id in relation_ids)
+
     def extract_witness(self, program: Program, answers: AnswerSet) -> list[Witness]:
         facts = self._program_facts(program)
         return [Witness(answer=str(answer.value), facts=facts) for answer in answers.answers]

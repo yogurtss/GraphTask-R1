@@ -643,6 +643,16 @@ class SQLiteGraphBackend:
             self._relation_info_cache[relation_id] = result
         return result
 
+    def all_relation_infos(self) -> tuple[RelationInfo, ...]:
+        """Return the complete relation/attribute schema stored in this snapshot."""
+        rows = self.connection.execute(
+            "SELECT relation_id, label FROM relation_labels ORDER BY relation_id"
+        ).fetchall()
+        return tuple(
+            RelationInfo(relation_id=str(relation_id), label=str(label))
+            for relation_id, label in rows
+        )
+
     def search_text(
         self,
         query: str,

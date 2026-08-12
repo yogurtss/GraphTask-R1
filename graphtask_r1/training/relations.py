@@ -64,6 +64,7 @@ def build_relation_catalog(
     output_path: Path,
     *,
     total: int | None = None,
+    include_graph_schema: bool = False,
 ) -> tuple[RelationInfo, ...]:
     if total is None and isinstance(tasks, Sized):
         total = len(tasks)
@@ -75,16 +76,36 @@ def build_relation_catalog(
         relation_ids_set.update(program_relations(task.program))
         scan.update(task_count, relations=len(relation_ids_set))
     scan.finish(task_count, relations=len(relation_ids_set))
-    relation_ids = sorted(relation_ids_set)
-    progress = ProgressLogger("data.build_relation_catalog", total=len(relation_ids))
-    progress.start(tasks=task_count)
-    relations_list: list[RelationInfo] = []
-    for index, relation_id in enumerate(relation_ids):
-        relations_list.append(backend.relation_info(relation_id))
+    if include_graph_schema:
+        all_relation_infos = getattr(backend, "all_relation_infos", None)
+        if not callable(all_relation_infos):
+            raise ValueError(
+                "graph-schema relation catalog is unavailable for this graph backend; "
+                "use --scope tasks"
+            )
+        relations = tuple(all_relation_infos())
+        schema_ids = {relation.relation_id for relation in relations}
+        missing_from_graph = sorted(relation_ids_set - schema_ids)
+        if missing_from_graph:
+            raise ValueError(
+                "task programs reference relations absent from the graph schema: "
+                + ", ".join(missing_from_graph)
+            )
+    else:
+        relations = tuple(
+            backend.relation_info(relation_id) for relation_id in sorted(relation_ids_set)
+        )
+    progress = ProgressLogger("data.build_relation_catalog", total=len(relations))
+    progress.start(tasks=task_count, scope="graph" if include_graph_schema else "tasks")
+    for index in range(len(relations)):
         progress.update(index + 1)
-    relations = tuple(relations_list)
     write_json(output_path, [relation.model_dump(mode="json") for relation in relations])
-    progress.finish(len(relation_ids), output=str(output_path))
+    progress.finish(
+        len(relations),
+        output=str(output_path),
+        scope="graph" if include_graph_schema else "tasks",
+        task_relations=len(relation_ids_set),
+    )
     return relations
 
 

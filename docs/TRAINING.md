@@ -8,9 +8,8 @@
 
 开始 GPU 作业前必须满足：
 
-- 快速 `data audit --kind task` 无重复 task ID、损坏的训练关键字段；
-- 旧版包含巨大 witness 的 task 在 audit 时用 `--training-view-output` 转为轻量训练视图，后续不再读原文件；
-- `data prepare` 记录的 canonical trace replay 通过；需要时抽样运行 `data audit --deep`；
+- train/val 均通过一次 `data audit --kind task --deep --training-view-output`；
+- `data prepare` 记录的 canonical trace replay 通过；
 - gold answer 全部由 certified program 执行产生；
 - SFT 使用真实 tokenizer/template 完成长度预检；
 - SFT、GRPO 与评测均记录 `interaction_mode=graphscript`、`graphscript_version=0.2`；

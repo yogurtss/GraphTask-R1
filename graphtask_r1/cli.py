@@ -251,6 +251,12 @@ def build_parser() -> argparse.ArgumentParser:
     catalog.add_argument("--output", type=Path, required=True)
     catalog.add_argument("--snapshot")
     catalog.add_argument("--limit", type=int)
+    catalog.add_argument(
+        "--scope",
+        choices=("graph", "tasks"),
+        default="graph",
+        help="catalog scope; graph is stable across train/val samples (default: graph)",
+    )
     export_archive = data_actions.add_parser("export-archive")
     export_archive.add_argument("--archive", type=Path, required=True)
     export_archive.add_argument("--output", type=Path, required=True)
@@ -579,8 +585,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             backend_from_snapshot(snapshot),
             args.output,
             total=total,
+            include_graph_schema=args.scope == "graph",
         )
-        result = {"relations": len(relations), "output": str(args.output), "snapshot": snapshot}
+        result = {
+            "relations": len(relations),
+            "output": str(args.output),
+            "snapshot": snapshot,
+            "scope": args.scope,
+            "inputs": [str(path) for path in args.input],
+        }
     elif args.group == "data" and args.action == "export-archive":
         if not args.archive.exists():
             raise FileNotFoundError(args.archive)

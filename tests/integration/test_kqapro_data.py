@@ -137,6 +137,10 @@ def test_sqlite_shortcut_primitives_avoid_full_answer_materialization(tmp_path: 
         assert backend.execute_entity_ids(program) == frozenset({"e_bob"})
         assert ("friend", "out") in backend.relation_hops(("e_alice",))
         assert ("friend", "in") in backend.relation_hops(("e_bob",))
+        assert {relation.relation_id for relation in backend.all_relation_infos()} == {
+            "age",
+            "friend",
+        }
     finally:
         backend.close()
 

@@ -64,32 +64,37 @@ make test
 
 ## 最短可执行路径
 
-先审计已有 KQAPro 任务并导出 GraphScript SFT 数据：
+从已生成的 KQAPro task 导出 train/val SFT：
 
 ```bash
 mkdir -p data/training
 
-python -m graphtask_r1.cli data audit \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task \
-  --training-view-output data/processed/kqapro/kqapro-v1/train/training_tasks.parquet
+for split in train val; do
+  python -m graphtask_r1.cli data audit \
+    --input data/processed/kqapro/kqapro-v1/$split/tasks.parquet \
+    --kind task --deep \
+    --training-view-output \
+      data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet
+done
 
 python -m graphtask_r1.cli data build-relation-catalog \
-  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+  --input \
+    data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+    data/processed/kqapro/kqapro-v1/val/training_tasks.parquet \
+  --scope graph \
   --output data/processed/kqapro/kqapro-v1/relation_catalog.json
 
-python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-  --output data/training/kqapro_graphscript_v02_sft_train.parquet \
-  --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
-  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+for split in train val; do
+  python -m graphtask_r1.cli data export-sft \
+    --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
+    --output data/training/kqapro_graphscript_v02_sft_$split.parquet \
+    --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
+    --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+done
 ```
 
-以上数据命令均流式处理。`--training-view-output` 在第一次顺序扫描时移除 SFT 不使用的 inline
-witness；relation catalog 和 SFT 导出复用这个轻量文件，不再反复读取旧版巨大记录。需要完整 witness
-schema 检查时显式添加 `--deep`。新生成的 KQAPro SFT task 默认不内联 causal witness facts，避免旧数据
-中单条任务接近 5 万事实造成的图查询、I/O 和内存放大；gold 和 trace 仍由完整程序执行产生。
-若还要导出 val，请让 `build-relation-catalog --input` 同时接收 train 和 val 的
-`training_tasks.parquet`，保证两个 split 使用同一个 relation allowlist。
+`audit --deep` 同时完成完整证书检查和轻量 training view 生成；程序执行、gold 和 trace replay 已在
+`data prepare` 中完成。graph-scope catalog 固定覆盖该快照的全部 relation。
 
 用训练时的真实模板筛出 32K 内有效样本，不启动训练：
 

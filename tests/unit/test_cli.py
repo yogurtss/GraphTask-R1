@@ -176,6 +176,10 @@ def test_relation_catalog_unions_multiple_task_inputs(tmp_path: Path) -> None:
     )
 
     assert [relation.relation_id for relation in load_relation_catalog(output)] == [
+        "age",
+        "country",
+        "friend",
+        "friend_of_friend",
         "located_in",
         "works_at",
     ]
