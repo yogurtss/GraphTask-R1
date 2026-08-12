@@ -27,6 +27,9 @@ def test_data_prepare_accepts_positive_worker_count() -> None:
     )
     assert args.workers == 3
     assert args.max_witness_facts == 0
+    assert args.train_sample_size == 20_000
+    assert args.trace_mode == "none"
+    assert args.verification_mode == "source"
 
 
 def test_data_audit_accepts_deep_and_training_view_output() -> None:

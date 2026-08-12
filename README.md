@@ -95,8 +95,9 @@ for split in train val; do
 done
 ```
 
-`audit --deep` 同时完成完整证书检查和轻量 training view 生成；程序执行、gold 和 trace replay 已在
-`data prepare` 中完成。graph-scope catalog 固定覆盖该快照的全部 relation。
+`audit --deep` 同时完成完整证书检查和轻量 training view 生成；程序执行和 gold/source 对账已在
+`data prepare` 中完成。canonical trace 只在 bounded diagnostic 中 replay。graph-scope catalog
+固定覆盖该快照的全部 relation。
 
 用训练时的真实模板筛出 32K 内有效样本，不启动训练：
 

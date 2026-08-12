@@ -32,14 +32,14 @@ v0.2 的 `search_passage`/`passage_pages` 只属于 KILT，v0.1 只用于两跳�
 
 ## 数据生成
 
-KQAPro 导入默认把 trace call budget 提高到 32、compact query result budget 提高到 1024；可在
-20K–40K token 环境下继续显式调整：
+KQAPro 正式导入默认从 train 分层抽取 20,000 条、保留完整 val，并跳过不进入 GraphScript SFT
+completion 的 canonical trace：
 
 ```bash
 python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir /mnt/g/datasets/GraphTaskDataset/raw/kqa_pro \
   --output-dir /mnt/g/datasets/GraphTaskDataset/processed/kqapro/kqapro-v1 \
-  --max-trace-tool-calls 32 --max-trace-query-results 1024
+  --train-sample-size 20000 --verification-mode source --trace-mode none
 
 python -m graphtask_r1.cli data export-sft \
   --input /mnt/g/datasets/GraphTaskDataset/processed/kqapro/kqapro-v1/train/tasks.parquet \

@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from graphtask_r1.data.kqapro import KoPLConversionError, KoPLMapper, prepare_kqapro
+from graphtask_r1.data.kqapro import (
+    KoPLConversionError,
+    KoPLMapper,
+    _kopl_stratum,
+    _stratified_kqapro_rows,
+    prepare_kqapro,
+)
 from graphtask_r1.generation import compile_trace
 from graphtask_r1.graph import SQLiteGraphBackend
 from graphtask_r1.graphscript import execute_graphscript, parse_graphscript, program_to_graphscript
@@ -85,7 +91,13 @@ def test_kqapro_prepare_executes_and_replays(
     raw_dir = tmp_path / "raw"
     _write_fixture(raw_dir)
     output_dir = tmp_path / "processed"
-    metrics = prepare_kqapro(raw_dir, output_dir, splits=("train",), seed=7)
+    metrics = prepare_kqapro(
+        raw_dir,
+        output_dir,
+        splits=("train",),
+        seed=7,
+        trace_mode="canonical",
+    )
     assert metrics["accepted"] == 1
     tasks = read_records(output_dir / "train" / "tasks.parquet")
     assert tasks[0]["gold_answers"]["answers"][0]["value"] == "e_bob"
@@ -101,6 +113,68 @@ def test_kqapro_prepare_executes_and_replays(
     assert any('operation="data.prepare.kqapro.build_graph"' in value for value in messages)
     assert any('operation="data.prepare.kqapro.split.train"' in value for value in messages)
     assert any('phase="completed"' in value and "accepted=1" in value for value in messages)
+
+
+def test_kqapro_prepare_omits_expensive_traces_by_default(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+
+    metrics = prepare_kqapro(raw_dir, output_dir, splits=("train",), seed=7)
+
+    assert metrics["splits"]["train"]["accepted"] == 1
+    assert metrics["splits"]["train"]["traces"] == 0
+    assert metrics["splits"]["train"]["acceptance_rate"] == 1.0
+    assert metrics["splits"]["train"]["rejection_reasons"] == {}
+    assert read_records(output_dir / "train" / "traces.parquet") == []
+    task = read_records(output_dir / "train" / "tasks.parquet")[0]
+    assert task["generation"]["trace_mode"] == "none"
+    assert task["generation"]["verification_mode"] == "source"
+
+
+def test_kqapro_train_sampling_is_deterministic_and_covers_strata(tmp_path: Path) -> None:
+    source = tmp_path / "train.json"
+    templates = (
+        [
+            {"function": "Find", "dependencies": [], "inputs": ["Alice"]},
+            {"function": "What", "dependencies": [0], "inputs": []},
+        ],
+        [
+            {"function": "FindAll", "dependencies": [], "inputs": []},
+            {"function": "Count", "dependencies": [0], "inputs": []},
+        ],
+        [
+            {"function": "Find", "dependencies": [], "inputs": ["Alice"]},
+            {"function": "QueryAttr", "dependencies": [0], "inputs": ["age"]},
+        ],
+    )
+    rows = [
+        {
+            "id": f"row-{template_index}-{copy_index}",
+            "question": "placeholder",
+            "program": program,
+            "answer": "placeholder",
+        }
+        for template_index, program in enumerate(templates)
+        for copy_index in range(8)
+    ]
+    source.write_text(json.dumps(rows))
+
+    first, first_metrics = _stratified_kqapro_rows(
+        source, sample_size=9, seed=42, limit=None
+    )
+    second, second_metrics = _stratified_kqapro_rows(
+        source, sample_size=9, seed=42, limit=None
+    )
+
+    assert [index for index, _ in first] == [index for index, _ in second]
+    assert first_metrics == second_metrics
+    assert len(first) == 9
+    assert {_kopl_stratum(row) for _, row in first} == {
+        _kopl_stratum(row) for row in rows
+    }
+    assert first_metrics["source_rows"] == 24
+    assert first_metrics["selected_strata"] == 3
 
 
 def test_kqapro_parallel_output_matches_serial_output(tmp_path: Path) -> None:

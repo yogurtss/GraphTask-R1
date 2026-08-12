@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import heapq
 import json
 import sqlite3
 import threading
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -54,6 +55,7 @@ from graphtask_r1.verification import verify_task
 GRAPH_CONVERTER_VERSION = "kqapro-qualified-facts-v3"
 TASK_CONVERTER_VERSION = "kqapro-complete-kopl-v5"
 UNSUPPORTED_KOPL: set[str] = set()
+KQAPRO_SAMPLER_VERSION = "kopl-stratified-v1"
 
 
 class KoPLConversionError(ValueError):
@@ -478,6 +480,147 @@ def _answer_matches_source(answer: str, derived: AnswerSet, backend: SQLiteGraph
     return answer.strip() in candidates
 
 
+def _kopl_stratum(row: dict[str, Any]) -> str:
+    raw_steps = row.get("program", [])
+    steps = raw_steps if isinstance(raw_steps, list) else []
+    operators = sorted(
+        {
+            str(step.get("function", "UNKNOWN"))
+            for step in steps
+            if isinstance(step, dict)
+        }
+    )
+    terminal = (
+        str(steps[-1].get("function", "UNKNOWN"))
+        if steps and isinstance(steps[-1], dict)
+        else "UNKNOWN"
+    )
+    length = len(steps)
+    length_bucket = (
+        "01-03" if length <= 3 else "04-06" if length <= 6 else "07-10" if length <= 10 else "11+"
+    )
+    return f"terminal={terminal}|steps={length_bucket}|ops={','.join(operators)}"
+
+
+def _allocate_stratified_quotas(
+    counts: Counter[str], sample_size: int
+) -> dict[str, int]:
+    population = sum(counts.values())
+    target = min(sample_size, population)
+    if target <= 0:
+        return {key: 0 for key in counts}
+    keys = sorted(counts)
+    quotas = {key: 0 for key in keys}
+    if target >= len(keys):
+        quotas = {key: 1 for key in keys}
+        remaining = target - len(keys)
+    else:
+        for key in sorted(keys, key=lambda value: (counts[value], value))[:target]:
+            quotas[key] = 1
+        return quotas
+    capacities = {key: counts[key] - quotas[key] for key in keys}
+    while remaining:
+        capacity_total = sum(capacities.values())
+        if capacity_total <= 0:
+            break
+        allocations: list[tuple[float, str, int]] = []
+        assigned = 0
+        for key in keys:
+            ideal = remaining * capacities[key] / capacity_total
+            whole = min(capacities[key], int(ideal))
+            quotas[key] += whole
+            capacities[key] -= whole
+            assigned += whole
+            allocations.append((ideal - whole, key, whole))
+        remaining -= assigned
+        if not remaining:
+            break
+        eligible = sorted(
+            (value for value in allocations if capacities[value[1]] > 0),
+            key=lambda value: (-value[0], value[1]),
+        )
+        if not eligible:
+            break
+        for _, key, _ in eligible[:remaining]:
+            quotas[key] += 1
+            capacities[key] -= 1
+            remaining -= 1
+    return quotas
+
+
+def _stratified_kqapro_rows(
+    source_path: Path,
+    *,
+    sample_size: int,
+    seed: int,
+    limit: int | None,
+) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
+    if sample_size < 1:
+        raise ValueError("train_sample_size must be at least 1")
+    counts: Counter[str] = Counter()
+    source_rows = 0
+    source_operators: set[str] = set()
+    for row in iter_json_array(source_path, limit=limit):
+        counts[_kopl_stratum(row)] += 1
+        source_rows += 1
+        source_operators.update(
+            str(step.get("function", "UNKNOWN"))
+            for step in row.get("program", [])
+            if isinstance(step, dict)
+        )
+    quotas = _allocate_stratified_quotas(counts, sample_size)
+    heaps: dict[str, list[tuple[int, int, dict[str, Any]]]] = defaultdict(list)
+    for index, row in enumerate(iter_json_array(source_path, limit=limit)):
+        stratum = _kopl_stratum(row)
+        quota = quotas[stratum]
+        if not quota:
+            continue
+        priority = int(
+            stable_hash(
+                [
+                    KQAPRO_SAMPLER_VERSION,
+                    str(seed),
+                    str(row.get("id", index)),
+                    str(index),
+                ]
+            ),
+            16,
+        )
+        candidate = (-priority, index, row)
+        heap = heaps[stratum]
+        if len(heap) < quota:
+            heapq.heappush(heap, candidate)
+        elif priority < -heap[0][0]:
+            heapq.heapreplace(heap, candidate)
+    selected = sorted(
+        ((index, row) for heap in heaps.values() for _, index, row in heap),
+        key=lambda value: value[0],
+    )
+    selected_operators = sorted(
+        {
+            str(step.get("function", "UNKNOWN"))
+            for _, row in selected
+            for step in row.get("program", [])
+            if isinstance(step, dict)
+        }
+    )
+    metrics = {
+        "sampler_version": KQAPRO_SAMPLER_VERSION,
+        "seed": seed,
+        "requested": sample_size,
+        "source_rows": source_rows,
+        "selected_rows": len(selected),
+        "source_strata": len(counts),
+        "selected_strata": sum(bool(value) for value in quotas.values()),
+        "source_operators": sorted(source_operators),
+        "selected_operators": selected_operators,
+        "strata": {
+            key: {"source": counts[key], "selected": quotas[key]} for key in sorted(counts)
+        },
+    }
+    return selected, metrics
+
+
 def _convert_kqapro_row_uncached(
     item: tuple[int, dict[str, Any]],
     *,
@@ -490,6 +633,8 @@ def _convert_kqapro_row_uncached(
     max_trace_tool_calls: int,
     max_trace_query_results: int,
     max_witness_facts: int,
+    trace_mode: Literal["none", "canonical"],
+    verification_mode: Literal["source", "full"],
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     index, row = item
     try:
@@ -502,8 +647,12 @@ def _convert_kqapro_row_uncached(
                 "SOURCE_ANSWER_MISMATCH",
                 f"source={row['answer']!r}, derived={answers.values()!r}",
             )
-        verification = verify_task(str(row["question"]), program, backend)
-        if not verification.passed:
+        verification = (
+            verify_task(str(row["question"]), program, backend)
+            if verification_mode == "full"
+            else None
+        )
+        if verification is not None and not verification.passed:
             raise KoPLConversionError(
                 "VERIFICATION_REJECTED", ",".join(verification.rejection_reasons)
             )
@@ -546,10 +695,10 @@ def _convert_kqapro_row_uncached(
             verification=VerificationSummary(
                 executable=True,
                 semantic_equivalent=True,
-                necessity_mean=verification.necessity_mean,
-                necessity_min=verification.necessity_min,
-                shortcut_found=verification.shortcut_found,
-                answer_leak=verification.answer_leak,
+                necessity_mean=verification.necessity_mean if verification is not None else 0.0,
+                necessity_min=verification.necessity_min if verification is not None else 0.0,
+                shortcut_found=verification.shortcut_found if verification is not None else None,
+                answer_leak=verification.answer_leak if verification is not None else False,
             ),
             source_program={"language": "kopl", "steps": row["program"]},
             provenance=TaskProvenance(
@@ -565,20 +714,28 @@ def _convert_kqapro_row_uncached(
                 "max_witness_facts": max_witness_facts,
                 "witness_truncated": witness_truncated,
                 "witness_omitted": witness_omitted,
+                "trace_mode": trace_mode,
+                "verification_mode": verification_mode,
             },
         )
-        trace = compile_trace(
-            task_id,
-            task.question,
-            program,
-            backend,
-            seed=seed + index,
-            max_tool_calls=max_trace_tool_calls,
-            max_query_results=max_trace_query_results,
+        trace = None
+        if trace_mode == "canonical":
+            trace = compile_trace(
+                task_id,
+                task.question,
+                program,
+                backend,
+                seed=seed + index,
+                max_tool_calls=max_trace_tool_calls,
+                max_query_results=max_trace_query_results,
+            )
+            if trace.final_answers != answers:
+                raise KoPLConversionError("TRACE_REPLAY_MISMATCH", task_id)
+        return (
+            task.model_dump(mode="json"),
+            trace.model_dump(mode="json") if trace is not None else None,
+            None,
         )
-        if trace.final_answers != answers:
-            raise KoPLConversionError("TRACE_REPLAY_MISMATCH", task_id)
-        return task.model_dump(mode="json"), trace.model_dump(mode="json"), None
     except (KoPLConversionError, TypeError, ValueError, KeyError, RuntimeError) as exc:
         reason = (
             exc.reason_code
@@ -609,6 +766,8 @@ def _convert_kqapro_row(
     max_trace_tool_calls: int,
     max_trace_query_results: int,
     max_witness_facts: int,
+    trace_mode: Literal["none", "canonical"],
+    verification_mode: Literal["source", "full"],
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     with backend.query_cache():
         return _convert_kqapro_row_uncached(
@@ -622,6 +781,8 @@ def _convert_kqapro_row(
             max_trace_tool_calls=max_trace_tool_calls,
             max_trace_query_results=max_trace_query_results,
             max_witness_facts=max_witness_facts,
+            trace_mode=trace_mode,
+            verification_mode=verification_mode,
         )
 
 
@@ -639,6 +800,8 @@ class _KQAProWorker:
         max_trace_tool_calls: int,
         max_trace_query_results: int,
         max_witness_facts: int,
+        trace_mode: Literal["none", "canonical"],
+        verification_mode: Literal["source", "full"],
         parallel: bool,
     ) -> None:
         self.mapper = mapper
@@ -651,6 +814,8 @@ class _KQAProWorker:
         self.max_trace_tool_calls = max_trace_tool_calls
         self.max_trace_query_results = max_trace_query_results
         self.max_witness_facts = max_witness_facts
+        self.trace_mode = trace_mode
+        self.verification_mode = verification_mode
         self.parallel = parallel
         self.local = threading.local()
         self.backends: list[SQLiteGraphBackend] = []
@@ -679,6 +844,8 @@ class _KQAProWorker:
             max_trace_tool_calls=self.max_trace_tool_calls,
             max_trace_query_results=self.max_trace_query_results,
             max_witness_facts=self.max_witness_facts,
+            trace_mode=self.trace_mode,
+            verification_mode=self.verification_mode,
         )
 
     def close(self) -> None:
@@ -698,6 +865,9 @@ def prepare_kqapro(
     max_trace_tool_calls: int = 32,
     max_trace_query_results: int = 1_024,
     max_witness_facts: int = 0,
+    train_sample_size: int | None = 20_000,
+    trace_mode: Literal["none", "canonical"] = "none",
+    verification_mode: Literal["source", "full"] = "source",
 ) -> dict[str, Any]:
     validate_workers(workers)
     if max_trace_tool_calls < 2:
@@ -706,6 +876,8 @@ def prepare_kqapro(
         raise ValueError("max_trace_query_results must be between 1 and 4096")
     if not 0 <= max_witness_facts <= 50_000:
         raise ValueError("max_witness_facts must be between 0 and 50000")
+    if train_sample_size is not None and train_sample_size < 1:
+        raise ValueError("train_sample_size must be at least 1 or None")
     kb_path = raw_dir / "kb.json"
     database_path = output_dir / "graph.sqlite"
     kb_source_hash = file_hash(kb_path)
@@ -731,16 +903,37 @@ def prepare_kqapro(
     mapper = KoPLMapper(backend)
     total_tasks = 0
     total_rejections = 0
-    split_metrics: dict[str, dict[str, int]] = {}
+    split_metrics: dict[str, dict[str, Any]] = {}
     for split in splits:
         source_path = raw_dir / f"{split}.json"
         source_hash = file_hash(source_path)
         if source_hash is None:
             raise FileNotFoundError(source_path)
+        sampling_metrics: dict[str, Any] | None = None
+        if split == "train" and train_sample_size is not None:
+            selected_rows, sampling_metrics = _stratified_kqapro_rows(
+                source_path,
+                sample_size=train_sample_size,
+                seed=seed,
+                limit=limit,
+            )
+            indexed_rows: Any = iter(selected_rows)
+            selected_total: int | None = len(selected_rows)
+        else:
+            indexed_rows = enumerate(iter_json_array(source_path, limit=limit))
+            selected_total = limit
         accepted = 0
         rejected = 0
-        progress = ProgressLogger(f"data.prepare.kqapro.split.{split}", total=limit)
-        progress.start(source=str(source_path), workers=workers, loading="streaming")
+        trace_rows = 0
+        rejection_reasons: Counter[str] = Counter()
+        progress = ProgressLogger(f"data.prepare.kqapro.split.{split}", total=selected_total)
+        progress.start(
+            source=str(source_path),
+            workers=workers,
+            loading="stratified" if sampling_metrics is not None else "streaming",
+            trace_mode=trace_mode,
+            verification_mode=verification_mode,
+        )
         process = _KQAProWorker(
             mapper=mapper,
             backend=backend,
@@ -752,6 +945,8 @@ def prepare_kqapro(
             max_trace_tool_calls=max_trace_tool_calls,
             max_trace_query_results=max_trace_query_results,
             max_witness_facts=max_witness_facts,
+            trace_mode=trace_mode,
+            verification_mode=verification_mode,
             parallel=workers > 1,
         )
 
@@ -763,17 +958,19 @@ def prepare_kqapro(
                 RecordWriter(split_dir / "traces.parquet") as trace_writer,
                 RecordWriter(split_dir / "rejections.parquet") as rejection_writer,
             ):
-                rows = iter_json_array(source_path, limit=limit)
-                converted = ordered_parallel_map(process, enumerate(rows), workers=workers)
+                converted = ordered_parallel_map(process, indexed_rows, workers=workers)
                 for index, (task, trace, rejection) in enumerate(converted):
                     input_count = index + 1
-                    if task is not None and trace is not None:
+                    if task is not None:
                         task_writer.write(task)
-                        trace_writer.write(trace)
+                        if trace is not None:
+                            trace_writer.write(trace)
+                            trace_rows += 1
                         accepted += 1
                     if rejection is not None:
                         rejection_writer.write(rejection)
                         rejected += 1
+                        rejection_reasons[str(rejection["reason_code"])] += 1
                     progress.update(
                         index + 1,
                         accepted=accepted,
@@ -791,7 +988,13 @@ def prepare_kqapro(
             "input": input_count,
             "accepted": accepted,
             "rejected": rejected,
+            "traces": trace_rows,
+            "acceptance_rate": accepted / input_count if input_count else 0.0,
+            "rejection_reasons": dict(sorted(rejection_reasons.items())),
         }
+        if sampling_metrics is not None:
+            write_json(split_dir / "sampling.json", sampling_metrics)
+            split_metrics[split]["source_input"] = int(sampling_metrics["source_rows"])
         write_json(split_dir / "metrics.json", split_metrics[split])
         total_tasks += accepted
         total_rejections += rejected
@@ -808,6 +1011,9 @@ def prepare_kqapro(
         "max_trace_tool_calls": max_trace_tool_calls,
         "max_trace_query_results": max_trace_query_results,
         "max_witness_facts": max_witness_facts,
+        "train_sample_size": train_sample_size,
+        "trace_mode": trace_mode,
+        "verification_mode": verification_mode,
     }
     write_json(output_dir / "metrics.json", summary)
     write_manifest(
@@ -820,7 +1026,16 @@ def prepare_kqapro(
             "max_trace_tool_calls": max_trace_tool_calls,
             "max_trace_query_results": max_trace_query_results,
             "max_witness_facts": max_witness_facts,
+            "train_sample_size": train_sample_size,
+            "trace_mode": trace_mode,
+            "verification_mode": verification_mode,
         },
-        ["graph.sqlite", "*/tasks.parquet", "*/traces.parquet", "*/rejections.parquet"],
+        [
+            "graph.sqlite",
+            "*/tasks.parquet",
+            "*/traces.parquet",
+            "*/rejections.parquet",
+            "*/sampling.json",
+        ],
     )
     return summary

@@ -166,6 +166,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="for KQAPro: causal witness triples stored inline per task (default: 0)",
     )
+    prepare.add_argument(
+        "--train-sample-size",
+        type=_non_negative_int,
+        default=20_000,
+        help="for KQAPro: stratified train rows; 0 processes the full train split",
+    )
+    prepare.add_argument(
+        "--trace-mode",
+        choices=("none", "canonical"),
+        default="none",
+        help="for KQAPro: omit expensive canonical traces by default",
+    )
+    prepare.add_argument(
+        "--verification-mode",
+        choices=("source", "full"),
+        default="source",
+        help="for KQAPro: source-program execution certification or full self-play gates",
+    )
     _add_common(prepare)
 
     bootstrap_kilt = data_actions.add_parser("bootstrap-kilt-grpo")
@@ -435,6 +453,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_trace_tool_calls=args.max_trace_tool_calls,
                 max_trace_query_results=args.max_trace_query_results,
                 max_witness_facts=args.max_witness_facts,
+                train_sample_size=(
+                    args.train_sample_size if args.train_sample_size > 0 else None
+                ),
+                trace_mode=args.trace_mode,
+                verification_mode=args.verification_mode,
             )
         elif args.dataset == "kilt":
             source_path = (

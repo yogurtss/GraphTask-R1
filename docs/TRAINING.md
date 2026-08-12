@@ -9,7 +9,7 @@
 开始 GPU 作业前必须满足：
 
 - train/val 均通过一次 `data audit --kind task --deep --training-view-output`；
-- `data prepare` 记录的 canonical trace replay 通过；
+- bounded diagnostic 的 canonical trace replay 通过；正式 SFT 数据无需存 trace；
 - gold answer 全部由 certified program 执行产生；
 - SFT 使用真实 tokenizer/template 完成长度预检；
 - SFT、GRPO 与评测均记录 `interaction_mode=graphscript`、`graphscript_version=0.3`；

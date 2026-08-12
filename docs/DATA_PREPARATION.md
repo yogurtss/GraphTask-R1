@@ -4,7 +4,7 @@
 Virtuoso 数据库或 token 提交到 Git。
 
 如果 `data/processed/kqapro/kqapro-v1/graph.sqlite` 以及 `train/val/tasks.parquet` 已经存在，说明
-耗时的 KQA Pro 转换已经完成。此时不要再次运行 `data prepare`；直接跳到 2.3 节，用
+KQA Pro 转换已经完成。此时不要再次运行 `data prepare`；直接跳到 2.3 节，用
 `data export-sft` 从现有 accepted tasks 生成缺少的 `data/training/kqapro_sft_*.parquet`。该导出过程
 不会修改 processed 数据。
 
@@ -79,18 +79,20 @@ data/raw/kqa_pro/test.json
 ```bash
 python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
-  --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train,val --limit 100 --seed 42 --workers 1
+  --output-dir data/processed/kqapro/kqapro-v1-smoke \
+  --splits train,val --limit 20 --train-sample-size 20 \
+  --verification-mode full --trace-mode canonical --seed 42 --workers 1
 ```
 
-确认无系统性错误后，删除这个临时输出目录并运行全量转换：
+确认无系统性错误后，分层抽取 20,000 条 train，并处理完整 val：
 
 ```bash
 python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
   --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train,val --seed 42 --workers 1 \
-  --max-witness-facts 0
+  --splits train,val --train-sample-size 20000 \
+  --verification-mode source --trace-mode none \
+  --seed 42 --workers 1 --max-witness-facts 0
 ```
 
 在 WSL 中应将 `--output-dir` 放在 Linux ext4（例如仓库内的 `data/processed`），不要直接写
@@ -104,21 +106,29 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 2. 将 `Find/FindAll/Relate/And/Or/FilterConcept/Filter*/Count/What`，以及
    `QueryAttr/QueryRelation/SelectBetween/SelectAmong`，以及全部 `QFilter*`、qualifier query 和
    `Verify*` 映射到 typed DSL；
-3. 重新执行 DSL 产生 gold answer；
-4. 将实体 ID 对应标签与原 KQA answer 对账；
-5. 运行局部物化、必要性、shortcut、answer leakage 和 canonical trace replay；
-6. SFT 默认不内联 witness，不再用无关邻域填满 5 万条边；
-7. 接受样本以 bounded row group 写入 `tasks.parquet`/`traces.parquet`，其他样本写入
+3. 对 train 按 operator set、terminal operator 和程序长度桶做可回放的分层抽样；
+4. 重新执行 DSL 产生 gold answer；
+5. 将实体 ID 对应标签与原 KQA answer 对账；
+6. source verification 不套用 Questioner 的 shortcut/answer-leak 门；只有显式 full verification
+   才运行必要性和 shortcut 检查；
+7. canonical trace 默认关闭，只在显式 `--trace-mode canonical` 时编译和 replay；
+8. SFT 默认不内联 witness，不再用无关邻域填满 5 万条边；
+9. 接受样本以 bounded row group 写入 `tasks.parquet`/`traces.parquet`，其他样本写入
    `rejections.parquet`。
 
 默认 `--max-witness-facts 0` 会显式设置 `witness_complete=false` 和
-`generation.witness_omitted=true`。这不影响 gold、verification 或 canonical trace；它们都由完整
-程序执行产生。若归档实验需要 inline witness，可设置正整数；超过上限的记录会设置
+`generation.witness_omitted=true`。这不影响 gold 或 source verification；它们都由完整程序执行
+产生。若归档实验需要 inline witness，可设置正整数；超过上限的记录会设置
 `generation.witness_truncated=true`。提高该上限不会增加可训练样本数，只会增加图查询、I/O 和
 存储，通常不应为 SFT 开启。
 
 KQAPro 官方 27 个 KoPL 函数均有确定性映射；qualifier 依附于稳定 fact ID，避免将同一实体的
 不同 relation/attribute statement 错配。gold 仍只由认证程序执行产生。
+
+默认 `--train-sample-size 20000`；传 `0` 才处理完整 train。抽样详情写入
+`train/sampling.json`，包含 source/selected rows、strata 配额、operator coverage、seed 与 sampler
+version。val 不抽样。默认 `--verification-mode source --trace-mode none` 是 SFT 推荐路径；小规模
+诊断才使用 `--verification-mode full --trace-mode canonical`。
 
 ### 2.3 产物审计
 
@@ -136,7 +146,6 @@ done
 python -m graphtask_r1.cli data build-relation-catalog \
   --input \
     data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-    data/processed/kqapro/kqapro-v1/val/training_tasks.parquet \
   --scope graph \
   --output data/processed/kqapro/kqapro-v1/relation_catalog.json
 
@@ -150,8 +159,9 @@ done
 ```
 
 `audit --deep` 同时检查完整 `TaskCertificate` 并生成不含 witness 的 training view；它不重复执行
-program，因为 gold、verification 和 trace replay 已由 `data prepare` 完成。`--scope graph` 从
-`graph.sqlite` 生成固定的完整 relation allowlist，不依赖小样本覆盖率。
+program，因为 gold 和 source answer 对账已由 `data prepare` 完成。canonical trace 只在 bounded
+diagnostic 中 replay。`--scope graph` 从 `graph.sqlite` 生成固定的完整 relation allowlist，不依赖
+小样本覆盖率。
 
 必须检查 `metrics.json` 中的接受率和各 reason code。`SOURCE_ANSWER_MISMATCH`、
 `INCOMPLETE_SLICE` 或 `TRACE_REPLAY_MISMATCH` 大量出现时不要训练。
@@ -371,7 +381,7 @@ python -m graphtask_r1.cli data sample-seeds --snapshot freebase-v1 \
 进入 GPU 训练前应全部满足：
 
 - `data audit` 通过且没有 duplicate ID；
-- accepted canonical trace replay 为 100%；
+- bounded diagnostic 的 accepted canonical trace replay 为 100%；
 - gold answer 全部来自程序执行；
 - `SOURCE_ANSWER_MISMATCH` 和 `INCOMPLETE_SLICE` 已人工抽查；
 - Freebase endpoint 无持续 timeout，缓存目录可写；

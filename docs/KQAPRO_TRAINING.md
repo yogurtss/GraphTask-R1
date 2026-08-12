@@ -20,9 +20,16 @@ agreement 为 11,768/11,797（99.7542%）；剩余 29 条均是 Count 表示语�
 最大 11,542 tokens，均低于默认 32K。正式训练前仍须使用目标模型的真实 ms-swift template
 执行下述 preflight。
 
+推荐配置已经实际完整跑通：train 从 94,376 条分层选出 20,000 条，接受 19,941 条
+（99.705%）；val 全量接受 11,768/11,797（99.754%）。train/val 的 88 条 rejection 全部是
+`SOURCE_ANSWER_MISMATCH`，未出现转换、执行或 schema 错误。accepted train 与 val 均仍覆盖
+27/27 个 KoPL 函数；两份 task parquet 的 deep audit 均为 0 invalid、0 duplicate，SFT 导出行数
+分别为 19,941 和 11,768。
+
 GraphScript v0.3 覆盖实体解析、关系遍历、交并、类型/字面量/qualifier 过滤、attribute 与
 qualifier 查询、relation 与 qualifier 查询、verify、extrema、count 和 emit。canonical trace
-只用于认证和 replay，不写入 GraphScript SFT completion，因此无需为了训练压缩 trace。
+只用于小规模诊断和 replay，不写入 GraphScript SFT completion，也不作为官方 SFT 样本的准入
+条件。
 
 ## 2. 路径与环境
 
@@ -41,21 +48,27 @@ ms-swift 3.6.4 的安装见 [ms-swift 环境说明](MS_SWIFT_CUDA_12_4.md)。
 
 ## 3. 构建、认证与审计
 
-先按仓库约束运行 bounded smoke；它使用独立输出目录，不会覆盖正式产物：
+先按仓库约束运行 bounded smoke；它使用完整 self-play verification gates 和 canonical trace，
+但只检查 20 条，不会覆盖正式产物：
 
 ```bash
 python -m graphtask_r1.cli data prepare \
   --dataset kqapro --raw-dir "$KQAPRO_RAW" --output-dir "$KQAPRO_SMOKE_DIR" \
-  --splits train,val --limit 100 --seed 42 --workers 1
+  --splits train,val --limit 20 --train-sample-size 20 \
+  --verification-mode full --trace-mode canonical --seed 42 --workers 1
 ```
 
-smoke 通过后构建完整 train/val。SQLite snapshot 同时保存 relation/attribute facts 及其
-qualifiers；输入哈希和 converter version 匹配时会安全复用已有图。
+smoke 通过后，从 94,376 条 train 中确定性分层抽取 20,000 条，并处理完整 val。分层键同时包含
+KoPL operator set、terminal operator 和程序长度桶，先保证每个结构层至少一个样本，再按层大小
+分配剩余额度；层内用 source ID、raw index 和显式 seed 的稳定哈希选择。SQLite snapshot 同时
+保存 relation/attribute facts 及其 qualifiers；输入哈希和 converter version 匹配时会安全复用
+已有图。
 
 ```bash
 python -m graphtask_r1.cli data prepare \
   --dataset kqapro --raw-dir "$KQAPRO_RAW" --output-dir "$KQAPRO_DIR" \
-  --splits train,val --seed 42 --workers 1
+  --splits train,val --train-sample-size 20000 \
+  --verification-mode source --trace-mode none --seed 42 --workers 1
 
 for split in train val; do
   python -m graphtask_r1.cli data audit \
@@ -63,6 +76,11 @@ for split in train val; do
     --training-view-output "$KQAPRO_DIR/$split/training_tasks.parquet"
 done
 ```
+
+`verification-mode=source` 仍然先将官方 KoPL 转为 typed program，再执行程序生成 gold，要求答案
+非空并与官方 source answer 对账。它只跳过用于新生成 Questioner 题目的 necessity、shortcut 和
+answer-leak 质量门。`trace-mode=none` 会保留一个空的 `traces.parquet` schema，训练不依赖它。
+若确实需要全量 train，可传 `--train-sample-size 0`，但不推荐作为首轮 SFT。
 
 relation catalog 从 train task 确定 snapshot，再读取该 snapshot 的完整 graph schema。它不是
 从 val 问题或程序统计得到的。
@@ -74,8 +92,9 @@ python -m graphtask_r1.cli data build-relation-catalog \
   --output "$KQAPRO_DIR/relation_catalog.json"
 ```
 
-检查 `metrics.json`、各 split 的 `metrics.json` 和 `manifest.json`，确认没有未解释的 rejection，
-且 snapshot、source hash、seed 和 limit 符合本次实验记录。
+检查 `metrics.json`、各 split 的 `metrics.json`、`train/sampling.json` 和 `manifest.json`。
+`sampling.json` 记录 source/selected rows、全部 strata 的配额、operator coverage、sampler version
+和 seed；确认没有未解释的 rejection，且 snapshot、source hash 和配置符合本次实验记录。
 
 ## 4. Solver SFT
 
