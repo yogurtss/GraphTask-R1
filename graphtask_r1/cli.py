@@ -6,7 +6,8 @@ import json
 import logging
 import os
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from itertools import chain
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -27,13 +28,18 @@ from graphtask_r1.data import (
 from graphtask_r1.evaluation import evaluate_benchmark
 from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.pipeline import run_mini_pipeline
-from graphtask_r1.schema import TaskCertificate
+from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
 from graphtask_r1.training.relations import build_relation_catalog, load_relation_catalog
 from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.scripted import run_scripted_selfplay
 from graphtask_r1.training.selfplay import run_self_play
 from graphtask_r1.training.sft_dataset import export_sft_dataset
-from graphtask_r1.utils import ProgressLogger, read_records, write_records
+from graphtask_r1.utils import (
+    ProgressLogger,
+    iter_record_json,
+    record_count,
+    write_records,
+)
 
 LOGGER = logging.getLogger("graphtask_r1.cli")
 DEFAULT_DATA_WORKERS = 1
@@ -43,6 +49,13 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
     return parsed
 
 
@@ -147,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1_024,
         help="for KQAPro: maximum entities retained by a compact graph query",
     )
+    prepare.add_argument(
+        "--max-witness-facts",
+        type=_non_negative_int,
+        default=0,
+        help="for KQAPro: causal witness triples stored inline per task (default: 0)",
+    )
     _add_common(prepare)
 
     bootstrap_kilt = data_actions.add_parser("bootstrap-kilt-grpo")
@@ -169,6 +188,16 @@ def build_parser() -> argparse.ArgumentParser:
     audit = data_actions.add_parser("audit")
     audit.add_argument("--input", type=Path, required=True)
     audit.add_argument("--kind", choices=["auto", "task", "benchmark"], default="auto")
+    audit.add_argument(
+        "--deep",
+        action="store_true",
+        help="also validate bulky witness facts; default audit checks training-critical fields",
+    )
+    audit.add_argument(
+        "--training-view-output",
+        type=Path,
+        help="write valid task fields needed downstream while streaming the audit",
+    )
 
     export = data_actions.add_parser("export-rl")
     export.add_argument("--input", type=Path, required=True)
@@ -249,17 +278,32 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_tasks(path: Path, limit: int | None) -> list[TaskCertificate]:
-    values = read_records(path)
-    if limit is not None:
-        values = values[:limit]
-    progress = ProgressLogger("data.load_tasks", total=len(values))
-    progress.start(path=str(path))
+    total = min(record_count(path), limit) if limit is not None else record_count(path)
+    progress = ProgressLogger("data.load_tasks", total=total)
+    progress.start(path=str(path), loading="streaming", include_witness=True)
     tasks: list[TaskCertificate] = []
-    for index, value in enumerate(values):
-        tasks.append(TaskCertificate.model_validate(value))
+    for index, raw in enumerate(iter_record_json(path, limit=limit)):
+        tasks.append(TaskCertificate.model_validate_json(raw))
         progress.update(index + 1)
     progress.finish(len(tasks), path=str(path))
     return tasks
+
+
+def _iter_training_tasks(
+    path: Path, limit: int | None
+) -> tuple[Iterator[TaskTrainingRecord], int]:
+    total = min(record_count(path), limit) if limit is not None else record_count(path)
+
+    def generate() -> Iterator[TaskTrainingRecord]:
+        progress = ProgressLogger("data.load_training_tasks", total=total)
+        progress.start(path=str(path), loading="streaming", include_witness=False)
+        completed = 0
+        for completed, raw in enumerate(iter_record_json(path, limit=limit), start=1):
+            yield TaskTrainingRecord.model_validate_json(raw)
+            progress.update(completed)
+        progress.finish(completed, path=str(path))
+
+    return generate(), total
 
 
 def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, Any]:
@@ -356,6 +400,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 rebuild_graph=args.rebuild_graph,
                 max_trace_tool_calls=args.max_trace_tool_calls,
                 max_trace_query_results=args.max_trace_query_results,
+                max_witness_facts=args.max_witness_facts,
             )
         elif args.dataset == "kilt":
             source_path = (
@@ -385,7 +430,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=args.limit,
             )
     elif args.group == "data" and args.action == "audit":
-        result = audit_records(args.input, kind=args.kind)
+        result = audit_records(
+            args.input,
+            kind=args.kind,
+            deep=args.deep,
+            training_view_output=args.training_view_output,
+        )
     elif args.group == "data" and args.action == "bootstrap-kilt-grpo":
         if args.dry_run:
             result = vars(args)
@@ -407,13 +457,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 graphscript_version=args.graphscript_version,
             )
     elif args.group == "data" and args.action == "export-rl":
-        tasks = _load_tasks(args.input, args.limit)
         if args.dry_run:
-            result = {"would_export": len(tasks), "roles": args.roles}
+            total = (
+                min(record_count(args.input), args.limit)
+                if args.limit is not None
+                else record_count(args.input)
+            )
+            result = {"would_export": total, "roles": args.roles}
         else:
+            rl_tasks, total = _iter_training_tasks(args.input, args.limit)
             rows = export_role_dataset(
-                tasks,
+                rl_tasks,
                 args.output,
+                total=total,
                 include_questioner=args.roles in {"both", "questioner"},
                 include_solver=args.roles in {"both", "solver"},
                 opponent_url=args.opponent_url,
@@ -424,13 +480,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             result = {"rows": rows, "output": str(args.output)}
     elif args.group == "data" and args.action == "export-sft":
-        tasks = _load_tasks(args.input, args.limit)
         if args.dry_run:
-            result = {"would_export": len(tasks), "roles": args.roles}
+            total = (
+                min(record_count(args.input), args.limit)
+                if args.limit is not None
+                else record_count(args.input)
+            )
+            result = {"would_export": total, "roles": args.roles}
         else:
+            sft_tasks, total = _iter_training_tasks(args.input, args.limit)
             rows = export_sft_dataset(
-                tasks,
+                sft_tasks,
                 args.output,
+                total=total,
                 include_questioner=args.roles in {"both", "questioner"},
                 include_solver=args.roles in {"both", "solver"},
                 seed=args.seed,
@@ -453,12 +515,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             relation_catalog=load_relation_catalog(args.relation_catalog),
         )
     elif args.group == "data" and args.action == "select-interaction-tasks":
-        tasks = _load_tasks(args.input, args.limit)
-        if not tasks:
+        selected_tasks = _load_tasks(args.input, args.limit)
+        if not selected_tasks:
             raise ValueError("cannot select interaction tasks from an empty task set")
-        snapshot = args.snapshot or tasks[0].graph_snapshot
+        snapshot = args.snapshot or selected_tasks[0].graph_snapshot
         mismatched = sorted(
-            {task.graph_snapshot for task in tasks if task.graph_snapshot != snapshot}
+            {
+                task.graph_snapshot
+                for task in selected_tasks
+                if task.graph_snapshot != snapshot
+            }
         )
         if mismatched:
             raise ValueError(
@@ -466,7 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{snapshot}: {', '.join(mismatched)}"
             )
         result = select_graphscript_tasks(
-            tasks,
+            selected_tasks,
             args.output,
             backend=backend_from_snapshot(snapshot),
             max_follow_limit=args.max_follow_limit,
@@ -474,27 +540,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_returned_entities=args.max_returned_entities,
         )
     elif args.group == "data" and args.action == "build-relation-catalog":
-        tasks = _load_tasks(args.input, args.limit)
-        if not tasks:
+        catalog_tasks, total = _iter_training_tasks(args.input, args.limit)
+        first = next(catalog_tasks, None)
+        if first is None:
             raise ValueError("cannot build a relation catalog from an empty task set")
-        snapshot = args.snapshot or tasks[0].graph_snapshot
-        mismatched = sorted(
-            {task.graph_snapshot for task in tasks if task.graph_snapshot != snapshot}
+        snapshot = args.snapshot or first.graph_snapshot
+
+        def matching_tasks() -> Iterator[TaskTrainingRecord]:
+            for task in chain((first,), catalog_tasks):
+                if task.graph_snapshot != snapshot:
+                    raise ValueError(
+                        "relation catalog input contains snapshot "
+                        f"{task.graph_snapshot!r}; expected {snapshot!r}"
+                    )
+                yield task
+
+        relations = build_relation_catalog(
+            matching_tasks(),
+            backend_from_snapshot(snapshot),
+            args.output,
+            total=total,
         )
-        if mismatched:
-            raise ValueError(
-                "relation catalog input contains snapshots other than "
-                f"{snapshot}: {', '.join(mismatched)}"
-            )
-        relations = build_relation_catalog(tasks, backend_from_snapshot(snapshot), args.output)
         result = {"relations": len(relations), "output": str(args.output), "snapshot": snapshot}
     elif args.group == "data" and args.action == "export-archive":
         if not args.archive.exists():
             raise FileNotFoundError(args.archive)
         with TaskArchive(args.archive) as archive:
-            tasks = archive.all()
-        write_records(args.output, (task.model_dump(mode="json") for task in tasks))
-        result = {"tasks": len(tasks), "output": str(args.output)}
+            archived_tasks = archive.all()
+        write_records(
+            args.output, (task.model_dump(mode="json") for task in archived_tasks)
+        )
+        result = {"tasks": len(archived_tasks), "output": str(args.output)}
     elif args.group == "data" and args.action == "merge-denylists":
         result = merge_denylists(args.inputs, args.output)
     elif args.group == "train" and args.action in {"sft", "solver-grpo"}:

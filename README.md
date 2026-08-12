@@ -70,18 +70,24 @@ make test
 mkdir -p data/training
 
 python -m graphtask_r1.cli data audit \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task \
+  --training-view-output data/processed/kqapro/kqapro-v1/train/training_tasks.parquet
 
 python -m graphtask_r1.cli data build-relation-catalog \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
   --output data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
   --output data/training/kqapro_graphscript_v02_sft_train.parquet \
   --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
+
+以上数据命令均流式处理。`--training-view-output` 在第一次顺序扫描时移除 SFT 不使用的 inline
+witness；relation catalog 和 SFT 导出复用这个轻量文件，不再反复读取旧版巨大记录。需要完整 witness
+schema 检查时显式添加 `--deep`。新生成的 KQAPro SFT task 默认不内联 causal witness facts，避免旧数据
+中单条任务接近 5 万事实造成的图查询、I/O 和内存放大；gold 和 trace 仍由完整程序执行产生。
 
 用训练时的真实模板筛出 32K 内有效样本，不启动训练：
 

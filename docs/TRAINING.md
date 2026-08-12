@@ -8,7 +8,9 @@
 
 开始 GPU 作业前必须满足：
 
-- `data audit` 无重复 task ID、损坏 JSON 或 certificate replay 错误；
+- 快速 `data audit --kind task` 无重复 task ID、损坏的训练关键字段；
+- 旧版包含巨大 witness 的 task 在 audit 时用 `--training-view-output` 转为轻量训练视图，后续不再读原文件；
+- `data prepare` 记录的 canonical trace replay 通过；需要时抽样运行 `data audit --deep`；
 - gold answer 全部由 certified program 执行产生；
 - SFT 使用真实 tokenizer/template 完成长度预检；
 - SFT、GRPO 与评测均记录 `interaction_mode=graphscript`、`graphscript_version=0.2`；
@@ -31,6 +33,10 @@ data/training/
 预检会调用与训练相同的 model type、Qwen3 template、Hermes agent template 和
 `truncation_strategy=raise`。超过长度的样本不会被静默截断，而是写入带 reason code 的独立
 Parquet。
+
+预检同样按 row batch 流式处理，accepted/rejected 文件边检查边写，不会同时持有全量 token IDs
+或整张 Arrow table。若长时间没有吞吐，优先检查模型/tokenizer 是否仍在下载，而不是继续增加
+内存。
 
 ```bash
 python scripts/preflight_ms_swift_sft.py \

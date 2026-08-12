@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from graphtask_r1.graph.materialize import materialize_program
 from graphtask_r1.graph.overlay import GraphOverlay
@@ -361,6 +361,25 @@ class SQLiteGraphBackend:
             )
         }
 
+    def _execute_hop(self, program: Hop, inputs: set[str]) -> set[str]:
+        if not inputs:
+            return set()
+        input_column = "subject" if program.direction == "out" else "object"
+        output_index = 2 if program.direction == "out" else 0
+        bind_budget = self._sql_variable_limit() - 1
+        entity_batch_size = max(1, bind_budget // 2)
+        found: set[tuple[str, str, str]] = set()
+        for entity_batch in _chunks(tuple(sorted(inputs)), entity_batch_size):
+            placeholders = ",".join("?" for _ in entity_batch)
+            rows = self.connection.execute(
+                "SELECT subject, relation, object FROM triples "
+                f"WHERE {input_column} IN ({placeholders}) AND relation = ? "
+                "ORDER BY subject, relation, object LIMIT ?",
+                (*entity_batch, program.relation, 1_000_000),
+            ).fetchall()
+            found.update((str(row[0]), str(row[1]), str(row[2])) for row in rows)
+        return {row[output_index] for row in sorted(found)[:1_000_000]}
+
     def _execute_entities(self, program: Program) -> set[str]:
         if self._cache_enabled and program in self._entity_results_cache:
             return set(self._entity_results_cache[program])
@@ -370,13 +389,7 @@ class SQLiteGraphBackend:
             result = {program.entity_id}
         elif isinstance(program, Hop):
             inputs = self._execute_entities(program.input)
-            edges = self.neighbors(
-                sorted(inputs),
-                direction=program.direction,
-                relation_ids=[program.relation],
-                limit=1_000_000,
-            )
-            result = {edge.object if program.direction == "out" else edge.subject for edge in edges}
+            result = self._execute_hop(program, inputs)
         elif isinstance(program, Intersect):
             result = set.intersection(
                 *(self._execute_entities(branch) for branch in program.inputs)
@@ -486,6 +499,51 @@ class SQLiteGraphBackend:
         if self._cache_enabled:
             self._answer_cache[program] = result
         return result
+
+    def execute_entity_ids(self, program: Program) -> frozenset[str]:
+        """Execute an entity-valued program without constructing an AnswerSet.
+
+        Verification search can evaluate hundreds of internal candidates per task.  Keeping
+        those candidates as IDs avoids validating an Answer object for every returned entity.
+        """
+        return frozenset(self._execute_entities(program))
+
+    def discard_entity_result(self, program: Program) -> None:
+        """Release a one-shot verification candidate while retaining its cached prefixes."""
+        self._entity_results_cache.pop(program, None)
+        self._answer_cache.pop(program, None)
+
+    def relation_hops(
+        self,
+        entity_ids: Sequence[str],
+        *,
+        limit: int = 100,
+    ) -> tuple[tuple[str, Literal["out", "in"]], ...]:
+        """Return the unique relation/direction expansions from a bounded neighborhood."""
+        entities = tuple(sorted(set(entity_ids)))
+        if not entities or limit <= 0:
+            return ()
+        bind_budget = self._sql_variable_limit() - 1
+        rows: set[tuple[str, str, str]] = set()
+        for column in ("subject", "object"):
+            for entity_batch in _chunks(entities, bind_budget):
+                placeholders = ",".join("?" for _ in entity_batch)
+                selected = self.connection.execute(
+                    "SELECT subject, relation, object FROM triples "
+                    f"WHERE {column} IN ({placeholders}) "
+                    "ORDER BY subject, relation, object LIMIT ?",
+                    (*entity_batch, limit),
+                ).fetchall()
+                rows.update((str(row[0]), str(row[1]), str(row[2])) for row in selected)
+        selected_rows = sorted(rows)[:limit]
+        entity_set = frozenset(entities)
+        hops: dict[tuple[str, Literal["out", "in"]], None] = {}
+        for subject, relation, object_id in selected_rows:
+            if subject in entity_set:
+                hops[(relation, "out")] = None
+            if object_id in entity_set:
+                hops[(relation, "in")] = None
+        return tuple(hops)
 
     def _attribute_rows(
         self, entity_ids: set[str], attribute: str

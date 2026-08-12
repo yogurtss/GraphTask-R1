@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
+from typing import Literal, cast
 
 from graphtask_r1.dsl import canonical_signature, program_cost
 from graphtask_r1.graph import GraphBackend
@@ -19,6 +21,8 @@ from graphtask_r1.schema import (
     SelectBetween,
     Union,
 )
+
+HopDirection = Literal["out", "in"]
 
 
 @dataclass(frozen=True)
@@ -57,11 +61,20 @@ def bounded_shortcut_search(
     target_cost = program_cost(program)
     if target_cost <= 0 or not gold.answers:
         return ShortcutResult(False, None, 0, "not_applicable")
-    queue: list[Program] = [Entity(entity_id=entity) for entity in topic_entities(program)]
+    gold_entity_ids = frozenset(gold.entity_ids())
+    if len(gold_entity_ids) != len(gold.answers):
+        return ShortcutResult(False, None, 0, "non_entity_answer")
+    queue = deque[Program](
+        Entity(entity_id=entity) for entity in topic_entities(program)
+    )
+    execute_entity_ids = getattr(backend, "execute_entity_ids", None)
+    discard_entity_result = getattr(backend, "discard_entity_result", None)
+    relation_hops = getattr(backend, "relation_hops", None)
     seen: set[str] = set()
+    best_cost_by_entities: dict[frozenset[str], float] = {}
     explored = 0
     while queue:
-        candidate = queue.pop(0)
+        candidate = queue.popleft()
         signature = canonical_signature(candidate)
         if signature in seen:
             continue
@@ -70,16 +83,47 @@ def bounded_shortcut_search(
         if explored > max_candidates:
             return ShortcutResult(None, None, explored, "budget_exhausted")
         cost = program_cost(candidate)
-        if 0 < cost < target_cost and backend.execute_program(candidate) == gold:
+        candidate_entities: frozenset[str] | None = None
+        if 0 < cost < target_cost:
+            if callable(execute_entity_ids):
+                candidate_entities = frozenset(execute_entity_ids(candidate))
+                equivalent = candidate_entities == gold_entity_ids
+            else:
+                candidate_answers = backend.execute_program(candidate)
+                candidate_entities = frozenset(candidate_answers.entity_ids())
+                equivalent = candidate_answers == gold
+        else:
+            equivalent = False
+        if equivalent:
             return ShortcutResult(True, candidate, explored, "equivalent_lower_cost")
         if cost + 1.0 >= target_cost:
+            if callable(discard_entity_result):
+                discard_entity_result(candidate)
             continue
-        values = backend.execute_program(candidate).entity_ids()
+        if candidate_entities is None:
+            if callable(execute_entity_ids):
+                candidate_entities = frozenset(execute_entity_ids(candidate))
+            else:
+                candidate_entities = frozenset(backend.execute_program(candidate).entity_ids())
+        values = candidate_entities
         if not values:
             continue
-        for triple in backend.neighbors(values, direction="both", limit=100):
-            if triple.subject in values:
-                queue.append(Hop(input=candidate, relation=triple.relation, direction="out"))
-            if triple.object in values:
-                queue.append(Hop(input=candidate, relation=triple.relation, direction="in"))
+        best_cost = best_cost_by_entities.get(values)
+        if best_cost is not None and best_cost <= cost:
+            continue
+        best_cost_by_entities[values] = cost
+        if callable(relation_hops):
+            hops = cast(
+                tuple[tuple[str, HopDirection], ...], relation_hops(values, limit=100)
+            )
+        else:
+            found: dict[tuple[str, HopDirection], None] = {}
+            for triple in backend.neighbors(tuple(values), direction="both", limit=100):
+                if triple.subject in values:
+                    found[(triple.relation, "out")] = None
+                if triple.object in values:
+                    found[(triple.relation, "in")] = None
+            hops = tuple(found)
+        for relation, direction in hops:
+            queue.append(Hop(input=candidate, relation=relation, direction=direction))
     return ShortcutResult(False, None, explored, "search_complete")

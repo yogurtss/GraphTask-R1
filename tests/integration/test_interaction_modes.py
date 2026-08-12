@@ -131,6 +131,38 @@ def test_graphscript_v02_grpo_uses_same_question_only_operator_contract(
     assert "tools_kwargs" not in row
 
 
+def test_graphscript_exports_write_multiple_bounded_parquet_batches(tmp_path: Path) -> None:
+    tasks = [_task()] * 300
+    sft_path = tmp_path / "batched_sft.parquet"
+    rl_path = tmp_path / "batched_rl.parquet"
+
+    assert (
+        export_sft_dataset(
+            tasks,
+            sft_path,
+            include_questioner=False,
+            interaction_mode="graphscript",
+            graphscript_version="0.2",
+            relation_catalog=_catalog(),
+        )
+        == 300
+    )
+    assert (
+        export_role_dataset(
+            tasks,
+            rl_path,
+            include_questioner=False,
+            interaction_mode="graphscript",
+            graphscript_version="0.2",
+            relation_catalog=_catalog(),
+            program_profile="graphscript_v0_2",
+        )
+        == 300
+    )
+    assert pq.ParquetFile(sft_path).metadata.num_row_groups == 2
+    assert pq.ParquetFile(rl_path).metadata.num_row_groups == 2
+
+
 def test_tool_dataset_is_backend_neutral_and_adapted_at_load_time(tmp_path: Path) -> None:
     path = tmp_path / "tool_rl.parquet"
     assert (

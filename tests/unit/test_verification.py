@@ -1,6 +1,6 @@
 from graphtask_r1.dsl import necessity_scores
 from graphtask_r1.graph import toy_graph
-from graphtask_r1.schema import Entity, Hop, Intersect
+from graphtask_r1.schema import Count, Entity, Hop, Intersect
 from graphtask_r1.verification import answer_leak, bounded_shortcut_search, verify_task
 
 
@@ -54,3 +54,14 @@ def test_shortcut_budget_exhaustion_is_unknown() -> None:
     )
     result = bounded_shortcut_search(program, graph, max_candidates=0)
     assert result.found is None
+
+
+def test_non_entity_answer_cannot_match_entity_shortcut_candidates() -> None:
+    graph = toy_graph()
+    program = Count(input=Hop(input=Entity(entity_id="alice"), relation="friend"))
+
+    result = bounded_shortcut_search(program, graph, max_candidates=0)
+
+    assert result.found is False
+    assert result.explored == 0
+    assert result.reason == "non_entity_answer"

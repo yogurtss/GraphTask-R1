@@ -37,6 +37,8 @@ def materialize_program(
     snapshot_id: str,
     max_nodes: int,
     max_edges: int,
+    include_neighborhood: bool = True,
+    include_metadata: bool = True,
 ) -> GraphSlice:
     """Materialize the facts touched by a bounded core-DSL execution."""
     facts: set[Triple] = set()
@@ -165,7 +167,7 @@ def materialize_program(
     visit(program)
     nodes.update(remote_answers.entity_ids())
     remaining = max_edges - len(facts)
-    if remaining > 0 and nodes:
+    if include_neighborhood and remaining > 0 and nodes:
         neighborhood = backend.neighbors(sorted(nodes), direction="both", limit=remaining + 1)
         if len(neighborhood) > remaining:
             truncated = True
@@ -182,7 +184,9 @@ def materialize_program(
     selected_nodes = sorted(nodes)[:max_nodes]
     selected_facts = tuple(sorted(facts, key=Triple.sort_key))[:max_edges]
     relations = sorted({fact.relation for fact in selected_facts})
-    if isinstance(backend, _BulkEntityInfoBackend):
+    if not include_metadata:
+        entities: tuple[EntityInfo, ...] = ()
+    elif isinstance(backend, _BulkEntityInfoBackend):
         entities = backend.entity_infos(selected_nodes)
     else:
         entities = tuple(backend.entity_info(entity_id) for entity_id in selected_nodes)
@@ -190,7 +194,11 @@ def materialize_program(
         snapshot_id=snapshot_id,
         triples=selected_facts,
         entities=entities,
-        relations=tuple(backend.relation_info(relation_id) for relation_id in relations),
+        relations=(
+            tuple(backend.relation_info(relation_id) for relation_id in relations)
+            if include_metadata
+            else ()
+        ),
         complete=not truncated,
         truncated=truncated,
         remote_answers=remote_answers,

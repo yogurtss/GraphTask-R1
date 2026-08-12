@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sized
 from pathlib import Path
 
 from graphtask_r1.graph import GraphBackend
@@ -17,6 +18,7 @@ from graphtask_r1.schema import (
     SelectAmong,
     SelectBetween,
     TaskCertificate,
+    TaskTrainingRecord,
     Union,
 )
 from graphtask_r1.utils import ProgressLogger, write_json
@@ -57,11 +59,25 @@ def require_catalog_covers_program(
 
 
 def build_relation_catalog(
-    tasks: list[TaskCertificate], backend: GraphBackend, output_path: Path
+    tasks: Iterable[TaskCertificate | TaskTrainingRecord],
+    backend: GraphBackend,
+    output_path: Path,
+    *,
+    total: int | None = None,
 ) -> tuple[RelationInfo, ...]:
-    relation_ids = sorted({value for task in tasks for value in program_relations(task.program)})
+    if total is None and isinstance(tasks, Sized):
+        total = len(tasks)
+    relation_ids_set: set[str] = set()
+    scan = ProgressLogger("data.build_relation_catalog.scan", total=total)
+    scan.start()
+    task_count = 0
+    for task_count, task in enumerate(tasks, start=1):
+        relation_ids_set.update(program_relations(task.program))
+        scan.update(task_count, relations=len(relation_ids_set))
+    scan.finish(task_count, relations=len(relation_ids_set))
+    relation_ids = sorted(relation_ids_set)
     progress = ProgressLogger("data.build_relation_catalog", total=len(relation_ids))
-    progress.start(tasks=len(tasks))
+    progress.start(tasks=task_count)
     relations_list: list[RelationInfo] = []
     for index, relation_id in enumerate(relation_ids):
         relations_list.append(backend.relation_info(relation_id))

@@ -21,6 +21,25 @@ def test_data_prepare_accepts_positive_worker_count() -> None:
         ]
     )
     assert args.workers == 3
+    assert args.max_witness_facts == 0
+
+
+def test_data_audit_accepts_deep_and_training_view_output() -> None:
+    args = build_parser().parse_args(
+        [
+            "data",
+            "audit",
+            "--input",
+            "tasks.parquet",
+            "--kind",
+            "task",
+            "--deep",
+            "--training-view-output",
+            "training_tasks.parquet",
+        ]
+    )
+    assert args.deep is True
+    assert args.training_view_output == Path("training_tasks.parquet")
 
 
 def test_data_prepare_rejects_zero_workers() -> None:

@@ -20,6 +20,12 @@ KQA 的每个 worker 使用独立的只读 SQLite 连接，结果仍按原始 in
 不会并发写库。若现有 `graph.sqlite` 的源文件 hash、转换器版本和 snapshot 均匹配，prepare 会
 直接复用；需要强制重建时添加 `--rebuild-graph`。
 
+KQAPro 原始 JSON array、任务 Parquet、audit、relation catalog、SFT/RL export 和 ms-swift
+preflight 均按 bounded batch 流式读写。`--limit` 在 JSON/Parquet 解码阶段生效，不再先加载全
+文件。旧版本生成的任务可能每条内联近 5 万条 `witness_facts`；默认 audit 会跳过这些训练不需要
+的 payload，只验证 program、gold、verification 和 ID。只有需要检查完整 witness schema 时才加
+`--deep`。
+
 ## 1. 目录和不可变性
 
 ```text
@@ -85,8 +91,14 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 python -m graphtask_r1.cli data prepare --dataset kqapro \
   --raw-dir data/raw/kqa_pro \
   --output-dir data/processed/kqapro/kqapro-v1 \
-  --splits train,val --seed 42 --workers 1
+  --splits train,val --seed 42 --workers 1 \
+  --max-witness-facts 0
 ```
+
+在 WSL 中应将 `--output-dir` 放在 Linux ext4（例如仓库内的 `data/processed`），不要直接写
+`/mnt/g` 的 DrvFS/9p；完成后再复制归档到 G 盘。真实 KQAPro 小样本上 `--workers 2` 比 1 略快，
+但 4 个线程会出现 SQLite 争用和更高峰值内存，因此先用 `--limit 100 --workers 1/2` 实测后再定，
+不要盲目增加线程。
 
 转换器执行以下步骤：
 
@@ -96,7 +108,15 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 3. 重新执行 DSL 产生 gold answer；
 4. 将实体 ID 对应标签与原 KQA answer 对账；
 5. 运行局部物化、必要性、shortcut、answer leakage 和 canonical trace replay；
-6. 接受样本写入 `tasks.parquet`/`traces.parquet`，其他样本写入 `rejections.parquet`。
+6. SFT 默认不内联 witness，不再用无关邻域填满 5 万条边；
+7. 接受样本以 bounded row group 写入 `tasks.parquet`/`traces.parquet`，其他样本写入
+   `rejections.parquet`。
+
+默认 `--max-witness-facts 0` 会显式设置 `witness_complete=false` 和
+`generation.witness_omitted=true`。这不影响 gold、verification 或 canonical trace；它们都由完整
+程序执行产生。若归档实验需要 inline witness，可设置正整数；超过上限的记录会设置
+`generation.witness_truncated=true`。提高该上限不会增加可训练样本数，只会增加图查询、I/O 和
+存储，通常不应为 SFT 开启。
 
 当前仍未支持 qualifier 查询、`QFilter*`、`QueryAttrUnderCondition` 和 `Verify*`。这些操作
 不会被猜测性转换，而是保留原程序并标记 `UNSUPPORTED_KOPL_OPERATOR`。属性投影、关系查询和
@@ -106,24 +126,46 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 
 ```bash
 python -m graphtask_r1.cli data audit \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task \
+  --training-view-output data/processed/kqapro/kqapro-v1/train/training_tasks.parquet
+
+python -m graphtask_r1.cli data audit \
+  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet --kind task \
+  --training-view-output data/processed/kqapro/kqapro-v1/val/training_tasks.parquet
 
 python -m graphtask_r1.cli data build-relation-catalog \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
   --output data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
   --output data/training/kqapro_graphscript_v02_sft_train.parquet \
   --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/val/tasks.parquet \
+  --input data/processed/kqapro/kqapro-v1/val/training_tasks.parquet \
   --output data/training/kqapro_graphscript_v02_sft_val.parquet \
   --roles solver --interaction-mode graphscript --graphscript-version 0.2 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
+
+默认 audit 是训练前快速质量门；它不会重新执行程序，也不会构造每条 witness 的数万个 `Triple`
+对象。`--training-view-output` 只保留问题、程序、gold、topic entities 和 verification 等下游训练字段；
+旧版大 witness 只读取一次，后续 catalog、SFT export 和 preflight 都处理轻量文件。完整证书字段检查使用：
+
+```bash
+python -m graphtask_r1.cli data audit \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet --kind task --deep
+```
+
+`--deep` 适合抽样或最终归档检查，不应作为每次 SFT 导出的必经步骤。程序执行正确性已经在
+`data prepare` 的 verification 和 canonical trace replay 中完成。
+
+后续速度优先级依次是：先使用 `training_tasks.parquet`，再构建一次 relation catalog，然后流式
+导出 SFT，最后用真实 ms-swift template 做 token preflight。不要让 catalog、export 或 preflight
+重新读取带巨大 witness 的旧 `tasks.parquet`。首次加载模型/tokenizer 可能需要下载并看似停顿，
+应先确认本地模型缓存；token encode 本身是后续步骤中不可省略的主要 CPU 开销。
 
 必须检查 `metrics.json` 中的接受率和各 reason code。`SOURCE_ANSWER_MISMATCH`、
 `INCOMPLETE_SLICE` 或 `TRACE_REPLAY_MISMATCH` 大量出现时不要训练。

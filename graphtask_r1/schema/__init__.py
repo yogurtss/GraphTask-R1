@@ -33,6 +33,7 @@ from graphtask_r1.schema.task import (
     TaskCertificate,
     TaskProposal,
     TaskProvenance,
+    TaskTrainingRecord,
     VerificationSummary,
 )
 from graphtask_r1.schema.trajectory import (
@@ -74,6 +75,7 @@ __all__ = [
     "TaskCertificate",
     "TaskProposal",
     "TaskProvenance",
+    "TaskTrainingRecord",
     "ToolCall",
     "Trajectory",
     "Triple",

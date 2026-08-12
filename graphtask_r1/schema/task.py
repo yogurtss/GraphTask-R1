@@ -76,6 +76,7 @@ class TaskCertificate(BaseModel):
     sparql: str
     gold_answers: AnswerSet
     witness_facts: tuple[Triple, ...]
+    witness_complete: bool = True
     program_signature: str
     program_cost: float = Field(ge=0)
     operator_tags: tuple[str, ...] = ()
@@ -84,3 +85,18 @@ class TaskCertificate(BaseModel):
     provenance: TaskProvenance = TaskProvenance()
     solver_stats: dict[str, Any] = {}
     generation: dict[str, Any] = {}
+
+
+class TaskTrainingRecord(BaseModel):
+    """Training-critical task fields; large inline witnesses are intentionally ignored."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    task_id: str = Field(min_length=1)
+    split: str | None = None
+    graph_snapshot: str = "toy-v1"
+    question: str = Field(min_length=1)
+    topic_entities: tuple[EntityInfo, ...]
+    program: Program
+    gold_answers: AnswerSet
+    verification: VerificationSummary

@@ -13,6 +13,7 @@ from graphtask_r1.schema import (
     Entity,
     FilterLiteral,
     FilterType,
+    Hop,
     LiteralValue,
     Union,
     parse_program,
@@ -82,6 +83,10 @@ def test_kqapro_prepare_executes_and_replays(
     assert metrics["accepted"] == 1
     tasks = read_records(output_dir / "train" / "tasks.parquet")
     assert tasks[0]["gold_answers"]["answers"][0]["value"] == "e_bob"
+    assert tasks[0]["witness_complete"] is False
+    assert tasks[0]["witness_facts"] == []
+    assert tasks[0]["generation"]["max_witness_facts"] == 0
+    assert tasks[0]["generation"]["witness_omitted"] is True
     assert (
         read_records(output_dir / "train" / "traces.parquet")[0]["final_answers"]
         == tasks[0]["gold_answers"]
@@ -119,6 +124,74 @@ def test_kqapro_reuses_matching_graph_snapshot(tmp_path: Path) -> None:
     assert first["build"]["reused"] is False
     assert second["build"]["reused"] is True
     assert rebuilt["build"]["reused"] is False
+
+
+def test_sqlite_shortcut_primitives_avoid_full_answer_materialization(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    try:
+        program = Hop(input=Entity(entity_id="e_alice"), relation="friend")
+        assert backend.execute_entity_ids(program) == frozenset({"e_bob"})
+        assert ("friend", "out") in backend.relation_hops(("e_alice",))
+        assert ("friend", "in") in backend.relation_hops(("e_bob",))
+    finally:
+        backend.close()
+
+
+def test_kqapro_bounds_and_marks_large_causal_witness(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    kb = json.loads((raw_dir / "kb.json").read_text())
+    for index in range(5):
+        entity_id = f"e_friend_{index}"
+        kb["entities"][entity_id] = {
+            "name": f"Friend {index}",
+            "instanceOf": ["c_person"],
+            "attributes": [],
+            "relations": [],
+        }
+        kb["entities"]["e_alice"]["relations"].append(
+            {
+                "predicate": "colleague",
+                "direction": "forward",
+                "object": entity_id,
+                "qualifiers": {},
+            }
+        )
+    (raw_dir / "kb.json").write_text(json.dumps(kb))
+    row = {
+        "id": "q-count",
+        "question": "How many colleagues does Alice have?",
+        "program": [
+            {"function": "Find", "dependencies": [], "inputs": ["Alice"]},
+            {
+                "function": "Relate",
+                "dependencies": [0],
+                "inputs": ["colleague", "forward"],
+            },
+            {"function": "Count", "dependencies": [1], "inputs": []},
+        ],
+        "answer": "5",
+    }
+    (raw_dir / "train.json").write_text(json.dumps([row]))
+
+    output_dir = tmp_path / "processed"
+    metrics = prepare_kqapro(
+        raw_dir,
+        output_dir,
+        splits=("train",),
+        max_witness_facts=2,
+    )
+    task = read_records(output_dir / "train" / "tasks.parquet")[0]
+
+    assert metrics["accepted"] == 1
+    assert metrics["max_witness_facts"] == 2
+    assert len(task["witness_facts"]) == 2
+    assert task["witness_complete"] is False
+    assert task["generation"]["witness_truncated"] is True
 
 
 def test_kopl_mapper_supports_query_and_selection_operators(tmp_path: Path) -> None:

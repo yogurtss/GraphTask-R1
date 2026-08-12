@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 from graphtask_r1.dsl import canonical_signature, compile_sparql, operator_tags, program_cost
 from graphtask_r1.generation import TraceCompilationError, compile_trace
 from graphtask_r1.graph import SQLiteGraphBackend
+from graphtask_r1.graph.materialize import materialize_program
 from graphtask_r1.schema import (
     AllEntities,
     AnswerSet,
@@ -28,23 +29,25 @@ from graphtask_r1.schema import (
     SelectBetween,
     TaskCertificate,
     TaskProvenance,
+    Triple,
     Union,
     VerificationSummary,
 )
 from graphtask_r1.utils import (
     ProgressLogger,
+    RecordWriter,
     file_hash,
+    iter_json_array,
     ordered_parallel_map,
     stable_hash,
     validate_workers,
     write_json,
     write_manifest,
-    write_records,
 )
 from graphtask_r1.verification import verify_task
 
 GRAPH_CONVERTER_VERSION = "kqapro-core-v2"
-TASK_CONVERTER_VERSION = "kqapro-core-v3"
+TASK_CONVERTER_VERSION = "kqapro-core-v4"
 UNSUPPORTED_KOPL = {
     "QFilterStr",
     "QFilterNum",
@@ -360,6 +363,7 @@ def _convert_kqapro_row_uncached(
     seed: int,
     max_trace_tool_calls: int,
     max_trace_query_results: int,
+    max_witness_facts: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     index, row = item
     try:
@@ -380,7 +384,23 @@ def _convert_kqapro_row_uncached(
         signature = canonical_signature(program)
         source_id = str(row.get("id", index))
         task_id = f"gt_kqapro_{split}_{stable_hash([source_id, signature])[:16]}"
-        witness_facts = backend.materialize(program).triples
+        witness_facts: tuple[Triple, ...] = ()
+        witness_complete = False
+        witness_truncated = False
+        witness_omitted = max_witness_facts == 0
+        if max_witness_facts:
+            witness_slice = materialize_program(
+                backend,
+                program,
+                snapshot_id="kqapro-v1",
+                max_nodes=max(100, max_witness_facts * 2 + 20),
+                max_edges=max_witness_facts,
+                include_neighborhood=False,
+                include_metadata=False,
+            )
+            witness_facts = witness_slice.triples
+            witness_complete = witness_slice.complete
+            witness_truncated = witness_slice.truncated
         task = TaskCertificate(
             task_id=task_id,
             source="kqapro",
@@ -393,6 +413,7 @@ def _convert_kqapro_row_uncached(
             sparql=compile_sparql(program),
             gold_answers=answers,
             witness_facts=witness_facts,
+            witness_complete=witness_complete,
             program_signature=signature,
             program_cost=program_cost(program),
             operator_tags=operator_tags(program),
@@ -412,7 +433,13 @@ def _convert_kqapro_row_uncached(
                 converter_version=TASK_CONVERTER_VERSION,
                 source_hash=source_hash,
             ),
-            generation={"seed": seed, "graph_snapshot": "kqapro-v1"},
+            generation={
+                "seed": seed,
+                "graph_snapshot": "kqapro-v1",
+                "max_witness_facts": max_witness_facts,
+                "witness_truncated": witness_truncated,
+                "witness_omitted": witness_omitted,
+            },
         )
         trace = compile_trace(
             task_id,
@@ -455,6 +482,7 @@ def _convert_kqapro_row(
     seed: int,
     max_trace_tool_calls: int,
     max_trace_query_results: int,
+    max_witness_facts: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     with backend.query_cache():
         return _convert_kqapro_row_uncached(
@@ -467,6 +495,7 @@ def _convert_kqapro_row(
             seed=seed,
             max_trace_tool_calls=max_trace_tool_calls,
             max_trace_query_results=max_trace_query_results,
+            max_witness_facts=max_witness_facts,
         )
 
 
@@ -483,6 +512,7 @@ class _KQAProWorker:
         seed: int,
         max_trace_tool_calls: int,
         max_trace_query_results: int,
+        max_witness_facts: int,
         parallel: bool,
     ) -> None:
         self.mapper = mapper
@@ -494,6 +524,7 @@ class _KQAProWorker:
         self.seed = seed
         self.max_trace_tool_calls = max_trace_tool_calls
         self.max_trace_query_results = max_trace_query_results
+        self.max_witness_facts = max_witness_facts
         self.parallel = parallel
         self.local = threading.local()
         self.backends: list[SQLiteGraphBackend] = []
@@ -521,6 +552,7 @@ class _KQAProWorker:
             seed=self.seed,
             max_trace_tool_calls=self.max_trace_tool_calls,
             max_trace_query_results=self.max_trace_query_results,
+            max_witness_facts=self.max_witness_facts,
         )
 
     def close(self) -> None:
@@ -539,12 +571,15 @@ def prepare_kqapro(
     rebuild_graph: bool = False,
     max_trace_tool_calls: int = 32,
     max_trace_query_results: int = 1_024,
+    max_witness_facts: int = 0,
 ) -> dict[str, Any]:
     validate_workers(workers)
     if max_trace_tool_calls < 2:
         raise ValueError("max_trace_tool_calls must be at least 2")
     if not 1 <= max_trace_query_results <= 4_096:
         raise ValueError("max_trace_query_results must be between 1 and 4096")
+    if not 0 <= max_witness_facts <= 50_000:
+        raise ValueError("max_witness_facts must be between 0 and 50000")
     kb_path = raw_dir / "kb.json"
     database_path = output_dir / "graph.sqlite"
     kb_source_hash = file_hash(kb_path)
@@ -573,17 +608,13 @@ def prepare_kqapro(
     split_metrics: dict[str, dict[str, int]] = {}
     for split in splits:
         source_path = raw_dir / f"{split}.json"
-        rows: list[dict[str, Any]] = json.loads(source_path.read_text())
-        if limit is not None:
-            rows = rows[:limit]
         source_hash = file_hash(source_path)
         if source_hash is None:
             raise FileNotFoundError(source_path)
-        tasks: list[dict[str, Any]] = []
-        traces: list[dict[str, Any]] = []
-        rejections: list[dict[str, Any]] = []
-        progress = ProgressLogger(f"data.prepare.kqapro.split.{split}", total=len(rows))
-        progress.start(source=str(source_path), workers=workers)
+        accepted = 0
+        rejected = 0
+        progress = ProgressLogger(f"data.prepare.kqapro.split.{split}", total=limit)
+        progress.start(source=str(source_path), workers=workers, loading="streaming")
         process = _KQAProWorker(
             mapper=mapper,
             backend=backend,
@@ -594,42 +625,50 @@ def prepare_kqapro(
             seed=seed,
             max_trace_tool_calls=max_trace_tool_calls,
             max_trace_query_results=max_trace_query_results,
+            max_witness_facts=max_witness_facts,
             parallel=workers > 1,
         )
 
+        split_dir = output_dir / split
+        input_count = 0
         try:
-            converted = ordered_parallel_map(process, enumerate(rows), workers=workers)
-            for index, (task, trace, rejection) in enumerate(converted):
-                if task is not None and trace is not None:
-                    tasks.append(task)
-                    traces.append(trace)
-                if rejection is not None:
-                    rejections.append(rejection)
-                progress.update(
-                    index + 1,
-                    accepted=len(tasks),
-                    rejected=len(rejections),
-                )
+            with (
+                RecordWriter(split_dir / "tasks.parquet") as task_writer,
+                RecordWriter(split_dir / "traces.parquet") as trace_writer,
+                RecordWriter(split_dir / "rejections.parquet") as rejection_writer,
+            ):
+                rows = iter_json_array(source_path, limit=limit)
+                converted = ordered_parallel_map(process, enumerate(rows), workers=workers)
+                for index, (task, trace, rejection) in enumerate(converted):
+                    input_count = index + 1
+                    if task is not None and trace is not None:
+                        task_writer.write(task)
+                        trace_writer.write(trace)
+                        accepted += 1
+                    if rejection is not None:
+                        rejection_writer.write(rejection)
+                        rejected += 1
+                    progress.update(
+                        index + 1,
+                        accepted=accepted,
+                        rejected=rejected,
+                    )
         finally:
             process.close()
-        split_dir = output_dir / split
-        write_records(split_dir / "tasks.parquet", tasks)
-        write_records(split_dir / "traces.parquet", traces)
-        write_records(split_dir / "rejections.parquet", rejections)
         progress.finish(
-            len(rows),
-            accepted=len(tasks),
-            rejected=len(rejections),
+            input_count,
+            accepted=accepted,
+            rejected=rejected,
             output=str(split_dir),
         )
         split_metrics[split] = {
-            "input": len(rows),
-            "accepted": len(tasks),
-            "rejected": len(rejections),
+            "input": input_count,
+            "accepted": accepted,
+            "rejected": rejected,
         }
         write_json(split_dir / "metrics.json", split_metrics[split])
-        total_tasks += len(tasks)
-        total_rejections += len(rejections)
+        total_tasks += accepted
+        total_rejections += rejected
     backend.close()
     summary = {
         "dataset": "kqapro",
@@ -642,6 +681,7 @@ def prepare_kqapro(
         "workers": workers,
         "max_trace_tool_calls": max_trace_tool_calls,
         "max_trace_query_results": max_trace_query_results,
+        "max_witness_facts": max_witness_facts,
     }
     write_json(output_dir / "metrics.json", summary)
     write_manifest(
@@ -653,6 +693,7 @@ def prepare_kqapro(
             "workers": workers,
             "max_trace_tool_calls": max_trace_tool_calls,
             "max_trace_query_results": max_trace_query_results,
+            "max_witness_facts": max_witness_facts,
         },
         ["graph.sqlite", "*/tasks.parquet", "*/traces.parquet", "*/rejections.parquet"],
     )
