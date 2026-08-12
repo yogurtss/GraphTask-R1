@@ -134,7 +134,9 @@ python -m graphtask_r1.cli data audit \
   --training-view-output data/processed/kqapro/kqapro-v1/val/training_tasks.parquet
 
 python -m graphtask_r1.cli data build-relation-catalog \
-  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+  --input \
+    data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+    data/processed/kqapro/kqapro-v1/val/training_tasks.parquet \
   --output data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli data export-sft \
@@ -153,6 +155,11 @@ python -m graphtask_r1.cli data export-sft \
 默认 audit 是训练前快速质量门；它不会重新执行程序，也不会构造每条 witness 的数万个 `Triple`
 对象。`--training-view-output` 只保留问题、程序、gold、topic entities 和 verification 等下游训练字段；
 旧版大 witness 只读取一次，后续 catalog、SFT export 和 preflight 都处理轻量文件。完整证书字段检查使用：
+
+relation catalog 必须覆盖所有使用同一 GraphScript contract 的 split。命令支持在一个 `--input` 后
+传入多个 task 文件，并将 relation 做 union；这只是共享图的 schema（relation ID/label），不包含
+val 问题、程序或答案。若只用小样本 train 构建 catalog，val 很容易出现
+`relation catalog is missing program relations`，不应通过跳过覆盖检查来规避。
 
 ```bash
 python -m graphtask_r1.cli data audit \

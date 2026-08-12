@@ -241,7 +241,13 @@ def build_parser() -> argparse.ArgumentParser:
     select_interaction.add_argument("--max-returned-entities", type=int, default=1_000)
 
     catalog = data_actions.add_parser("build-relation-catalog")
-    catalog.add_argument("--input", type=Path, required=True)
+    catalog.add_argument(
+        "--input",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="one or more task files; relations are unioned into one shared catalog",
+    )
     catalog.add_argument("--output", type=Path, required=True)
     catalog.add_argument("--snapshot")
     catalog.add_argument("--limit", type=int)
@@ -290,18 +296,31 @@ def _load_tasks(path: Path, limit: int | None) -> list[TaskCertificate]:
 
 
 def _iter_training_tasks(
-    path: Path, limit: int | None
+    paths: Path | Sequence[Path], limit: int | None
 ) -> tuple[Iterator[TaskTrainingRecord], int]:
-    total = min(record_count(path), limit) if limit is not None else record_count(path)
+    source_paths = (paths,) if isinstance(paths, Path) else tuple(paths)
+    if not source_paths:
+        raise ValueError("at least one task input is required")
+    available = sum(record_count(path) for path in source_paths)
+    total = min(available, limit) if limit is not None else available
 
     def generate() -> Iterator[TaskTrainingRecord]:
         progress = ProgressLogger("data.load_training_tasks", total=total)
-        progress.start(path=str(path), loading="streaming", include_witness=False)
+        progress.start(
+            paths=[str(path) for path in source_paths],
+            loading="streaming",
+            include_witness=False,
+        )
         completed = 0
-        for completed, raw in enumerate(iter_record_json(path, limit=limit), start=1):
-            yield TaskTrainingRecord.model_validate_json(raw)
-            progress.update(completed)
-        progress.finish(completed, path=str(path))
+        for path in source_paths:
+            remaining = None if limit is None else limit - completed
+            if remaining is not None and remaining <= 0:
+                break
+            for raw in iter_record_json(path, limit=remaining):
+                completed += 1
+                yield TaskTrainingRecord.model_validate_json(raw)
+                progress.update(completed, path=str(path))
+        progress.finish(completed, paths=[str(path) for path in source_paths])
 
     return generate(), total
 

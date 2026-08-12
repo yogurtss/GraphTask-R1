@@ -88,6 +88,8 @@ python -m graphtask_r1.cli data export-sft \
 witness；relation catalog 和 SFT 导出复用这个轻量文件，不再反复读取旧版巨大记录。需要完整 witness
 schema 检查时显式添加 `--deep`。新生成的 KQAPro SFT task 默认不内联 causal witness facts，避免旧数据
 中单条任务接近 5 万事实造成的图查询、I/O 和内存放大；gold 和 trace 仍由完整程序执行产生。
+若还要导出 val，请让 `build-relation-catalog --input` 同时接收 train 和 val 的
+`training_tasks.parquet`，保证两个 split 使用同一个 relation allowlist。
 
 用训练时的真实模板筛出 32K 内有效样本，不启动训练：
 

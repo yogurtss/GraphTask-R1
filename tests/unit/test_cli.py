@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from graphtask_r1.cli import _launch_stage, build_parser
+from graphtask_r1.cli import _launch_stage, build_parser, main
+from graphtask_r1.generation import certify_proposal
+from graphtask_r1.graph import toy_graph
+from graphtask_r1.schema import Entity, Hop, TaskProposal
+from graphtask_r1.training.relations import load_relation_catalog
+from graphtask_r1.utils import write_records
 
 
 def test_data_prepare_accepts_positive_worker_count() -> None:
@@ -130,6 +135,50 @@ def test_sft_export_accepts_graphscript_v02() -> None:
         ]
     )
     assert args.graphscript_version == "0.2"
+
+
+def test_relation_catalog_unions_multiple_task_inputs(tmp_path: Path) -> None:
+    train_task = certify_proposal(
+        TaskProposal(
+            topic_entities=("alice",),
+            program=Hop(input=Entity(entity_id="alice"), relation="works_at"),
+        ),
+        toy_graph(),
+        graph_snapshot="toy-v1",
+    )
+    val_task = certify_proposal(
+        TaskProposal(
+            topic_entities=("acme",),
+            program=Hop(input=Entity(entity_id="acme"), relation="located_in"),
+        ),
+        toy_graph(),
+        graph_snapshot="toy-v1",
+    )
+    train_path = tmp_path / "train.parquet"
+    val_path = tmp_path / "val.parquet"
+    output = tmp_path / "relations.json"
+    write_records(train_path, [train_task.model_dump(mode="json")])
+    write_records(val_path, [val_task.model_dump(mode="json")])
+
+    assert (
+        main(
+            [
+                "data",
+                "build-relation-catalog",
+                "--input",
+                str(train_path),
+                str(val_path),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    assert [relation.relation_id for relation in load_relation_catalog(output)] == [
+        "located_in",
+        "works_at",
+    ]
 
 
 def test_kilt_grpo_profile_starts_from_kqapro_sft_adapter(
