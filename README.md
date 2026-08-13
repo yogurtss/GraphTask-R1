@@ -24,6 +24,9 @@ KQAPro 的 SFT、GRPO、relation catalog 或 checkpoint。
 base direct、base tool、SFT、GRPO 的单模式部署/评测、任意多模式结果汇总和静态 HTML 路径
 可视化见
 [KQAPro 模型评测与路径可视化 README](docs/KQAPRO_EVAL_VIS_README.md)。
+Qwen3-8B 的 SFT、GRPO 和单模型 eval 静态配置示例见
+[KQAPro 训练流程的 8B 小节](docs/KQAPRO_TRAINING.md#21-qwen3-8b-配置示例)；配置检查可只运行
+`--dry-run`，不会启动训练或下载权重。
 
 ## 目录约定
 

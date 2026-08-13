@@ -11,6 +11,8 @@ eval_batch_size: 4
 gradient_accumulation_steps: 4
 steps_per_generation: 4
 rollout_n: 4
+learning_rate: 2.0e-6
+scale_learning_rate_with_micro_batch: true
 experiment_name: qwen3-4b-kqapro-solver-grpo-ms-swift-cu124
 interaction_mode: graphscript
 graphscript_version: "0.3"

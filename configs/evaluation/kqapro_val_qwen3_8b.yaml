@@ -1,0 +1,18 @@
+# Single-mode eval/visualization example for a deployed Qwen3-8B base or adapter.
+input_path: ${KQAPRO_DIR}/val/tasks.parquet
+relation_catalog: ${KQAPRO_DIR}/relation_catalog.json
+graph_snapshot: kqapro-v1
+graphscript_version: "0.3"
+
+model:
+  model_url: ${KQAPRO_MODEL_URL}
+  model: ${KQAPRO_MODEL}
+  max_completion_tokens: 4096
+
+seed: 42
+concurrency: 1
+request_timeout_s: 900
+request_retries: 1
+max_follow_limit: 100
+max_edge_visits: 200
+max_returned_entities: 1000

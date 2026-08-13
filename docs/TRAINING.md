@@ -27,6 +27,15 @@ data/training/
 └── kqapro_graphscript_v03_grpo_val.parquet
 ```
 
+Qwen3-8B 使用相同的配置驱动入口，无需修改训练代码。仓库已提供
+`configs/experiments/qwen3_8b_sft_ms_swift_cuda124.yaml` 和
+`configs/experiments/qwen3_8b_solver_grpo_ms_swift_cuda124.yaml`；参数含义、纯 `--dry-run`
+检查和显存边界见 [KQAPro 训练流程：Qwen3-8B 配置示例](KQAPRO_TRAINING.md#21-qwen3-8b-配置示例)。
+这些配置不会自行下载模型，只有去掉 `--dry-run` 后才会进入 ms-swift。
+8B 示例当前使用 `micro_batch_size=2`；`learning_rate` 记录 micro 为 1 时的基准，launcher 在
+`scale_learning_rate_with_micro_batch: true` 时线性放大最终 LR。显式环境变量 `LR` 可覆盖自动
+结果，且不会被二次缩放。
+
 ## 2. SFT 长度预检
 
 预检会调用与训练相同的 model type、Qwen3 template、Hermes agent template 和

@@ -1,0 +1,24 @@
+# Qwen3-8B LoRA SFT example. Validate with --dry-run before allocating GPUs.
+training_backend: ms_swift
+model_path: Qwen/Qwen3-8B
+model_type: qwen3
+train_data: ${SFT_TRAIN_DATA}
+val_data: ${SFT_VAL_DATA}
+output_dir: ${QWEN3_8B_SFT_OUTPUT_DIR}
+
+# 4xH100 higher-batch profile: 4 * 2 * 8 = 64 globally.
+# learning_rate is the micro_batch_size=1 baseline; the launcher emits LR=2e-5.
+num_gpus: 4
+micro_batch_size: 2
+eval_batch_size: 1
+gradient_accumulation_steps: 8
+max_length: 32768
+learning_rate: 1.0e-5
+scale_learning_rate_with_micro_batch: true
+epochs: 2
+lora_rank: 32
+lora_alpha: 64
+
+experiment_name: qwen3-8b-kqapro-sft-ms-swift-cu124
+interaction_mode: graphscript
+graphscript_version: "0.3"

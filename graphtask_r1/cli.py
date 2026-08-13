@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 from collections.abc import Iterator, Sequence
+from decimal import Decimal, InvalidOperation
 from itertools import chain
 from pathlib import Path
 from time import perf_counter
@@ -455,6 +456,15 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
         "gradient_accumulation_steps": "GRADIENT_ACCUMULATION_STEPS",
         "steps_per_generation": "STEPS_PER_GENERATION",
         "rollout_n": "ROLLOUT_N",
+        "max_length": "MAX_LENGTH",
+        "max_completion_length": "MAX_COMPLETION_LENGTH",
+        "lora_rank": "LORA_RANK",
+        "lora_alpha": "LORA_ALPHA",
+        "learning_rate": "LR",
+        "epochs": "EPOCHS",
+        "vllm_mode": "VLLM_MODE",
+        "temperature": "TEMPERATURE",
+        "train_cuda_visible_devices": "TRAIN_CUDA_VISIBLE_DEVICES",
         "experiment_name": "EXPERIMENT_NAME",
         "lora_adapter_path": "LORA_ADAPTER_PATH",
         "interaction_mode": "INTERACTION_MODE",
@@ -468,6 +478,11 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
         "gradient_accumulation_steps",
         "steps_per_generation",
         "rollout_n",
+        "max_length",
+        "max_completion_length",
+        "lora_rank",
+        "lora_alpha",
+        "epochs",
     }
     for source, target in env_keys.items():
         if target in os.environ:
@@ -481,6 +496,25 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
                 raise ValueError(f"{target} must be a positive integer") from exc
             if parsed < 1 or str(parsed) != selected_env[target]:
                 raise ValueError(f"{target} must be a positive integer")
+    scale_lr = config.get("scale_learning_rate_with_micro_batch", False)
+    if not isinstance(scale_lr, bool):
+        raise ValueError("scale_learning_rate_with_micro_batch must be a boolean")
+    if "LR" in selected_env:
+        try:
+            base_lr = Decimal(selected_env["LR"])
+        except InvalidOperation as exc:
+            raise ValueError("LR must be a positive finite number") from exc
+        if not base_lr.is_finite() or base_lr <= 0:
+            raise ValueError("LR must be a positive finite number")
+        micro_batch = int(selected_env.get("MICRO_BATCH_SIZE", "1"))
+        if scale_lr and micro_batch > 1 and "LR" not in os.environ:
+            selected_env["LR"] = str(base_lr * micro_batch)
+    elif scale_lr:
+        raise ValueError(
+            "learning_rate is required when scale_learning_rate_with_micro_batch is enabled"
+        )
+    if selected_env.get("VLLM_MODE") not in {None, "server", "colocate"}:
+        raise ValueError("VLLM_MODE must be server or colocate")
     if stage == "solver-grpo":
         num_gpus = int(selected_env.get("NUM_GPUS", "1"))
         micro_batch = int(selected_env.get("MICRO_BATCH_SIZE", "1"))

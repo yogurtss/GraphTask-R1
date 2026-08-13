@@ -46,6 +46,69 @@ mkdir -p "$KQAPRO_TRAINING" outputs/preflight
 `KQAPRO_RAW` 应包含 `kb.json`、`train.json` 和 `val.json`。CUDA 12.4、PyTorch 与
 ms-swift 3.6.4 的安装见 [ms-swift 环境说明](MS_SWIFT_CUDA_12_4.md)。
 
+### 2.1 Qwen3-8B 配置示例
+
+训练入口不依赖固定参数量：基础模型由 `model_path` 和 `model_type` 选择，SFT/GRPO 都采用
+LoRA、BF16、gradient checkpointing，因此同一条代码路径可以配置 Qwen3-8B。仓库提供三份仅作
+配置起点的示例：
+
+- `configs/experiments/qwen3_8b_sft_ms_swift_cuda124.yaml`；
+- `configs/experiments/qwen3_8b_solver_grpo_ms_swift_cuda124.yaml`；
+- `configs/evaluation/kqapro_val_qwen3_8b.yaml`。
+
+示例使用官方 [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B)，按一台 4×H100 服务器
+配置，并给出一个 `micro_batch_size=2` 的较大 batch 档位：
+
+- SFT 使用全部 4 张 GPU，`4 × 2 × 8 = 64` 的全局有效 batch；
+- GRPO 使用 GPU 0 运行 rollout server、GPU 1–3 训练；训练 batch、采样 batch 和评测 batch
+  分别为 24、24 和 12 completions，每个 prompt 采样 4 条 completion。
+
+该档位没有经过真实训练验证，因此不是显存或吞吐保证；实际可用上限取决于 H100 显存规格、
+CUDA/ms-swift/vLLM 版本、样本长度和 adapter 配置。
+若模型已经在本地，将两个训练 YAML 的
+`model_path` 改为本地模型目录即可，避免运行时访问 Hugging Face。
+
+以下命令只解析 YAML、检查 batch 约束并打印将要执行的脚本和环境；不会启动 ms-swift、加载权重
+或下载模型：
+
+```bash
+python -m graphtask_r1.cli train sft \
+  --config configs/experiments/qwen3_8b_sft_ms_swift_cuda124.yaml --dry-run
+
+python -m graphtask_r1.cli train solver-grpo \
+  --config configs/experiments/qwen3_8b_solver_grpo_ms_swift_cuda124.yaml --dry-run
+```
+
+8B YAML 显式记录 `max_length`/`max_completion_length`、学习率、epoch、LoRA 参数和 GRPO
+`vllm_mode`；launcher 会把这些字段传给现有脚本，环境变量仍具有最高优先级。两份 YAML 还启用
+`scale_learning_rate_with_micro_batch: true`。其中 `learning_rate` 表示 micro batch 为 1 时的基准
+LR，最终值按下式生成：
+
+```text
+micro_batch_size > 1 时：final LR = learning_rate × micro_batch_size
+micro_batch_size = 1 时：final LR = learning_rate
+```
+
+因此当前 SFT dry-run 输出 `LR=2e-5`，GRPO 输出 `LR=2e-6`。通过环境变量修改
+`MICRO_BATCH_SIZE` 也会重新计算；若同时显式设置环境变量 `LR`，则认为用户已经人工决定学习率，
+不再自动缩放。正式运行前仍应先用目标 tokenizer 做长度 preflight，并从 bounded 数据开始；若
+micro 2 显存不足，改回 1 后 LR 会自动回到基准值。不要通过自动截断丢掉 GraphScript 尾部。
+
+未来实际运行 8B GRPO 时，应先在一个终端用 GPU 0 启动 rollout server，再启动 learner；以下
+只是部署示例，本次配置检查不会执行它：
+
+```bash
+export MODEL_PATH=Qwen/Qwen3-8B
+export LORA_ADAPTER_PATH=/path/to/qwen3-8b-sft-adapter
+export ROLLOUT_CUDA_VISIBLE_DEVICES=0
+export ROLLOUT_TP_SIZE=1
+export VLLM_MAX_MODEL_LEN=32768
+bash scripts/rollout_ms_swift.sh
+```
+
+learner YAML 已固定 `TRAIN_CUDA_VISIBLE_DEVICES=1,2,3`，不会与 rollout GPU 重叠。修改 micro、
+梯度累积或 `rollout_n` 后必须继续满足 GRPO batch 整除约束，并把 batch 变化作为单独实验记录。
+
 ## 3. 构建、认证与审计
 
 先按仓库约束运行 bounded smoke；它使用完整 self-play verification gates 和 canonical trace，
@@ -171,6 +234,8 @@ export GRADIENT_ACCUMULATION_STEPS=16
 ```
 
 环境变量优先级高于 YAML；`--dry-run` 输出的 `environment` 是最终实际值。
+若配置启用了 `scale_learning_rate_with_micro_batch`，`learning_rate` 是 micro batch 为 1 的基准；
+micro 大于 1 时 launcher 会线性放大最终 `LR`。显式环境变量 `LR` 始终优先且不会再次缩放。
 
 ## 5. Solver GRPO
 
@@ -240,6 +305,9 @@ export ROLLOUT_N=2
 
 这些关系遵循 ms-swift 的 completion-level GRPO batch 定义。不要把 `rollout_n` 当成普通训练
 batch；它表示同一个 prompt 的候选 completion 数。
+
+GRPO 使用与 SFT 相同的 micro batch LR 规则。注意 LR 只随 `micro_batch_size` 缩放，不随
+`num_gpus`、`gradient_accumulation_steps` 或 `rollout_n` 自动变化。
 
 以上是单 GPU bounded smoke 参数。确认 parse、execution、reward 分量和显存后，再增加 GPU、
 rollout 数与 completion 上限。正式 server 模式的启动方式见 [训练手册](TRAINING.md)。

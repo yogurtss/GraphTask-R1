@@ -1,0 +1,31 @@
+# Qwen3-8B LoRA GRPO example. It expects the matching 8B SFT adapter.
+training_backend: ms_swift
+model_path: Qwen/Qwen3-8B
+model_type: qwen3
+lora_adapter_path: ${QWEN3_8B_SFT_ADAPTER}
+train_data: ${SOLVER_RL_TRAIN_DATA}
+val_data: ${SOLVER_RL_VAL_DATA}
+output_dir: ${QWEN3_8B_GRPO_OUTPUT_DIR}
+
+# 4xH100 profile: GPU 0 hosts rollout; GPUs 1-3 are learners.
+# Train/generation batches are 24 completions; evaluation remains 12.
+# learning_rate is the micro_batch_size=1 baseline; the launcher emits LR=2e-6.
+num_gpus: 3
+train_cuda_visible_devices: "1,2,3"
+micro_batch_size: 2
+eval_batch_size: 4
+gradient_accumulation_steps: 4
+steps_per_generation: 4
+rollout_n: 4
+max_completion_length: 4096
+learning_rate: 1.0e-6
+scale_learning_rate_with_micro_batch: true
+epochs: 1
+lora_rank: 32
+lora_alpha: 64
+temperature: 1.0
+vllm_mode: server
+
+experiment_name: qwen3-8b-kqapro-solver-grpo-ms-swift-cu124
+interaction_mode: graphscript
+graphscript_version: "0.3"

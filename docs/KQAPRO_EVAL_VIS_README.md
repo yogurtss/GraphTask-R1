@@ -119,6 +119,17 @@ ID。切换 base checkpoint 与 SFT/GRPO checkpoint 时，修改当前服务和�
 延迟和输出格式后再调到 2；只有服务端确有更多并行容量时才继续提高。SGLang 的队列等待也计入
 `request_timeout_s`。随机 seed、GraphScript limit 和图执行预算均显式记录在 `metrics.json` 中。
 
+8B 单模型评测/可视化可复制
+[configs/evaluation/kqapro_val_qwen3_8b.yaml](../configs/evaluation/kqapro_val_qwen3_8b.yaml)。它只把
+客户端初始值改得更保守：`concurrency: 1`、`request_timeout_s: 900`，并保持输出上限 4096。
+配置本身不会下载或启动模型；`KQAPRO_MODEL_URL` 仍指向用户已经部署的一个 OpenAI-compatible
+服务，`KQAPRO_MODEL` 必须使用该服务 `/v1/models` 返回的 ID。base、base_tool、SFT 和 GRPO
+继续分别调用，一次只传一个 `--model-stage`。
+
+如果服务加载官方 `Qwen/Qwen3-8B`，第 4–6 节的部署方式不变，只需将 `BASE_MODEL` 或 adapter 的
+基础模型路径换成 8B，并按显存调整 `--tp-size`。仓库不会根据 YAML 自动部署、下载或合并 8B
+权重；首次连接仍应先跑 bounded smoke，再决定是否提高 concurrency 或 token 上限。
+
 ### 3.1 当前 SGLang 部署不是 PD 分离
 
 本文的启动命令只运行一个 `python -m sglang.launch_server`。prefill 和 decode 位于同一服务进程

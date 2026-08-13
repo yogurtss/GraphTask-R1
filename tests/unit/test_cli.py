@@ -384,6 +384,135 @@ def test_non_ms_swift_training_backend_is_rejected(tmp_path: Path) -> None:
         _launch_stage("sft", config, dry_run=True)
 
 
+def test_qwen3_8b_example_configs_are_dry_run_only_and_fully_mapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mapped_variables = (
+        "MODEL_PATH",
+        "NUM_GPUS",
+        "MICRO_BATCH_SIZE",
+        "EVAL_BATCH_SIZE",
+        "GRADIENT_ACCUMULATION_STEPS",
+        "STEPS_PER_GENERATION",
+        "MAX_LENGTH",
+        "MAX_COMPLETION_LENGTH",
+        "LORA_RANK",
+        "LORA_ALPHA",
+        "LR",
+        "EPOCHS",
+        "VLLM_MODE",
+        "ROLLOUT_N",
+        "TRAIN_CUDA_VISIBLE_DEVICES",
+    )
+    for variable in mapped_variables:
+        monkeypatch.delenv(variable, raising=False)
+
+    sft = _launch_stage(
+        "sft",
+        Path("configs/experiments/qwen3_8b_sft_ms_swift_cuda124.yaml"),
+        dry_run=True,
+    )
+    grpo = _launch_stage(
+        "solver-grpo",
+        Path("configs/experiments/qwen3_8b_solver_grpo_ms_swift_cuda124.yaml"),
+        dry_run=True,
+    )
+
+    assert sft["command"] == ["bash", "scripts/train_ms_swift_sft.sh"]
+    assert sft["environment"]["MODEL_PATH"] == "Qwen/Qwen3-8B"
+    assert sft["environment"]["NUM_GPUS"] == "4"
+    assert sft["environment"]["MICRO_BATCH_SIZE"] == "2"
+    assert sft["environment"]["GRADIENT_ACCUMULATION_STEPS"] == "8"
+    assert sft["environment"]["MAX_LENGTH"] == "32768"
+    assert sft["environment"]["LR"] == "0.00002"
+    assert sft["environment"]["LORA_RANK"] == "32"
+    assert grpo["command"] == ["bash", "scripts/train_ms_swift_grpo.sh"]
+    assert grpo["environment"]["MODEL_PATH"] == "Qwen/Qwen3-8B"
+    assert grpo["environment"]["NUM_GPUS"] == "3"
+    assert grpo["environment"]["MICRO_BATCH_SIZE"] == "2"
+    assert grpo["environment"]["EVAL_BATCH_SIZE"] == "4"
+    assert grpo["environment"]["GRADIENT_ACCUMULATION_STEPS"] == "4"
+    assert grpo["environment"]["STEPS_PER_GENERATION"] == "4"
+    assert grpo["environment"]["MAX_COMPLETION_LENGTH"] == "4096"
+    assert grpo["environment"]["LR"] == "0.000002"
+    assert grpo["environment"]["ROLLOUT_N"] == "4"
+    assert grpo["environment"]["VLLM_MODE"] == "server"
+    assert grpo["environment"]["TRAIN_CUDA_VISIBLE_DEVICES"] == "1,2,3"
+
+
+@pytest.mark.parametrize("stage", ["sft", "solver-grpo"])
+def test_learning_rate_scales_linearly_with_micro_batch(
+    stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LR", raising=False)
+    monkeypatch.delenv("MICRO_BATCH_SIZE", raising=False)
+    config = tmp_path / "train.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "training_backend: ms_swift",
+                "num_gpus: 2",
+                "micro_batch_size: 3",
+                "eval_batch_size: 2",
+                "gradient_accumulation_steps: 2",
+                "steps_per_generation: 2",
+                "rollout_n: 2",
+                "learning_rate: 1.0e-5",
+                "scale_learning_rate_with_micro_batch: true",
+            ]
+        )
+        + "\n"
+    )
+
+    result = _launch_stage(stage, config, dry_run=True)
+
+    assert result["environment"]["MICRO_BATCH_SIZE"] == "3"
+    assert result["environment"]["LR"] == "0.00003"
+
+
+def test_explicit_lr_environment_override_is_not_scaled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LR", "7e-6")
+    monkeypatch.delenv("MICRO_BATCH_SIZE", raising=False)
+    config = tmp_path / "sft.yaml"
+    config.write_text(
+        "training_backend: ms_swift\n"
+        "micro_batch_size: 2\n"
+        "learning_rate: 1.0e-5\n"
+        "scale_learning_rate_with_micro_batch: true\n"
+    )
+
+    result = _launch_stage("sft", config, dry_run=True)
+
+    assert result["environment"]["LR"] == "7e-6"
+
+
+def test_lr_scaling_requires_boolean_flag(tmp_path: Path) -> None:
+    config = tmp_path / "sft.yaml"
+    config.write_text(
+        "training_backend: ms_swift\n"
+        "learning_rate: 1.0e-5\n"
+        "scale_learning_rate_with_micro_batch: 'yes'\n"
+    )
+
+    with pytest.raises(
+        ValueError, match="scale_learning_rate_with_micro_batch must be a boolean"
+    ):
+        _launch_stage("sft", config, dry_run=True)
+
+
+def test_launch_stage_rejects_invalid_vllm_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VLLM_MODE", raising=False)
+    config = tmp_path / "grpo.yaml"
+    config.write_text("training_backend: ms_swift\nvllm_mode: invalid\n")
+
+    with pytest.raises(ValueError, match="VLLM_MODE must be server or colocate"):
+        _launch_stage("solver-grpo", config, dry_run=True)
+
+
 def test_rl_export_uses_backend_neutral_name() -> None:
     args = build_parser().parse_args(
         [

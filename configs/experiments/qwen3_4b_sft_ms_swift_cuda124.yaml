@@ -8,6 +8,8 @@ num_gpus: 4
 micro_batch_size: 1
 eval_batch_size: 1
 gradient_accumulation_steps: 8
+learning_rate: 2.0e-5
+scale_learning_rate_with_micro_batch: true
 experiment_name: qwen3-4b-kqapro-sft-ms-swift-cu124
 interaction_mode: graphscript
 graphscript_version: "0.3"
