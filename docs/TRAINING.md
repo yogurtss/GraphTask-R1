@@ -131,7 +131,84 @@ ms-swift GRPO、查找新 LoRA adapter，并写入 round manifest。配置 hash�
 路径和 ms-swift 版本用于恢复；修改配置后不能从旧 manifest 继续。外部图调用保留 timeout、retry、
 cache 和 trace ID。
 
-## 6. KQAPro val 验证
+## 6. 合并 SFT/GRPO LoRA 权重
+
+训练脚本使用 LoRA，因此 `checkpoint-last` 默认只包含增量 adapter；它不是可以脱离基础模型单独
+加载的完整权重。需要生成可独立部署、复制或归档的 Hugging Face 模型目录时，使用当前固定版本
+`ms-swift==3.6.4` 的 `swift export --merge_lora true`。v3.x 使用 `--adapters`，不要使用已移除的
+v2.x `--ckpt_dir` 参数。
+
+### 6.1 合并 SFT checkpoint
+
+```bash
+export BASE_MODEL=Qwen/Qwen3-4B-Instruct-2507
+export SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
+export SFT_MERGED=$PWD/outputs/merged/qwen3-4b-kqapro-sft
+
+test -f "$SFT_ADAPTER/adapter_config.json"
+test -f "$SFT_ADAPTER/adapter_model.safetensors"
+test ! -e "$SFT_MERGED"
+mkdir -p "$(dirname "$SFT_MERGED")"
+
+CUDA_VISIBLE_DEVICES=0 swift export \
+  --model "$BASE_MODEL" \
+  --adapters "$SFT_ADAPTER" \
+  --merge_lora true \
+  --output_dir "$SFT_MERGED"
+```
+
+### 6.2 合并 GRPO checkpoint
+
+GRPO 必须合并最终 GRPO adapter，不能误用它的 SFT 初始化 adapter：
+
+```bash
+export BASE_MODEL=Qwen/Qwen3-4B-Instruct-2507
+export GRPO_ADAPTER=$PWD/outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last
+export GRPO_MERGED=$PWD/outputs/merged/qwen3-4b-kqapro-grpo
+
+test -f "$GRPO_ADAPTER/adapter_config.json"
+test -f "$GRPO_ADAPTER/adapter_model.safetensors"
+test ! -e "$GRPO_MERGED"
+mkdir -p "$(dirname "$GRPO_MERGED")"
+
+CUDA_VISIBLE_DEVICES=0 swift export \
+  --model "$BASE_MODEL" \
+  --adapters "$GRPO_ADAPTER" \
+  --merge_lora true \
+  --output_dir "$GRPO_MERGED"
+```
+
+`--output_dir` 应指向一个尚不存在的新目录，避免把完整权重混入 adapter checkpoint。合并不会修改
+原 adapter，但需要同时读取基础模型和 adapter；应预留至少一份完整模型的磁盘空间，并保留原始
+adapter、训练 `args.json` 和 checkpoint manifest，以便追溯。
+
+### 6.3 检查合并产物
+
+```bash
+test -f "$SFT_MERGED/config.json"
+test -f "$SFT_MERGED/tokenizer_config.json"
+find "$SFT_MERGED" -maxdepth 1 \
+  \( -name 'model*.safetensors' -o -name 'model.safetensors.index.json' \) -print
+
+test -f "$GRPO_MERGED/config.json"
+test -f "$GRPO_MERGED/tokenizer_config.json"
+find "$GRPO_MERGED" -maxdepth 1 \
+  \( -name 'model*.safetensors' -o -name 'model.safetensors.index.json' \) -print
+```
+
+不要仅根据导出命令退出码判断合并正确。正式评测前，对同一个 checkpoint 做一次 adapter 与 merged
+的固定 prompt、`temperature=0` 对照；至少确认输出格式和 GraphScript 行为一致。然后按
+[评测与可视化 README](KQAPRO_EVAL_VIS_README.md#7-合并权重后的等价性检查)在同一组 KQAPro
+indices 上跑 bounded evaluation。合并后的目录部署时作为完整模型传给 `--model-path`，不再传
+`--enable-lora` 或 `--lora-paths`。
+
+合并命令依据 ms-swift 3.6.4 的
+[命令行参数说明](https://swift.readthedocs.io/en/v3.6/Instruction/Command-line-parameters.html)和
+[v3 迁移说明](https://swift.readthedocs.io/en/v3.6/Instruction/ReleaseNote3.0.html)。当前项目是普通
+Transformers Qwen3-4B LoRA；若以后切换到 Megatron/MCore、MoE 或混合全参训练，不应直接套用本节，
+需使用对应训练后端的专用 export 流程。
+
+## 7. KQAPro val 验证
 
 本阶段只用 `kqapro_graphscript_v03_grpo_val.parquet` 的冻结 val 行评测并选择 checkpoint；它由
 官方 `val.json` 的认证程序产生，不从隐藏 test 构造标签。KILT/HotpotQA 的检索型评测等独立路线
@@ -140,13 +217,14 @@ cache 和 trace ID。
 除 EM/F1 外必须报告 program parse rate、execution rate、operator count、passage search count 和
 latency，避免把“代码格式失败”“执行失败”和“程序语义错误”混为一类。
 
-## 7. 入口索引
+## 8. 入口索引
 
 | 用途 | 文件 |
 | --- | --- |
 | SFT | `scripts/train_ms_swift_sft.sh` |
 | GRPO | `scripts/train_ms_swift_grpo.sh` |
 | rollout server | `scripts/rollout_ms_swift.sh` |
+| 合并 LoRA | `swift export --adapters ... --merge_lora true` |
 | SFT 模板预检 | `scripts/preflight_ms_swift_sft.py` |
 | 数据加载与字段转换 | `graphtask_r1/training/ms_swift_data.py` |
 | dataset/reward/scheduler 注册 | `graphtask_r1/training/ms_swift_plugin.py` |

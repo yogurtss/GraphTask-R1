@@ -252,7 +252,60 @@ export KQAPRO_MODEL=kqapro-grpo
 如果 GRPO 是合并后的完整模型，也应像 base 一样直接用 `--model-path` 加载，并把
 `KQAPRO_MODEL` 设置为 `/v1/models` 返回的 ID。
 
-## 7. 部署后的最小 API 检查
+## 7. 合并权重后的等价性检查
+
+SFT/GRPO 默认是 LoRA adapter。如果希望用单一模型目录部署，可先按
+[训练手册的合并权重章节](TRAINING.md#6-合并-sftgrpo-lora-权重)分别生成：
+
+```text
+outputs/merged/qwen3-4b-kqapro-sft/
+outputs/merged/qwen3-4b-kqapro-grpo/
+```
+
+合并后的模型应像 base 一样部署，不要再叠加原 adapter：
+
+```bash
+export MERGED_MODEL=$PWD/outputs/merged/qwen3-4b-kqapro-sft
+export CUDA_VISIBLE_DEVICES=0
+
+python -m sglang.launch_server \
+  --model-path "$MERGED_MODEL" \
+  --host 127.0.0.1 \
+  --port 18100 \
+  --tp-size 1
+```
+
+从 `/v1/models` 读取实际模型 ID，然后对 adapter 部署和 merged 部署分别使用相同阶段、seed、输入
+indices 和执行预算做小规模对照。例如检查 SFT：
+
+```bash
+# 第一次：部署 kqapro-sft adapter 后运行。
+export KQAPRO_MODEL_URL=http://127.0.0.1:18100
+export KQAPRO_MODEL=kqapro-sft
+python -m graphtask_r1.cli visualize kqapro \
+  --config configs/evaluation/kqapro_val.yaml \
+  --model-stage sft --indices 0,12,41 \
+  --output-dir outputs/merge-check/sft-adapter
+
+# 第二次：停止 adapter 服务，部署 SFT_MERGED；把 KQAPRO_MODEL 改成
+# /v1/models 返回的 merged model ID 后运行。
+python -m graphtask_r1.cli visualize kqapro \
+  --config configs/evaluation/kqapro_val.yaml \
+  --model-stage sft --indices 0,12,41 \
+  --output-dir outputs/merge-check/sft-merged
+```
+
+GRPO 使用同样流程，但两次命令都传 `--model-stage grpo`。重点比较两侧的：
+
+- `predictions.parquet` 中 `raw_response`、`predicted_answers` 和 GraphScript path；
+- `metrics.json` 中 EM/F1、tool success 和 fallback；
+- 模型服务使用的基础模型 revision、tokenizer、chat template 和 dtype。
+
+浮点计算和推理引擎可能造成细微 logits 差异，因此不要求输出文件逐字节相同；但相同 greedy
+配置下若大量样本的 GraphScript、最终答案或工具成功率发生系统性变化，应停止完整评测，检查是否
+合并了错误 adapter、基础模型 revision 是否一致，以及 merged 服务是否又重复加载了 LoRA。
+
+## 8. 部署后的最小 API 检查
 
 在运行正式评测前，先确认 OpenAI-compatible chat endpoint 可用。把 `model` 保持为当前阶段的
 `KQAPRO_MODEL`：
@@ -272,7 +325,7 @@ curl -f http://127.0.0.1:18100/v1/chat/completions \
 - context length error：确认模型服务上下文窗口能容纳 relation catalog 和最多 4096 completion
   tokens。
 
-## 8. 浏览 KQAPro val 数据
+## 9. 浏览 KQAPro val 数据
 
 可先只查看数据，不调用模型：
 
@@ -304,11 +357,11 @@ python -m graphtask_r1.cli visualize kqapro \
 
 `--inspect-only` 不请求模型；这里的 `--model-stage` 只是保持 CLI 调用形式一致。
 
-## 9. 小规模评测
+## 10. 小规模评测
 
 每次换模型后，先跑 10–20 条 bounded smoke：
 
-### 9.1 原模型
+### 10.1 原模型
 
 ```bash
 python -m graphtask_r1.cli evaluate kqapro-val \
@@ -318,7 +371,7 @@ python -m graphtask_r1.cli evaluate kqapro-val \
   --output-dir outputs/evaluation/kqapro-base-smoke
 ```
 
-### 9.2 SFT 模型
+### 10.2 SFT 模型
 
 ```bash
 python -m graphtask_r1.cli evaluate kqapro-val \
@@ -328,7 +381,7 @@ python -m graphtask_r1.cli evaluate kqapro-val \
   --output-dir outputs/evaluation/kqapro-sft-smoke
 ```
 
-### 9.3 GRPO 模型
+### 10.3 GRPO 模型
 
 ```bash
 python -m graphtask_r1.cli evaluate kqapro-val \
@@ -341,11 +394,11 @@ python -m graphtask_r1.cli evaluate kqapro-val \
 每次只运行与当前已部署 checkpoint 对应的命令。不要在部署 SFT adapter 时传
 `--model-stage grpo`；stage 决定 prompt 和回退协议，不能代替正确的 checkpoint。
 
-## 10. 完整 val 评测
+## 11. 完整 val 评测
 
 smoke 正常后去掉 `--limit`。以下三条命令不是同时运行，而是在依次部署相应模型后分别执行。
 
-### 10.1 Base
+### 11.1 Base
 
 ```bash
 python -m graphtask_r1.cli evaluate kqapro-val \
@@ -354,7 +407,7 @@ python -m graphtask_r1.cli evaluate kqapro-val \
   --output-dir outputs/evaluation/kqapro-base
 ```
 
-### 10.2 SFT
+### 11.2 SFT
 
 ```bash
 python -m graphtask_r1.cli evaluate kqapro-val \
@@ -363,7 +416,7 @@ python -m graphtask_r1.cli evaluate kqapro-val \
   --output-dir outputs/evaluation/kqapro-sft
 ```
 
-### 10.3 GRPO
+### 11.3 GRPO
 
 ```bash
 python -m graphtask_r1.cli evaluate kqapro-val \
@@ -402,7 +455,7 @@ cache/<stage>.json       # 可重放模型响应缓存
 support triples、图预算和 trace 相关信息。SFT/GRPO 回退后仍会保留主路径的失败原因；如果主程序
 已经解析成功，其尝试过的 operator path 也会保留。
 
-## 11. 汇总 base、SFT、GRPO 精度
+## 12. 汇总 base、SFT、GRPO 精度
 
 三个阶段均完成后，离线读取三份指标：
 
@@ -424,11 +477,11 @@ python -m graphtask_r1.cli evaluate kqapro-compare \
 如果比较命令报告输入或样本数不一致，应重新用同一个 `input_path`、相同的 `--limit`（或均不传）
 运行，不应直接比较不等价的结果。
 
-## 12. 生成路径可视化
+## 13. 生成路径可视化
 
 可视化和完整评测完全分开。它只测试显式选择的少量样本，并生成单模型 HTML。
 
-### 12.1 Base 可视化
+### 13.1 Base 可视化
 
 部署 base 后运行：
 
@@ -442,7 +495,7 @@ python -m graphtask_r1.cli visualize kqapro \
 
 base 的 HTML 会显示直接回答及正确性，不会伪造图路径。
 
-### 12.2 SFT 可视化
+### 13.2 SFT 可视化
 
 部署 SFT 后运行：
 
@@ -454,7 +507,7 @@ python -m graphtask_r1.cli visualize kqapro \
   --output-dir outputs/visualization/kqapro-sft
 ```
 
-### 12.3 GRPO 可视化
+### 13.3 GRPO 可视化
 
 部署 GRPO 后运行：
 
@@ -503,7 +556,7 @@ HTML 展示当前模型的：
 不传 `--indices` 时默认只测试前三条；也可以使用 `--limit 5`。为保证案例可比，推荐三个阶段都
 使用相同的 `--indices`。
 
-## 13. 推荐的完整操作顺序
+## 14. 推荐的完整操作顺序
 
 ```text
 1. 检查 graph.sqlite、val/tasks.parquet、relation_catalog.json
@@ -519,7 +572,7 @@ HTML 展示当前模型的：
 11. kqapro-compare 汇总三份 metrics.json
 ```
 
-## 14. 可复现性与结果管理
+## 15. 可复现性与结果管理
 
 - 三个阶段必须使用同一个 `val/tasks.parquet`、graph snapshot 和 relation catalog；
 - 正式对比时三个阶段应使用相同样本数，不要只给某个模型传 `--limit`；
@@ -529,7 +582,7 @@ HTML 展示当前模型的：
 - 如果更换 prompt、预算或 relation catalog，应重新运行全部三个阶段；
 - 首次大规模运行前，始终先使用 `--limit` 和低 concurrency。
 
-## 15. 开发检查
+## 16. 开发检查
 
 修改评测或可视化代码后，在发布前运行：
 

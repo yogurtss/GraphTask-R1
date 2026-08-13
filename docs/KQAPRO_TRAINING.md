@@ -244,6 +244,31 @@ batch；它表示同一个 prompt 的候选 completion 数。
 以上是单 GPU bounded smoke 参数。确认 parse、execution、reward 分量和显存后，再增加 GPU、
 rollout 数与 completion 上限。正式 server 模式的启动方式见 [训练手册](TRAINING.md)。
 
+### 可选：把 LoRA checkpoint 合并为完整权重
+
+SFT 和 GRPO 默认产出 LoRA adapter。需要独立模型目录用于 SGLang 部署、复制或归档时，应分别
+合并对应 checkpoint；GRPO 合并时不能误用其 SFT 初始化 adapter：
+
+```bash
+export BASE_MODEL=Qwen/Qwen3-4B-Instruct-2507
+
+export SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
+export SFT_MERGED=$PWD/outputs/merged/qwen3-4b-kqapro-sft
+CUDA_VISIBLE_DEVICES=0 swift export \
+  --model "$BASE_MODEL" --adapters "$SFT_ADAPTER" \
+  --merge_lora true --output_dir "$SFT_MERGED"
+
+export GRPO_ADAPTER=$PWD/outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last
+export GRPO_MERGED=$PWD/outputs/merged/qwen3-4b-kqapro-grpo
+CUDA_VISIBLE_DEVICES=0 swift export \
+  --model "$BASE_MODEL" --adapters "$GRPO_ADAPTER" \
+  --merge_lora true --output_dir "$GRPO_MERGED"
+```
+
+完整的产物检查、磁盘注意事项、adapter/merged 等价性 smoke 和部署方式见
+[训练手册：合并 SFT/GRPO LoRA 权重](TRAINING.md#6-合并-sftgrpo-lora-权重)及
+[评测与可视化 README：合并权重后的等价性检查](KQAPRO_EVAL_VIS_README.md#7-合并权重后的等价性检查)。
+
 ## 6. Questioner/Solver self-play
 
 Questioner seeds 直接从完整 KQAPro 图按 degree 约束确定性采样。这里不传 `--exclude`：seed
