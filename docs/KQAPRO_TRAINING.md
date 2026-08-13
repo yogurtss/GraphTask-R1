@@ -140,6 +140,38 @@ python -m graphtask_r1.cli train sft \
   --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml
 ```
 
+### SFT batch 设置
+
+直接修改 `configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml`：
+
+```yaml
+num_gpus: 4
+micro_batch_size: 1
+eval_batch_size: 1
+gradient_accumulation_steps: 8
+```
+
+SFT 的全局有效 batch 为：
+
+```text
+num_gpus × micro_batch_size × gradient_accumulation_steps
+```
+
+默认是 `4 × 1 × 8 = 32`。`micro_batch_size` 是每张 GPU 每一步实际装入的样本数，对显存影响
+最大；显存不足时保持为 1，通过增加 `gradient_accumulation_steps` 调整有效 batch。
+`eval_batch_size` 只影响验证吞吐和显存，不参与训练有效 batch。
+
+也可以在单次运行时用环境变量覆盖 YAML，无需修改文件：
+
+```bash
+export NUM_GPUS=2
+export MICRO_BATCH_SIZE=1
+export EVAL_BATCH_SIZE=1
+export GRADIENT_ACCUMULATION_STEPS=16
+```
+
+环境变量优先级高于 YAML；`--dry-run` 输出的 `environment` 是最终实际值。
+
 ## 5. Solver GRPO
 
 GRPO train rows 只来自 KQAPro train；val rows 只供 rollout evaluation/checkpoint selection：
@@ -167,6 +199,47 @@ python -m graphtask_r1.cli train solver-grpo \
 python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml
 ```
+
+### GRPO batch 设置
+
+GRPO 配置增加了五个明确字段：
+
+```yaml
+num_gpus: 3
+micro_batch_size: 1
+eval_batch_size: 4
+gradient_accumulation_steps: 4
+steps_per_generation: 4
+rollout_n: 4
+```
+
+这里的 batch 单位是 completion，而不是原始 prompt：
+
+```text
+训练全局 batch = num_gpus × micro_batch_size × gradient_accumulation_steps
+采样 batch     = num_gpus × micro_batch_size × steps_per_generation
+每轮 prompt 数 = 采样 batch ÷ rollout_n
+评测 batch     = num_gpus × eval_batch_size
+```
+
+默认训练和采样 batch 都是 12 completions，每个 prompt 生成 4 条 completion，因此每次采样包含
+3 个 prompt；评测 batch 也是 12。launcher 会提前拒绝不合法组合：`steps_per_generation` 必须是
+`gradient_accumulation_steps` 的整数倍，采样 batch 和评测 batch 都必须能被 `rollout_n` 整除。
+
+单 GPU smoke 可以使用文档上面的 `ROLLOUT_N=2`；若显存不足并把 `EVAL_BATCH_SIZE` 改为 2，
+也应保持 `ROLLOUT_N=2`。常用覆盖示例：
+
+```bash
+export NUM_GPUS=1
+export MICRO_BATCH_SIZE=1
+export EVAL_BATCH_SIZE=2
+export GRADIENT_ACCUMULATION_STEPS=4
+export STEPS_PER_GENERATION=4
+export ROLLOUT_N=2
+```
+
+这些关系遵循 ms-swift 的 completion-level GRPO batch 定义。不要把 `rollout_n` 当成普通训练
+batch；它表示同一个 prompt 的候选 completion 数。
 
 以上是单 GPU bounded smoke 参数。确认 parse、execution、reward 分量和显存后，再增加 GPU、
 rollout 数与 completion 上限。正式 server 模式的启动方式见 [训练手册](TRAINING.md)。
@@ -206,6 +279,8 @@ python -m graphtask_r1.cli train self-play \
 
 每轮冻结 opponent，认证 Questioner 提案后才执行生成 gold，并按 base/archive/new 比例组装下一轮
 数据。round manifest 保存配置哈希、数据哈希、adapter 和版本；只有配置完全一致时才能 `--resume`。
+Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认 actor GPU 为 2 张，因此
+训练 batch 为 8、采样 batch 为 8、评测 batch 为 4，均可按 `rollout_n=4` 正确分组。
 
 ## 7. val 选模与提升判定
 

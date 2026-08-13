@@ -6,6 +6,11 @@ train_data: ${KILT_GRPO_TRAIN_DATA}
 val_data: ${KILT_GRPO_VAL_DATA}
 output_dir: ${KILT_GRPO_OUTPUT_DIR}
 num_gpus: 3
+micro_batch_size: 1
+eval_batch_size: 4
+gradient_accumulation_steps: 4
+steps_per_generation: 4
+rollout_n: 4
 experiment_name: qwen3-4b-kilt-sft-to-kilt-grpo-ms-swift-cu124
 interaction_mode: graphscript
 graphscript_version: "0.2"

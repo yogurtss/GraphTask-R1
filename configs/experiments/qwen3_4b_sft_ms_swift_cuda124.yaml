@@ -5,6 +5,9 @@ train_data: ${SFT_TRAIN_DATA}
 val_data: ${SFT_VAL_DATA}
 output_dir: ${SFT_OUTPUT_DIR}
 num_gpus: 4
+micro_batch_size: 1
+eval_batch_size: 1
+gradient_accumulation_steps: 8
 experiment_name: qwen3-4b-kqapro-sft-ms-swift-cu124
 interaction_mode: graphscript
 graphscript_version: "0.3"

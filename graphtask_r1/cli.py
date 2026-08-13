@@ -375,17 +375,60 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
         "val_data": "VAL_DATA",
         "output_dir": "OUTPUT_DIR",
         "num_gpus": "NUM_GPUS",
+        "micro_batch_size": "MICRO_BATCH_SIZE",
+        "eval_batch_size": "EVAL_BATCH_SIZE",
+        "gradient_accumulation_steps": "GRADIENT_ACCUMULATION_STEPS",
+        "steps_per_generation": "STEPS_PER_GENERATION",
+        "rollout_n": "ROLLOUT_N",
         "experiment_name": "EXPERIMENT_NAME",
         "lora_adapter_path": "LORA_ADAPTER_PATH",
         "interaction_mode": "INTERACTION_MODE",
         "graphscript_version": "GRAPHSCRIPT_VERSION",
     }
     selected_env: dict[str, str] = {}
+    positive_integer_fields = {
+        "num_gpus",
+        "micro_batch_size",
+        "eval_batch_size",
+        "gradient_accumulation_steps",
+        "steps_per_generation",
+        "rollout_n",
+    }
     for source, target in env_keys.items():
         if target in os.environ:
             selected_env[target] = os.environ[target]
         elif source in config:
             selected_env[target] = str(config[source])
+        if source in positive_integer_fields and target in selected_env:
+            try:
+                parsed = int(selected_env[target])
+            except ValueError as exc:
+                raise ValueError(f"{target} must be a positive integer") from exc
+            if parsed < 1 or str(parsed) != selected_env[target]:
+                raise ValueError(f"{target} must be a positive integer")
+    if stage == "solver-grpo":
+        num_gpus = int(selected_env.get("NUM_GPUS", "1"))
+        micro_batch = int(selected_env.get("MICRO_BATCH_SIZE", "1"))
+        eval_batch = int(selected_env.get("EVAL_BATCH_SIZE", "1"))
+        accumulation = int(selected_env.get("GRADIENT_ACCUMULATION_STEPS", "4"))
+        generation_steps = int(selected_env.get("STEPS_PER_GENERATION", str(accumulation)))
+        generations = int(selected_env.get("ROLLOUT_N", "4"))
+        generation_batch = num_gpus * micro_batch * generation_steps
+        evaluation_batch = num_gpus * eval_batch
+        if generation_steps % accumulation:
+            raise ValueError(
+                "STEPS_PER_GENERATION must be an integer multiple of "
+                "GRADIENT_ACCUMULATION_STEPS"
+            )
+        if generation_batch % generations:
+            raise ValueError(
+                "NUM_GPUS * MICRO_BATCH_SIZE * STEPS_PER_GENERATION must be "
+                "divisible by ROLLOUT_N"
+            )
+        if evaluation_batch % generations:
+            raise ValueError(
+                "NUM_GPUS * EVAL_BATCH_SIZE must be divisible by ROLLOUT_N"
+            )
     result = {
         "stage": stage,
         "training_backend": backend,

@@ -227,6 +227,9 @@ def test_training_launcher_defaults_to_ms_swift(
                 "model_type: qwen3",
                 "train_data: train.parquet",
                 "val_data: val.parquet",
+                "micro_batch_size: 2",
+                "eval_batch_size: 3",
+                "gradient_accumulation_steps: 4",
             ]
         )
         + "\n"
@@ -236,6 +239,71 @@ def test_training_launcher_defaults_to_ms_swift(
     assert result["command"] == ["bash", "scripts/train_ms_swift_sft.sh"]
     assert result["environment"]["MODEL_TYPE"] == "qwen3"
     assert result["environment"]["NUM_GPUS"] == "1"
+    assert result["environment"]["MICRO_BATCH_SIZE"] == "2"
+    assert result["environment"]["EVAL_BATCH_SIZE"] == "3"
+    assert result["environment"]["GRADIENT_ACCUMULATION_STEPS"] == "4"
+
+
+def test_grpo_batch_config_and_environment_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "grpo.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "training_backend: ms_swift",
+                "model_path: model",
+                "model_type: qwen3",
+                "lora_adapter_path: adapter",
+                "train_data: train.parquet",
+                "val_data: val.parquet",
+                "micro_batch_size: 1",
+                "eval_batch_size: 4",
+                "gradient_accumulation_steps: 4",
+                "steps_per_generation: 8",
+                "rollout_n: 4",
+            ]
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("MICRO_BATCH_SIZE", "3")
+
+    result = _launch_stage("solver-grpo", config, dry_run=True)
+
+    assert result["environment"]["MICRO_BATCH_SIZE"] == "3"
+    assert result["environment"]["EVAL_BATCH_SIZE"] == "4"
+    assert result["environment"]["GRADIENT_ACCUMULATION_STEPS"] == "4"
+    assert result["environment"]["STEPS_PER_GENERATION"] == "8"
+    assert result["environment"]["ROLLOUT_N"] == "4"
+
+
+def test_training_batch_config_rejects_non_positive_values(tmp_path: Path) -> None:
+    config = tmp_path / "sft.yaml"
+    config.write_text("training_backend: ms_swift\nmicro_batch_size: 0\n")
+
+    with pytest.raises(ValueError, match="MICRO_BATCH_SIZE must be a positive integer"):
+        _launch_stage("sft", config, dry_run=True)
+
+
+def test_grpo_batch_config_rejects_incompatible_generation_groups(tmp_path: Path) -> None:
+    config = tmp_path / "grpo.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "training_backend: ms_swift",
+                "num_gpus: 3",
+                "micro_batch_size: 1",
+                "eval_batch_size: 1",
+                "gradient_accumulation_steps: 4",
+                "steps_per_generation: 4",
+                "rollout_n: 4",
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.raises(ValueError, match="EVAL_BATCH_SIZE must be divisible"):
+        _launch_stage("solver-grpo", config, dry_run=True)
 
 
 def test_ms_swift_profile_selects_ms_swift_launcher(tmp_path: Path) -> None:

@@ -54,6 +54,11 @@ class SelfPlayConfig(BaseModel):
     max_edge_visits: int = Field(default=200, gt=0)
     max_returned_entities: int = Field(default=1_000, gt=0)
     max_completion_tokens: int = Field(default=32_768, gt=0, le=40_960)
+    micro_batch_size: int = Field(default=1, gt=0)
+    eval_batch_size: int = Field(default=2, gt=0)
+    gradient_accumulation_steps: int = Field(default=4, gt=0)
+    steps_per_generation: int = Field(default=4, gt=0)
+    rollout_n: int = Field(default=4, gt=0)
     program_profile: Literal[
         "full", "graphscript_v0_1", "graphscript_v0_2", "graphscript_v0_3"
     ] = "graphscript_v0_3"
@@ -72,6 +77,18 @@ class SelfPlayConfig(BaseModel):
                 f"{self.interaction_mode} mode requires "
                 f"program_profile={expected_profile}"
             )
+        actor_count = len([value for value in self.actor_gpus.split(",") if value.strip()])
+        generation_batch = actor_count * self.micro_batch_size * self.steps_per_generation
+        evaluation_batch = actor_count * self.eval_batch_size
+        if self.steps_per_generation % self.gradient_accumulation_steps:
+            raise ValueError(
+                "steps_per_generation must be an integer multiple of "
+                "gradient_accumulation_steps"
+            )
+        if generation_batch % self.rollout_n:
+            raise ValueError("self-play generation batch must be divisible by rollout_n")
+        if evaluation_batch % self.rollout_n:
+            raise ValueError("self-play evaluation batch must be divisible by rollout_n")
         return self
 
 
@@ -363,6 +380,13 @@ def run_self_play(
                     "TRAIN_DATA": str(mixed_data.resolve()),
                     "VAL_DATA": str(config.val_data.resolve()),
                     "NUM_GPUS": str(len(config.actor_gpus.split(","))),
+                    "MICRO_BATCH_SIZE": str(config.micro_batch_size),
+                    "EVAL_BATCH_SIZE": str(config.eval_batch_size),
+                    "GRADIENT_ACCUMULATION_STEPS": str(
+                        config.gradient_accumulation_steps
+                    ),
+                    "STEPS_PER_GENERATION": str(config.steps_per_generation),
+                    "ROLLOUT_N": str(config.rollout_n),
                     "OUTPUT_DIR": str(round_dir.resolve()),
                     "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
                     "INTERACTION_MODE": config.interaction_mode,

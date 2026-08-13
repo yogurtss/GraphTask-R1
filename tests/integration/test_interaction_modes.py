@@ -279,6 +279,11 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     assert config.interaction_mode == "graphscript"
     assert config.graphscript_version == "0.3"
     assert config.program_profile == "graphscript_v0_3"
+    assert config.micro_batch_size == 1
+    assert config.eval_batch_size == 2
+    assert config.gradient_accumulation_steps == 4
+    assert config.steps_per_generation == 4
+    assert config.rollout_n == 4
 
 
 def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
