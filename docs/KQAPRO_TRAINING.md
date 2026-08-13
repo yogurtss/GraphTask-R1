@@ -323,13 +323,14 @@ Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认
 最佳 round；不要用 val 调 prompt、生成训练样本或回填 archive。最终保留 checkpoint、配置、
 manifest、preflight summary 和 val 指标，才能把提升归因到 self-play，而不是数据或算子变化。
 
-### 单模型评测与三阶段对比
+### 单模型评测与任意多模式对比
 
 复制并修改 `configs/evaluation/kqapro_val.yaml`。每次命令只连接一个兼容
 `/v1/chat/completions` 的模型服务；`model.model` 可以填写服务加载的本地 checkpoint/adapter 路径
 或注册名。配置中的 `input_path` 固定为 certified `val/tasks.parquet`，`relation_catalog` 固定为
-仅由 train graph schema 构建的 catalog。用 `--model-stage base|sft|grpo` 声明当前 checkpoint，
-并分别写入三个输出目录。
+仅由 train graph schema 构建的 catalog。用 `--model-stage base|base_tool|sft|grpo` 声明当前
+评测协议，并分别写入输出目录。`base` 与 `base_tool` 使用同一个原模型 checkpoint：前者严格直接
+回答，后者接收函数说明/few-shot 并生成 GraphScript。
 
 ```bash
 export KQAPRO_MODEL_URL=http://127.0.0.1:18100
@@ -338,6 +339,9 @@ export KQAPRO_MODEL_URL=http://127.0.0.1:18100
 export KQAPRO_MODEL=Qwen/Qwen3-4B-Instruct-2507
 python -m graphtask_r1.cli evaluate kqapro-val --model-stage base \
   --config configs/evaluation/kqapro_val.yaml --output-dir outputs/evaluation/kqapro-base
+
+python -m graphtask_r1.cli evaluate kqapro-val --model-stage base_tool \
+  --config configs/evaluation/kqapro_val.yaml --output-dir outputs/evaluation/kqapro-base-tool
 
 export KQAPRO_MODEL=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
 python -m graphtask_r1.cli evaluate kqapro-val --model-stage sft \
@@ -348,27 +352,30 @@ python -m graphtask_r1.cli evaluate kqapro-val --model-stage grpo \
   --config configs/evaluation/kqapro_val.yaml --output-dir outputs/evaluation/kqapro-grpo
 ```
 
-评测协议有意不同：base 只收到问题和直接回答格式，不收到 relation catalog、图工具结果或 gold
-类型；SFT 和 GRPO 生成 GraphScript v0.3，由同一个有界执行器访问图。两者的 GraphScript 请求、
-解析、版本检查或执行失败时，都使用同一 checkpoint 再发一次直接回答 prompt。
+评测协议有意不同：base 只收到问题、严格答案格式与格式示例，不收到 relation catalog、图工具
+结果或 gold 类型；base_tool 收到 GraphScript 函数说明、handle 规则、四类示例和 catalog，但
+工具失败不回退；SFT 和 GRPO 生成 GraphScript v0.3，由同一个有界执行器访问图，并在 GraphScript
+请求、解析、版本检查或执行失败时使用同一 checkpoint 再发一次严格直接回答 prompt。
 `predictions.parquet` 会保留 `tool_attempted`、`tool_succeeded`、`fallback_used`、结构化
 `rejection_reason`、程序步骤、support triples 和预算；各目录的 `metrics.json` 报告当前模型的
-exact match/F1、工具成功率、回退率/回退准确率以及 operator 分桶结果。读取三个目录的
-`metrics.json` 即可比较三个阶段。模型请求使用超时、重试、trace ID 和位于各自输出目录下的
+exact match/F1、工具成功率、回退率/回退准确率以及 operator 分桶结果。读取任意两个或更多目录的
+`metrics.json` 即可比较相应模式。模型请求使用超时、重试、trace ID 和位于各自输出目录下的
 可重放响应缓存。
 
-三次单模型评测完成后，可只读取指标文件生成对比（不会再次加载或调用任何模型）：
+至少两次兼容的单模式评测完成后，可只读取指标文件生成对比（不会再次调用模型）。GRPO 未训练时
+可以不传：
 
 ```bash
 python -m graphtask_r1.cli evaluate kqapro-compare \
   --metrics outputs/evaluation/kqapro-base/metrics.json \
+            outputs/evaluation/kqapro-base-tool/metrics.json \
             outputs/evaluation/kqapro-sft/metrics.json \
-            outputs/evaluation/kqapro-grpo/metrics.json \
   --output outputs/evaluation/kqapro-comparison.json
 ```
 
-该命令会校验三份结果来自同一数据、split、graph snapshot 和样本数，再打印各阶段精度以及 SFT、
-GRPO 相对 base 的 exact match/F1 增量。
+该命令会校验所有结果来自同一数据、split、graph snapshot 和样本数。传入 base 时默认以 base 为
+基线；否则以第一份指标为基线，也可传 `--baseline-stage`。输出各模式精度和相对基线的 exact
+match/F1 增量。
 
 ### CLI 浏览与独立路径可视化
 

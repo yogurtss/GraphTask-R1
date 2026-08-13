@@ -342,7 +342,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     kqapro_val = evaluate_actions.add_parser("kqapro-val")
     kqapro_val.add_argument("--config", type=Path, required=True)
-    kqapro_val.add_argument("--model-stage", choices=("base", "sft", "grpo"), required=True)
+    kqapro_val.add_argument(
+        "--model-stage", choices=("base", "base_tool", "sft", "grpo"), required=True
+    )
     kqapro_val.add_argument("--input", type=Path, help="override input_path from config")
     kqapro_val.add_argument(
         "--output-dir", type=Path, help="default: outputs/evaluation/kqapro-<model-stage>"
@@ -353,9 +355,14 @@ def build_parser() -> argparse.ArgumentParser:
     kqapro_compare.add_argument(
         "--metrics",
         type=Path,
-        nargs=3,
+        nargs="+",
         required=True,
-        help="metrics.json files from separate base, SFT, and GRPO runs",
+        help="two or more compatible metrics.json files from separate single-mode runs",
+    )
+    kqapro_compare.add_argument(
+        "--baseline-stage",
+        choices=("base", "base_tool", "sft", "grpo"),
+        help="default: base when supplied, otherwise the first metrics file",
     )
     kqapro_compare.add_argument(
         "--output", type=Path, default=Path("outputs/evaluation/kqapro-comparison.json")
@@ -366,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     kqapro_visualize = visualize_actions.add_parser("kqapro")
     kqapro_visualize.add_argument("--config", type=Path, required=True)
     kqapro_visualize.add_argument(
-        "--model-stage", choices=("base", "sft", "grpo"), required=True
+        "--model-stage", choices=("base", "base_tool", "sft", "grpo"), required=True
     )
     kqapro_visualize.add_argument("--input", type=Path, help="override input_path from config")
     kqapro_visualize.add_argument(
@@ -768,7 +775,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     elif args.group == "evaluate" and args.action == "kqapro-compare":
-        result = compare_kqapro_val_metrics(args.metrics, output_path=args.output)
+        result = compare_kqapro_val_metrics(
+            args.metrics,
+            output_path=args.output,
+            baseline_stage=args.baseline_stage,
+        )
     elif args.group == "evaluate":
         val_config = _load_kqapro_val_config(args.config)
         result = asyncio.run(

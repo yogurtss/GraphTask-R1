@@ -223,11 +223,12 @@ def test_kqapro_eval_and_visualization_cli_are_separate() -> None:
             "--config",
             "configs/evaluation/kqapro_val.yaml",
             "--model-stage",
-            "base",
+            "base_tool",
         ]
     )
     assert evaluation.output_dir is None
     assert evaluation.limit is None
+    assert evaluation.model_stage == "base_tool"
 
     visualization = build_parser().parse_args(
         [
@@ -254,11 +255,13 @@ def test_kqapro_eval_and_visualization_cli_are_separate() -> None:
             "kqapro-compare",
             "--metrics",
             "base.json",
-            "sft.json",
-            "grpo.json",
+            "base_tool.json",
+            "--baseline-stage",
+            "base_tool",
         ]
     )
-    assert comparison.metrics == [Path("base.json"), Path("sft.json"), Path("grpo.json")]
+    assert comparison.metrics == [Path("base.json"), Path("base_tool.json")]
+    assert comparison.baseline_stage == "base_tool"
 
 
 def test_training_launcher_defaults_to_ms_swift(

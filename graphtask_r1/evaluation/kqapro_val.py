@@ -17,12 +17,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import GraphScriptError, execute_graphscript, parse_graphscript
 from graphtask_r1.schema import AnswerSet, RelationInfo, TaskCertificate
-from graphtask_r1.training.prompts import role_prompt
+from graphtask_r1.training.prompts import relation_catalog_text, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
 from graphtask_r1.utils import ProgressLogger, read_json, stable_hash, write_json, write_records
 
 LOGGER = logging.getLogger(__name__)
-ModelStage = Literal["base", "sft", "grpo"]
+ModelStage = Literal["base", "base_tool", "sft", "grpo"]
+MODEL_STAGES: tuple[ModelStage, ...] = ("base", "base_tool", "sft", "grpo")
 
 
 class KQAProModelConfig(BaseModel):
@@ -171,13 +172,13 @@ class OpenAICompletionClient:
         write_json(self.cache_path, self._cache)
 
 
-_ANSWER_PATTERN = re.compile(r"<answer>\s*(.*?)\s*</answer>", flags=re.DOTALL)
+_ANSWER_PATTERN = re.compile(r"\s*<answer>\s*(.*?)\s*</answer>\s*", flags=re.DOTALL)
 
 
 def _parse_direct_answer(text: str) -> AnswerSet:
-    match = _ANSWER_PATTERN.search(text)
+    match = _ANSWER_PATTERN.fullmatch(text)
     if match is None:
-        raise ValueError("missing <answer> block")
+        raise ValueError("response must contain only one <answer> block")
     payload = json.loads(match.group(1))
     values = payload if isinstance(payload, list) else [payload]
     if not values:
@@ -193,12 +194,114 @@ def _direct_prompt(question: str) -> list[dict[str, str]]:
             "role": "system",
             "content": (
                 "Answer the KQAPro question directly from your internal knowledge. Do not call "
-                "tools and do not produce a program. Return exactly one JSON list inside "
-                "<answer>...</answer>, using entity names or literal values and no prose."
+                "tools, explain your reasoning, restate the question, or produce code. Your entire "
+                "response must be exactly <answer>JSON_LIST</answer> with nothing before or after "
+                "it. JSON_LIST must contain only the final entity names or literal values. Use "
+                "double-quoted JSON strings except that JSON numbers may remain numbers."
             ),
         },
+        {"role": "user", "content": "Question: Who is Alice's friend?"},
+        {"role": "assistant", "content": '<answer>["Bob"]</answer>'},
+        {"role": "user", "content": "Question: How many children does Bob have?"},
+        {"role": "assistant", "content": "<answer>[2]</answer>"},
+        {"role": "user", "content": "Question: Is Paris a city?"},
+        {"role": "assistant", "content": '<answer>["yes"]</answer>'},
         {"role": "user", "content": f"Question: {question}"},
     ]
+
+
+_BASE_TOOL_SYSTEM_PROMPT = """You are an untrained base model using KQAPro GraphScript v0.3 for
+the first time. Convert the final user question into exactly one executable JSON object. Output
+JSON only: no markdown, explanation, answer tag, or guessed answer. A local executor will run the
+program, so the program—not parametric memory—must produce the answer.
+
+GraphScript uses SSA handles h0..h63. Every operation that has `out` creates a new handle. Later
+operations refer to that handle through `in`, `inputs`, `left`, `right`, `subject`, or `object`.
+The first operation must be `resolve_entity` or `all_entities`; the last must be `emit`.
+
+Function semantics and exact signatures:
+- resolve_entity(query, match=id|exact|search, limit, out): find an entity mentioned by name/ID.
+- all_entities(max_results, out): create a bounded global candidate set; immediately restrict it.
+- follow(in, relation, direction=out|in, limit, out): traverse one catalog relation.
+- intersect(inputs, out) / union(inputs, out): intersect or combine entity handles.
+- filter_type(in, type_id, out): retain entities with a concept/type ID.
+- filter_literal(in, relation, comparator=eq|ne|lt|le|gt|ge|contains,
+  value={value,datatype,unit}, out): filter by an attribute value.
+- filter_qualifier(in, qualifier, comparator, value, out): filter facts by a qualifier.
+- count(in, out): count entities.
+- query_attribute(in, attribute, out): return attribute values.
+- query_attribute_under_condition(in, attribute, qualifier, qualifier_value, out): query an
+  attribute whose fact has a qualifier value.
+- query_attribute_qualifier(in, attribute, attribute_value, qualifier, out): return a qualifier
+  attached to a matching attribute fact.
+- query_relation(subject, object, out): return the relation between two entity handles.
+- query_relation_qualifier(subject, object, relation, qualifier, out): return a relation qualifier.
+- verify(in, comparator, value, out): compare literal values and return yes/no.
+- select_between(left, right, attribute, mode=min|max, out): compare two entities.
+- select_among(in, attribute, mode=min|max, out): select an extremum from a candidate set.
+- require_unique(in): optional assertion; it creates no handle.
+- emit(in): emit that handle as the final answer; it creates no handle.
+
+Use only relation, attribute, and qualifier IDs from the final user's allowed catalog. Example
+catalogs below are illustrative and their IDs must never be copied unless they also occur in the
+final catalog. Keep every limit bounded and choose the shortest program that answers the question.
+"""
+
+
+_BASE_TOOL_EXAMPLES: tuple[tuple[str, str], ...] = (
+    (
+        "Question: Who is Alice's friend?\nAllowed relation catalog:\n- friend: friend",
+        '{"version":"0.3","ops":['
+        '{"op":"resolve_entity","query":"Alice","match":"exact","limit":1,"out":"h0"},'
+        '{"op":"follow","in":"h0","relation":"friend","direction":"out",'
+        '"limit":20,"out":"h1"},{"op":"emit","in":"h1"}]}',
+    ),
+    (
+        "Question: What is Bob's age?\nAllowed relation catalog:\n- age: age",
+        '{"version":"0.3","ops":['
+        '{"op":"resolve_entity","query":"Bob","match":"exact","limit":1,"out":"h0"},'
+        '{"op":"query_attribute","in":"h0","attribute":"age","out":"h1"},'
+        '{"op":"emit","in":"h1"}]}',
+    ),
+    (
+        "Question: How many cities are there?\nAllowed relation catalog: (none needed)",
+        '{"version":"0.3","ops":['
+        '{"op":"all_entities","max_results":100,"out":"h0"},'
+        '{"op":"filter_type","in":"h0","type_id":"city","out":"h1"},'
+        '{"op":"count","in":"h1","out":"h2"},{"op":"emit","in":"h2"}]}',
+    ),
+    (
+        "Question: Which people are older than 30?\n"
+        "Allowed relation catalog:\n- age: age",
+        '{"version":"0.3","ops":['
+        '{"op":"all_entities","max_results":100,"out":"h0"},'
+        '{"op":"filter_literal","in":"h0","relation":"age","comparator":"gt",'
+        '"value":{"value":30,"datatype":"quantity","unit":null},"out":"h1"},'
+        '{"op":"emit","in":"h1"}]}',
+    ),
+)
+
+
+def _base_tool_prompt(
+    question: str, relations: tuple[RelationInfo, ...]
+) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _BASE_TOOL_SYSTEM_PROMPT}
+    ]
+    for user, assistant in _BASE_TOOL_EXAMPLES:
+        messages.extend(
+            (
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": assistant},
+            )
+        )
+    messages.append(
+        {
+            "role": "user",
+            "content": f"Question: {question}{relation_catalog_text(relations)}",
+        }
+    )
+    return messages
 
 
 def _display_values(answers: AnswerSet, backend: GraphBackend) -> list[str]:
@@ -329,12 +432,16 @@ async def _evaluate_one(
 
     started = perf_counter()
     payload = f"Question: {task.question}"
-    messages = role_prompt(
-        "solver",
-        payload,
-        interaction_mode="graphscript",
-        relation_catalog=relations,
-        graphscript_version=config.graphscript_version,
+    messages = (
+        _base_tool_prompt(task.question, relations)
+        if model_name == "base_tool"
+        else role_prompt(
+            "solver",
+            payload,
+            interaction_mode="graphscript",
+            relation_catalog=relations,
+            graphscript_version=config.graphscript_version,
+        )
     )
     primary_reason: dict[str, str] | None = None
     raw_response = ""
@@ -1563,17 +1670,25 @@ def inspect_kqapro_val(
 
 
 def compare_kqapro_val_metrics(
-    metric_paths: Sequence[Path], *, output_path: Path | None = None
+    metric_paths: Sequence[Path],
+    *,
+    output_path: Path | None = None,
+    baseline_stage: ModelStage | None = None,
 ) -> dict[str, Any]:
-    """Compare three completed single-model runs without invoking a model."""
+    """Compare any two or more compatible single-mode runs without invoking a model."""
 
+    if len(metric_paths) < 2:
+        raise ValueError("comparison requires at least two metrics files")
     loaded = [read_json(path) for path in metric_paths]
     if any(not isinstance(value, dict) for value in loaded):
         raise ValueError("each KQAPro metric file must contain a JSON object")
-    by_stage = {str(value.get("model_stage")): value for value in loaded}
-    required = {"base", "sft", "grpo"}
-    if set(by_stage) != required or len(loaded) != len(required):
-        raise ValueError("comparison requires exactly one base, one sft, and one grpo metrics file")
+    stage_order = [str(value.get("model_stage")) for value in loaded]
+    unknown = sorted(set(stage_order) - set(MODEL_STAGES))
+    if unknown:
+        raise ValueError(f"unknown model stages in metrics: {', '.join(unknown)}")
+    if len(set(stage_order)) != len(stage_order):
+        raise ValueError("comparison received duplicate model stages")
+    by_stage = dict(zip(stage_order, loaded, strict=True))
     invariant_fields = ("dataset", "split", "graph_snapshot", "input", "examples")
     for field in invariant_fields:
         values = {str(value.get(field)) for value in loaded}
@@ -1591,23 +1706,32 @@ def compare_kqapro_val_metrics(
         }
         for stage, value in by_stage.items()
     }
-    base = stages["base"]
+    effective_baseline = baseline_stage or ("base" if "base" in stages else stage_order[0])
+    if effective_baseline not in stages:
+        raise ValueError(
+            f"baseline stage {effective_baseline!r} is absent from supplied metrics"
+        )
+    baseline = stages[effective_baseline]
+    deltas = {
+        stage: {
+            "exact_match": values["exact_match"] - baseline["exact_match"],
+            "f1": values["f1"] - baseline["f1"],
+        }
+        for stage, values in stages.items()
+        if stage != effective_baseline
+    }
     comparison = {
         "dataset": loaded[0]["dataset"],
         "split": loaded[0]["split"],
         "graph_snapshot": loaded[0]["graph_snapshot"],
         "input": loaded[0]["input"],
         "examples": loaded[0]["examples"],
+        "baseline_stage": effective_baseline,
         "stages": stages,
-        "delta_vs_base": {
-            stage: {
-                "exact_match": values["exact_match"] - base["exact_match"],
-                "f1": values["f1"] - base["f1"],
-            }
-            for stage, values in stages.items()
-            if stage != "base"
-        },
+        "delta_vs_baseline": deltas,
     }
+    if effective_baseline == "base":
+        comparison["delta_vs_base"] = deltas
     if output_path is not None:
         write_json(output_path, comparison)
     return comparison

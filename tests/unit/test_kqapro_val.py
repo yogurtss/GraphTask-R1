@@ -176,6 +176,7 @@ def test_base_eval_never_attempts_graph_tool(
     import asyncio
 
     caplog.set_level(logging.INFO, logger="graphtask_r1.progress")
+    client = FakeCompletionClient(['<answer>["Bob"]</answer>'])
     summary = asyncio.run(
         evaluate_kqapro_val(
             input_path,
@@ -183,13 +184,20 @@ def test_base_eval_never_attempts_graph_tool(
             config,
             model_stage="base",
             backend=toy_graph(),
-            client=FakeCompletionClient(['<answer>["Bob"]</answer>']),
+            client=client,
         )
     )
     row = read_records(tmp_path / "base/predictions.parquet")[0]
     assert summary["overall"]["exact_match"] == 1.0
     assert row["tool_attempted"] is False
     assert row["inference_mode"] == "direct"
+    assert client.calls[0]["messages"][-1]["content"] == (
+        "Question: Who is <Alice>'s friend?"
+    )
+    assert client.calls[0]["messages"][2] == {
+        "role": "assistant",
+        "content": '<answer>["Bob"]</answer>',
+    }
     progress_messages = [record.message for record in caplog.records]
     assert any(
         'operation="evaluate.kqapro_val"' in message
@@ -205,6 +213,73 @@ def test_base_eval_never_attempts_graph_tool(
         and 'bar="[████████████████████]"' in message
         for message in progress_messages
     )
+
+
+def test_base_direct_rejects_answer_with_extra_prose(tmp_path: Path) -> None:
+    input_path, config = _fixture(tmp_path)
+    import asyncio
+
+    summary = asyncio.run(
+        evaluate_kqapro_val(
+            input_path,
+            tmp_path / "base-extra-prose",
+            config,
+            model_stage="base",
+            backend=toy_graph(),
+            client=FakeCompletionClient(['The answer is <answer>["Bob"]</answer>']),
+        )
+    )
+
+    row = read_records(tmp_path / "base-extra-prose/predictions.parquet")[0]
+    assert summary["overall"]["exact_match"] == 0.0
+    assert row["predicted_answers"] == []
+    assert row["rejection_reason"]["code"] == "DIRECT_INFERENCE_FAILED"
+
+
+def test_base_tool_gets_function_examples_and_does_not_fallback(tmp_path: Path) -> None:
+    input_path, config = _fixture(tmp_path)
+    import asyncio
+
+    success_client = FakeCompletionClient([_script()])
+    summary = asyncio.run(
+        evaluate_kqapro_val(
+            input_path,
+            tmp_path / "base-tool",
+            config,
+            model_stage="base_tool",
+            backend=toy_graph(),
+            client=success_client,
+        )
+    )
+    row = read_records(tmp_path / "base-tool/predictions.parquet")[0]
+    messages = success_client.calls[0]["messages"]
+    assert summary["model_stage"] == "base_tool"
+    assert row["tool_attempted"] is True
+    assert row["tool_succeeded"] is True
+    assert row["fallback_used"] is False
+    assert len(messages) == 10
+    assert "Function semantics and exact signatures" in messages[0]["content"]
+    assert "filter_literal" in messages[0]["content"]
+    assert messages[2]["role"] == "assistant"
+    assert '"op":"follow"' in messages[2]["content"]
+    assert "Allowed relation catalog" in messages[-1]["content"]
+
+    failure_client = FakeCompletionClient(["not-json"])
+    asyncio.run(
+        evaluate_kqapro_val(
+            input_path,
+            tmp_path / "base-tool-failed",
+            config,
+            model_stage="base_tool",
+            backend=toy_graph(),
+            client=failure_client,
+        )
+    )
+    failed = read_records(tmp_path / "base-tool-failed/predictions.parquet")[0]
+    assert len(failure_client.calls) == 1
+    assert failed["inference_mode"] == "graphscript"
+    assert failed["fallback_used"] is False
+    assert failed["rejection_reason"]["code"] == "GRAPHSCRIPT_PARSE_FAILED"
 
 
 def test_visualization_is_separate_bounded_and_html_safe(tmp_path: Path) -> None:
@@ -305,9 +380,9 @@ def test_visualization_connects_filter_property_to_candidate_node(tmp_path: Path
     assert "process-result" in html
 
 
-def test_compare_reads_separate_single_model_runs(tmp_path: Path) -> None:
+def test_compare_reads_any_compatible_single_mode_runs(tmp_path: Path) -> None:
     paths: list[Path] = []
-    for stage, exact_match in (("base", 0.2), ("sft", 0.5), ("grpo", 0.6)):
+    for stage, exact_match in (("base", 0.2), ("base_tool", 0.4), ("sft", 0.5)):
         path = tmp_path / f"{stage}.json"
         write_json(
             path,
@@ -335,6 +410,42 @@ def test_compare_reads_separate_single_model_runs(tmp_path: Path) -> None:
     )
 
     assert comparison["stages"]["base"]["exact_match"] == 0.2
+    assert comparison["baseline_stage"] == "base"
+    assert comparison["delta_vs_baseline"]["base_tool"]["exact_match"] == 0.2
     assert comparison["delta_vs_base"]["sft"]["exact_match"] == 0.3
-    assert comparison["delta_vs_base"]["grpo"]["f1"] == pytest.approx(0.4)
     assert (tmp_path / "comparison.json").exists()
+
+    without_base = compare_kqapro_val_metrics(
+        paths[1:], baseline_stage="base_tool"
+    )
+    assert without_base["baseline_stage"] == "base_tool"
+    assert without_base["delta_vs_baseline"]["sft"]["f1"] == pytest.approx(0.1)
+    assert "delta_vs_base" not in without_base
+
+
+def test_compare_requires_distinct_compatible_runs(tmp_path: Path) -> None:
+    path = tmp_path / "base.json"
+    write_json(
+        path,
+        {
+            "dataset": "kqapro",
+            "split": "val",
+            "model_stage": "base",
+            "graph_snapshot": "kqapro-v1",
+            "input": "val/tasks.parquet",
+            "examples": 1,
+            "overall": {
+                "exact_match": 0.0,
+                "f1": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "tool_success_rate": 0.0,
+                "fallback_rate": 0.0,
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="at least two"):
+        compare_kqapro_val_metrics([path])
+    with pytest.raises(ValueError, match="duplicate"):
+        compare_kqapro_val_metrics([path, path])

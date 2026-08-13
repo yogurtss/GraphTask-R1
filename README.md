@@ -21,7 +21,8 @@ KQAPro 的 SFT、GRPO、relation catalog 或 checkpoint。
 [KQAPro 训练流程](docs/KQAPRO_TRAINING.md)。完整数据边界和算子表见
 [Code-first 数据契约](docs/CODE_SELF_PLAY_DATA_CONTRACT.md)。
 
-base、SFT、GRPO 的单模型部署、KQAPro val 精度测试、三阶段结果汇总和静态 HTML 路径可视化见
+base direct、base tool、SFT、GRPO 的单模式部署/评测、任意多模式结果汇总和静态 HTML 路径
+可视化见
 [KQAPro 模型评测与路径可视化 README](docs/KQAPRO_EVAL_VIS_README.md)。
 
 ## 目录约定
