@@ -25,7 +25,14 @@ from graphtask_r1.data import (
     sample_questioner_seeds,
     select_graphscript_tasks,
 )
-from graphtask_r1.evaluation import evaluate_benchmark
+from graphtask_r1.evaluation import (
+    KQAProValConfig,
+    compare_kqapro_val_metrics,
+    evaluate_benchmark,
+    evaluate_kqapro_val,
+    inspect_kqapro_val,
+    visualize_kqapro_val,
+)
 from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.pipeline import run_mini_pipeline
 from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
@@ -63,6 +70,25 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true")
+
+
+def _load_kqapro_val_config(path: Path) -> KQAProValConfig:
+    raw = yaml.safe_load(os.path.expandvars(path.read_text()))
+    if not isinstance(raw, dict):
+        raise ValueError(f"KQAPro evaluation config must be a mapping: {path}")
+    return KQAProValConfig.model_validate(raw)
+
+
+def _parse_indices(value: str | None) -> frozenset[int] | None:
+    if value is None:
+        return None
+    try:
+        indices = frozenset(int(part.strip()) for part in value.split(",") if part.strip())
+    except ValueError as exc:
+        raise ValueError("--indices must be comma-separated non-negative integers") from exc
+    if not indices or any(index < 0 for index in indices):
+        raise ValueError("--indices must contain non-negative integers")
+    return indices
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -312,6 +338,48 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--concurrency", type=int, default=16)
     benchmark.add_argument(
         "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.2"
+    )
+
+    kqapro_val = evaluate_actions.add_parser("kqapro-val")
+    kqapro_val.add_argument("--config", type=Path, required=True)
+    kqapro_val.add_argument("--model-stage", choices=("base", "sft", "grpo"), required=True)
+    kqapro_val.add_argument("--input", type=Path, help="override input_path from config")
+    kqapro_val.add_argument(
+        "--output-dir", type=Path, help="default: outputs/evaluation/kqapro-<model-stage>"
+    )
+    kqapro_val.add_argument("--limit", type=_positive_int)
+
+    kqapro_compare = evaluate_actions.add_parser("kqapro-compare")
+    kqapro_compare.add_argument(
+        "--metrics",
+        type=Path,
+        nargs=3,
+        required=True,
+        help="metrics.json files from separate base, SFT, and GRPO runs",
+    )
+    kqapro_compare.add_argument(
+        "--output", type=Path, default=Path("outputs/evaluation/kqapro-comparison.json")
+    )
+
+    visualize = groups.add_parser("visualize")
+    visualize_actions = visualize.add_subparsers(dest="action", required=True)
+    kqapro_visualize = visualize_actions.add_parser("kqapro")
+    kqapro_visualize.add_argument("--config", type=Path, required=True)
+    kqapro_visualize.add_argument(
+        "--model-stage", choices=("base", "sft", "grpo"), required=True
+    )
+    kqapro_visualize.add_argument("--input", type=Path, help="override input_path from config")
+    kqapro_visualize.add_argument(
+        "--output-dir", type=Path, help="default: outputs/visualization/kqapro-<model-stage>"
+    )
+    kqapro_visualize.add_argument(
+        "--indices", help="zero-based comma-separated dataset rows, for example 0,12,41"
+    )
+    kqapro_visualize.add_argument(
+        "--limit", type=_positive_int, default=3, help="sample count when --indices is omitted"
+    )
+    kqapro_visualize.add_argument(
+        "--inspect-only", action="store_true", help="print selected dataset rows without inference"
     )
     return parser
 
@@ -687,7 +755,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_self_play(
             args.config, args.output_dir, resume=args.resume, dry_run=args.dry_run
         )
-    else:
+    elif args.group == "evaluate" and args.action == "benchmark":
         result = asyncio.run(
             evaluate_benchmark(
                 args.input,
@@ -699,6 +767,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                 graphscript_version=args.graphscript_version,
             )
         )
+    elif args.group == "evaluate" and args.action == "kqapro-compare":
+        result = compare_kqapro_val_metrics(args.metrics, output_path=args.output)
+    elif args.group == "evaluate":
+        val_config = _load_kqapro_val_config(args.config)
+        result = asyncio.run(
+            evaluate_kqapro_val(
+                args.input or val_config.input_path,
+                args.output_dir or Path(f"outputs/evaluation/kqapro-{args.model_stage}"),
+                val_config,
+                model_stage=args.model_stage,
+                limit=args.limit,
+            )
+        )
+    else:
+        val_config = _load_kqapro_val_config(args.config)
+        selected_indices = _parse_indices(args.indices)
+        input_path = args.input or val_config.input_path
+        if args.inspect_only:
+            result = {
+                "dataset_preview": inspect_kqapro_val(
+                    input_path,
+                    val_config,
+                    limit=args.limit,
+                    selected_indices=selected_indices,
+                ),
+                "models_called": False,
+            }
+        else:
+            result = asyncio.run(
+                visualize_kqapro_val(
+                    input_path,
+                    args.output_dir
+                    or Path(f"outputs/visualization/kqapro-{args.model_stage}"),
+                    val_config,
+                    model_stage=args.model_stage,
+                    limit=args.limit,
+                    selected_indices=selected_indices,
+                )
+            )
     LOGGER.info(
         "command_completed group=%s action=%s elapsed_s=%.1f",
         args.group,

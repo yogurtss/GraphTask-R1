@@ -1,0 +1,20 @@
+# Paths may be absolute or expanded from environment variables.
+input_path: ${KQAPRO_DIR}/val/tasks.parquet
+relation_catalog: ${KQAPRO_DIR}/relation_catalog.json
+graph_snapshot: kqapro-v1
+graphscript_version: "0.3"
+
+# Configure exactly one OpenAI-compatible model per invocation. Select its behavior with
+# --model-stage base|sft|grpo; use a separate output directory for each checkpoint.
+model:
+  model_url: ${KQAPRO_MODEL_URL}
+  model: ${KQAPRO_MODEL}
+  max_completion_tokens: 4096
+
+seed: 42
+concurrency: 8
+request_timeout_s: 180
+request_retries: 2
+max_follow_limit: 100
+max_edge_visits: 200
+max_returned_entities: 1000

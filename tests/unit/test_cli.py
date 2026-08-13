@@ -215,6 +215,52 @@ def test_sample_seeds_defaults_to_kqapro_snapshot() -> None:
     assert args.graphscript_version == "0.3"
 
 
+def test_kqapro_eval_and_visualization_cli_are_separate() -> None:
+    evaluation = build_parser().parse_args(
+        [
+            "evaluate",
+            "kqapro-val",
+            "--config",
+            "configs/evaluation/kqapro_val.yaml",
+            "--model-stage",
+            "base",
+        ]
+    )
+    assert evaluation.output_dir is None
+    assert evaluation.limit is None
+
+    visualization = build_parser().parse_args(
+        [
+            "visualize",
+            "kqapro",
+            "--config",
+            "configs/evaluation/kqapro_val.yaml",
+            "--model-stage",
+            "grpo",
+            "--indices",
+            "0,12,41",
+            "--inspect-only",
+        ]
+    )
+    assert visualization.output_dir is None
+    assert visualization.indices == "0,12,41"
+    assert visualization.model_stage == "grpo"
+    assert visualization.limit == 3
+    assert visualization.inspect_only is True
+
+    comparison = build_parser().parse_args(
+        [
+            "evaluate",
+            "kqapro-compare",
+            "--metrics",
+            "base.json",
+            "sft.json",
+            "grpo.json",
+        ]
+    )
+    assert comparison.metrics == [Path("base.json"), Path("sft.json"), Path("grpo.json")]
+
+
 def test_training_launcher_defaults_to_ms_swift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

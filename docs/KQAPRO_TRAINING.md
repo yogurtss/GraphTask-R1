@@ -298,6 +298,79 @@ Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认
 最佳 round；不要用 val 调 prompt、生成训练样本或回填 archive。最终保留 checkpoint、配置、
 manifest、preflight summary 和 val 指标，才能把提升归因到 self-play，而不是数据或算子变化。
 
+### 单模型评测与三阶段对比
+
+复制并修改 `configs/evaluation/kqapro_val.yaml`。每次命令只连接一个兼容
+`/v1/chat/completions` 的模型服务；`model.model` 可以填写服务加载的本地 checkpoint/adapter 路径
+或注册名。配置中的 `input_path` 固定为 certified `val/tasks.parquet`，`relation_catalog` 固定为
+仅由 train graph schema 构建的 catalog。用 `--model-stage base|sft|grpo` 声明当前 checkpoint，
+并分别写入三个输出目录。
+
+```bash
+export KQAPRO_MODEL_URL=http://127.0.0.1:18100
+
+# 每次先令 KQAPRO_MODEL 指向当前服务实际加载的 checkpoint，再运行一条。
+export KQAPRO_MODEL=Qwen/Qwen3-4B-Instruct-2507
+python -m graphtask_r1.cli evaluate kqapro-val --model-stage base \
+  --config configs/evaluation/kqapro_val.yaml --output-dir outputs/evaluation/kqapro-base
+
+export KQAPRO_MODEL=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
+python -m graphtask_r1.cli evaluate kqapro-val --model-stage sft \
+  --config configs/evaluation/kqapro_val.yaml --output-dir outputs/evaluation/kqapro-sft
+
+export KQAPRO_MODEL=$PWD/outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last
+python -m graphtask_r1.cli evaluate kqapro-val --model-stage grpo \
+  --config configs/evaluation/kqapro_val.yaml --output-dir outputs/evaluation/kqapro-grpo
+```
+
+评测协议有意不同：base 只收到问题和直接回答格式，不收到 relation catalog、图工具结果或 gold
+类型；SFT 和 GRPO 生成 GraphScript v0.3，由同一个有界执行器访问图。两者的 GraphScript 请求、
+解析、版本检查或执行失败时，都使用同一 checkpoint 再发一次直接回答 prompt。
+`predictions.parquet` 会保留 `tool_attempted`、`tool_succeeded`、`fallback_used`、结构化
+`rejection_reason`、程序步骤、support triples 和预算；各目录的 `metrics.json` 报告当前模型的
+exact match/F1、工具成功率、回退率/回退准确率以及 operator 分桶结果。读取三个目录的
+`metrics.json` 即可比较三个阶段。模型请求使用超时、重试、trace ID 和位于各自输出目录下的
+可重放响应缓存。
+
+三次单模型评测完成后，可只读取指标文件生成对比（不会再次加载或调用任何模型）：
+
+```bash
+python -m graphtask_r1.cli evaluate kqapro-compare \
+  --metrics outputs/evaluation/kqapro-base/metrics.json \
+            outputs/evaluation/kqapro-sft/metrics.json \
+            outputs/evaluation/kqapro-grpo/metrics.json \
+  --output outputs/evaluation/kqapro-comparison.json
+```
+
+该命令会校验三份结果来自同一数据、split、graph snapshot 和样本数，再打印各阶段精度以及 SFT、
+GRPO 相对 base 的 exact match/F1 增量。
+
+### CLI 浏览与独立路径可视化
+
+可视化不随全量评测自动运行。先只浏览配置中的 val 数据，不调用模型：
+
+```bash
+python -m graphtask_r1.cli visualize kqapro \
+  --config configs/evaluation/kqapro_val.yaml \
+  --model-stage grpo \
+  --indices 0,12,41 --inspect-only
+```
+
+确认问题后，只运行当前配置的一个模型并生成单文件静态 HTML：
+
+```bash
+python -m graphtask_r1.cli visualize kqapro \
+  --config configs/evaluation/kqapro_val.yaml \
+  --model-stage grpo \
+  --indices 0,12,41 \
+  --output-dir outputs/visualization/kqapro-grpo
+```
+
+不传 `--indices` 时默认只取前三条，可用 `--limit` 调整。命令行 JSON 会打印数据预览、当前模型的
+答案/正确性、推理模式、回退状态、GraphScript operator 路径和失败原因；浏览器直接打开对应输出
+目录的 `paths.html` 即可，无需部署前后端。HTML 同时展示执行步骤与最多 20 条 support triples。
+也可以用 `--input` 临时覆盖配置中的数据集路径。
+
 发布代码前运行：
 
 ```bash
