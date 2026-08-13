@@ -110,6 +110,11 @@ GPU 上运行 `scripts/rollout_ms_swift.sh`，再以 `VLLM_MODE=server` 启动 G
 GRPO 的训练、采样与评测 batch 约束见
 [KQAPro 训练流程](KQAPRO_TRAINING.md#grpo-batch-设置)；不合法组合会在启动训练前报错。
 
+这里的 rollout server 和 eval README 中的单个 `sglang.launch_server` 都不是 SGLang PD 分离。
+`tp-size`/tensor parallel 也不等于 prefill/decode 分离。PD 需要独立 prefill、decode GPU 实例和
+router，主要用于多 GPU 高吞吐服务；单 GPU 4B eval 应优先使用低 concurrency、bounded limit 和
+足够的 request timeout 排查问题。
+
 ## 5. Self-play
 
 默认配置是 KQAPro + GraphScript v0.3：

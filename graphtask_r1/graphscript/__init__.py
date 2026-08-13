@@ -1,5 +1,7 @@
 from graphtask_r1.graphscript.executor import (
+    ExecutionStepTrace,
     GraphScriptExecution,
+    HandleTrace,
     execute_graphscript,
     graphscript_to_program,
     program_to_graphscript,
@@ -42,6 +44,7 @@ __all__ = [
     "BudgetUsage",
     "CountOp",
     "EmitOp",
+    "ExecutionStepTrace",
     "FilterLiteralOp",
     "FilterQualifierOp",
     "FilterTypeOp",
@@ -52,6 +55,7 @@ __all__ = [
     "GRAPHSCRIPT_V02_OPERATORS",
     "GRAPHSCRIPT_V03_OPERATORS",
     "GraphScriptExecution",
+    "HandleTrace",
     "IntersectOp",
     "PassagePagesOp",
     "QueryAttributeOp",

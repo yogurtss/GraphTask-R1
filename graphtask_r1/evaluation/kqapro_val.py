@@ -19,7 +19,7 @@ from graphtask_r1.graphscript import GraphScriptError, execute_graphscript, pars
 from graphtask_r1.schema import AnswerSet, RelationInfo, TaskCertificate
 from graphtask_r1.training.prompts import role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
-from graphtask_r1.utils import read_json, stable_hash, write_json, write_records
+from graphtask_r1.utils import ProgressLogger, read_json, stable_hash, write_json, write_records
 
 LOGGER = logging.getLogger(__name__)
 ModelStage = Literal["base", "sft", "grpo"]
@@ -44,9 +44,9 @@ class KQAProValConfig(BaseModel):
     graph_snapshot: str = "kqapro-v1"
     graphscript_version: Literal["0.3"] = "0.3"
     seed: int = 42
-    concurrency: int = Field(default=8, ge=1)
-    request_timeout_s: float = Field(default=180.0, gt=0)
-    request_retries: int = Field(default=2, ge=0, le=10)
+    concurrency: int = Field(default=2, ge=1)
+    request_timeout_s: float = Field(default=600.0, gt=0)
+    request_retries: int = Field(default=1, ge=0, le=10)
     max_follow_limit: int = Field(default=100, ge=1)
     max_edge_visits: int = Field(default=200, ge=1)
     max_returned_entities: int = Field(default=1_000, ge=1)
@@ -160,8 +160,11 @@ class OpenAICompletionClient:
                 last_error = exc
                 if attempt < self.retries:
                     await asyncio.sleep(min(0.5 * 2**attempt, 2.0))
+        error_name = type(last_error).__name__ if last_error is not None else "unknown"
+        error_detail = str(last_error) if last_error is not None else "unknown error"
         raise RuntimeError(
-            f"model request failed after {self.retries + 1} attempts"
+            f"model request failed after {self.retries + 1} attempts: "
+            f"{error_name}: {error_detail}"
         ) from last_error
 
     def flush(self) -> None:
@@ -277,6 +280,7 @@ async def _evaluate_one(
     relations: tuple[RelationInfo, ...],
     config: KQAProValConfig,
     seed: int,
+    capture_execution_steps: bool,
 ) -> dict[str, Any]:
     common: dict[str, Any] = {
         "task_id": task.task_id,
@@ -292,6 +296,9 @@ async def _evaluate_one(
         "rejection_reason": None,
         "path": [],
         "support": [],
+        "execution_steps": [],
+        "entity_details": {},
+        "relation_details": {},
     }
     if model_name == "base":
         try:
@@ -367,11 +374,54 @@ async def _evaluate_one(
                 max_edge_visits=config.max_edge_visits,
                 max_returned_entities=config.max_returned_entities,
                 trace_id=f"kqapro-val:{task.task_id}:{model_name}",
+                capture_steps=capture_execution_steps,
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             primary_reason = _reason("GRAPHSCRIPT_EXECUTION_FAILED", exc)
             raise
         metrics = _score(execution.answers, task.gold_answers, backend)
+        serialized_steps = [step.model_dump(mode="json") for step in execution.steps]
+        entity_ids = {
+            entity_id
+            for step in execution.steps
+            for entity_id in (
+                *step.selected_entities,
+                *step.retrieved_entities,
+                *step.discarded_entities,
+                *(
+                    value
+                    for handle in step.input_handles.values()
+                    if handle.kind == "entity"
+                    for value in handle.values
+                ),
+                *(
+                    step.output.values
+                    if step.output is not None and step.output.kind == "entity"
+                    else ()
+                ),
+            )
+        }
+        entity_details: dict[str, dict[str, Any]] = {}
+        for entity_id in sorted(entity_ids):
+            try:
+                entity_details[entity_id] = backend.entity_info(entity_id).model_dump(
+                    mode="json"
+                )
+            except (KeyError, ValueError):
+                entity_details[entity_id] = {
+                    "entity_id": entity_id,
+                    "label": entity_id,
+                    "aliases": [],
+                    "type_ids": [],
+                }
+        used_relations = {
+            triple.relation for triple in execution.support
+        } | set(execution.relation_path)
+        relation_details = {
+            relation.relation_id: relation.model_dump(mode="json")
+            for relation in relations
+            if relation.relation_id in used_relations
+        }
         return {
             **common,
             "inference_mode": "graphscript",
@@ -385,6 +435,9 @@ async def _evaluate_one(
             "relation_path": list(execution.relation_path),
             "support": [triple.model_dump(mode="json") for triple in execution.support],
             "usage": execution.usage.model_dump(mode="json"),
+            "execution_steps": serialized_steps,
+            "entity_details": entity_details,
+            "relation_details": relation_details,
             **metrics,
         }
     except (TypeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
@@ -529,7 +582,16 @@ def _select_visual_rows(
     return sorted(results, key=rank)[:maximum]
 
 
-def _path_html(row: dict[str, Any]) -> str:
+def _json_script(value: object) -> str:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+
+
+def _path_html(row: dict[str, Any], *, example_index: int) -> str:
     if row["inference_mode"] == "direct":
         return '<p class="muted">直接回答（未访问图）</p>'
     prefix = ""
@@ -544,6 +606,37 @@ def _path_html(row: dict[str, Any]) -> str:
         return prefix + (
             '<p class="bad">未产生可执行路径</p>'
             f'<p class="muted">{escape(str(reason.get("code", "unknown")))}</p>'
+        )
+    if row.get("execution_steps"):
+        trace_payload = {
+            "steps": row["execution_steps"],
+            "entity_details": row.get("entity_details", {}),
+            "relation_details": row.get("relation_details", {}),
+        }
+        return prefix + (
+            f'<div class="trace-view" id="trace-{example_index}">'
+            '<div class="trace-controls">'
+            '<button type="button" data-action="previous">← 上一步</button>'
+            '<button type="button" data-action="next">下一步 →</button>'
+            '<span class="trace-position"></span>'
+            '</div><div class="trace-layout">'
+            '<nav class="trace-steps" aria-label="GraphScript steps"></nav>'
+            '<section class="trace-graph-panel">'
+            '<div class="trace-legend"><span class="input">输入</span>'
+            '<span class="retrieved">本步获取</span><span class="selected">选中/输出</span>'
+            '<span class="discarded">过滤掉</span><span class="answer">数值/答案</span></div>'
+            '<svg class="trace-graph" viewBox="0 0 760 430" role="img"></svg>'
+            '</section><aside class="trace-inspector">'
+            '<h4 class="trace-title"></h4><div class="trace-summary"></div>'
+            '<h5>操作参数</h5><pre class="trace-operation"></pre>'
+            '<h5>累计预算</h5><pre class="trace-usage"></pre>'
+            '<h5>节点详情</h5><pre class="trace-node-detail">点击图中的节点查看</pre>'
+            '</aside></div>'
+            '<details class="raw-program"><summary>查看模型生成的原始 GraphScript</summary>'
+            f'<pre>{escape(str(row.get("raw_response", "")))}</pre></details>'
+            '<script type="application/json" class="trace-data">'
+            f'{_json_script(trace_payload)}</script>'
+            '</div>'
         )
     steps: list[str] = []
     for index, operation in enumerate(row["path"], start=1):
@@ -594,13 +687,14 @@ def render_kqapro_val_html(
         f'n={summary.get("count", 0)}</small></div>'
     )
     examples: list[str] = []
-    for row in selected:
+    for example_index, row in enumerate(selected):
         status = "correct" if row["exact_match"] else "wrong"
         answer = escape(json.dumps(row["predicted_answers"], ensure_ascii=False))
         model_result = (
             f'<section class="model {status}"><header><b>{stage.upper()}</b>'
             f'<span>{"✓" if status == "correct" else "✕"}</span></header>'
-            f'<p class="answer">{answer}</p>{_path_html(row)}</section>'
+            f'<p class="answer">{answer}</p>'
+            f'{_path_html(row, example_index=example_index)}</section>'
         )
         examples.append(
             '<article><h2>'
@@ -652,20 +746,321 @@ code { display:block; white-space:pre-wrap; overflow-wrap:anywhere; color:#59636
 .bad { color:var(--bad); font-weight:650 }
 details { font-size:13px }
 details ul { max-height:220px; overflow:auto; padding-left:20px }
+.trace-view { margin-top:14px; border-top:1px solid var(--line); padding-top:14px }
+.trace-controls { display:flex; align-items:center; gap:8px; margin-bottom:10px }
+.trace-controls button,.trace-step {
+  border:1px solid #b8c2c8; background:#fff; color:var(--ink); border-radius:8px;
+  padding:7px 10px; cursor:pointer;
+}
+.trace-controls button:disabled { opacity:.4; cursor:default }
+.trace-position { color:#65717d; margin-left:auto }
+.trace-layout { display:grid; grid-template-columns:210px minmax(440px,1fr) 300px; gap:12px }
+.trace-steps { max-height:500px; overflow:auto; padding-right:4px }
+.trace-step { display:block; width:100%; text-align:left; margin-bottom:7px }
+.trace-step.active {
+  background:#e0f2f1; border-color:var(--accent); box-shadow:inset 4px 0 var(--accent)
+}
+.trace-step b { display:block }.trace-step small { display:block; color:#65717d; margin-top:2px }
+.trace-graph-panel,.trace-inspector {
+  border:1px solid var(--line); border-radius:10px; background:#fff
+}
+.trace-graph-panel { min-width:0; overflow:auto }
+.trace-graph { display:block; width:100%; min-height:430px }
+.trace-legend {
+  display:flex; flex-wrap:wrap; gap:7px; padding:9px; border-bottom:1px solid var(--line)
+}
+.trace-legend span { border-radius:999px; padding:2px 7px; font-size:11px }
+.trace-legend .input { background:#dbeafe }.trace-legend .retrieved { background:#dcfce7 }
+.trace-legend .selected { background:#ede9fe }.trace-legend .discarded { background:#fee2e2 }
+.trace-legend .answer { background:#ffedd5 }
+.trace-inspector { padding:12px; max-height:500px; overflow:auto }
+.trace-inspector h4 { margin:0 0 8px }.trace-inspector h5 { margin:13px 0 4px }
+.trace-inspector pre,.raw-program pre {
+  white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px
+}
+.trace-summary dl { margin:0 }.trace-summary dt { color:#65717d; font-size:11px; margin-top:7px }
+.trace-summary dd { margin:1px 0; overflow-wrap:anywhere }.trace-count { font-weight:700 }
+.raw-program { margin-top:10px }.trace-node,.trace-edge { cursor:pointer }
 @media(max-width:900px) {
   .summary,.models { grid-template-columns:1fr }
+  .trace-layout { grid-template-columns:1fr }.trace-steps { max-height:190px }
   main { padding:16px }
 }
 """
+    javascript = r"""
+const SVG_NS = "http://www.w3.org/2000/svg";
+const OP_LABELS = {
+  start: "起始实体", all_entities: "候选全集", resolve_entity: "解析实体",
+  follow: "沿关系扩展", intersect: "取交集", union: "合并集合",
+  filter_type: "按类型过滤", filter_literal: "按属性值过滤",
+  filter_qualifier: "按限定符过滤", count: "计数",
+  query_attribute: "查询属性", query_attribute_under_condition: "条件属性查询",
+  query_attribute_qualifier: "查询属性限定符", query_relation: "查询关系",
+  query_relation_qualifier: "查询关系限定符", verify: "验证条件",
+  select_between: "二选一", select_among: "从集合选择",
+  require_unique: "要求唯一结果", emit: "输出答案"
+};
+const escapeHtml = value => String(value)
+  .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+const unique = values => [...new Set(values.map(String))];
+
+function initTrace(view) {
+  const data = JSON.parse(view.querySelector(".trace-data").textContent);
+  const steps = data.steps || [];
+  const details = data.entity_details || {};
+  const relationDetails = data.relation_details || {};
+  let current = 0;
+  const nav = view.querySelector(".trace-steps");
+  const svg = view.querySelector(".trace-graph");
+  const position = view.querySelector(".trace-position");
+  const summary = view.querySelector(".trace-summary");
+  const operation = view.querySelector(".trace-operation");
+  const usage = view.querySelector(".trace-usage");
+  const nodeDetail = view.querySelector(".trace-node-detail");
+  const previous = view.querySelector('[data-action="previous"]');
+  const next = view.querySelector('[data-action="next"]');
+  const label = id => details[id]?.label || String(id);
+  const shortLabel = id => {
+    const value = label(id);
+    return value.length > 19 ? value.slice(0, 18) + "…" : value;
+  };
+  const handleText = handle => {
+    if (!handle) return "—";
+    const shown = handle.values.map(value => label(value)).join(", ") || "∅";
+    const count = handle.truncated
+      ? `${handle.values.length} / ${handle.total_count}（截断）`
+      : String(handle.total_count);
+    return `${handle.kind} · ${count}: ${shown}`;
+  };
+
+  steps.forEach((step, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "trace-step";
+    const op = step.operation.op || "unknown";
+    const inputs = Object.keys(step.input_handles || {}).join(", ") || "root";
+    const output = step.output_handle || (op === "emit" ? "answer" : "—");
+    const title = document.createElement("b");
+    title.textContent = `${index + 1}. ${op} · ${OP_LABELS[op] || "执行操作"}`;
+    const flow = document.createElement("small");
+    flow.textContent = `${inputs} → ${output}`;
+    button.append(title, flow);
+    button.addEventListener("click", () => { current = index; render(); });
+    nav.appendChild(button);
+  });
+
+  function summaryHtml(step) {
+    const inputs = Object.entries(step.input_handles || {}).map(([name, handle]) =>
+      `<dt>输入 ${escapeHtml(name)}</dt><dd>${escapeHtml(handleText(handle))}</dd>`
+    ).join("");
+    const list = values => values?.length
+      ? values.map(value => escapeHtml(label(value))).join(", ") : "—";
+    const evidence = step.new_evidence_total
+      ? `${step.new_evidence.length} / ${step.new_evidence_total}` +
+        (step.evidence_truncated ? "（截断）" : "") : "0";
+    return `<dl>${inputs}` +
+      `<dt>输出 ${escapeHtml(step.output_handle || "answer")}</dt>` +
+      `<dd>${escapeHtml(handleText(step.output))}</dd>` +
+      `<dt>本步获取的节点</dt><dd>${list(step.retrieved_entities)}</dd>` +
+      `<dt>本步选中/保留</dt><dd>${list(step.selected_entities)}</dd>` +
+      `<dt>本步过滤掉</dt><dd>${list(step.discarded_entities)}</dd>` +
+      `<dt>新增证据</dt><dd class="trace-count">${escapeHtml(evidence)}</dd>` +
+      `<dt>步骤耗时</dt><dd>${Number(step.latency_ms).toFixed(2)} ms</dd></dl>`;
+  }
+
+  function renderGraph(stepIndex) {
+    svg.replaceChildren();
+    const currentStep = steps[stepIndex];
+    const visibleSteps = steps.slice(0, stepIndex + 1);
+    const inputValues = Object.values(currentStep.input_handles || {})
+      .flatMap(handle => handle.values || []);
+    const outputValues = currentStep.output?.values || [];
+    const selected = new Set((currentStep.selected_entities || []).map(String));
+    const retrieved = new Set((currentStep.retrieved_entities || []).map(String));
+    const discarded = new Set((currentStep.discarded_entities || []).map(String));
+    const inputs = new Set(inputValues.map(String));
+    const answerValues = new Set(
+      currentStep.output?.kind === "answer" ? outputValues.map(String) : []
+    );
+    const cumulativeEdges = visibleSteps.flatMap(step => step.new_evidence || []);
+    const currentEdges = new Set((currentStep.new_evidence || []).map(edge =>
+      `${edge.subject}\u0000${edge.relation}\u0000${edge.object}`
+    ));
+    const priority = unique([
+      ...selected, ...retrieved, ...outputValues, ...inputValues,
+      ...discarded,
+      ...(currentStep.new_evidence || []).flatMap(edge => [edge.subject, edge.object])
+    ]);
+    const candidates = unique([
+      ...priority,
+      ...cumulativeEdges.flatMap(edge => [edge.subject, edge.object])
+    ]);
+    const MAX_GRAPH_NODES = 18;
+    const nodeIds = candidates.slice(0, MAX_GRAPH_NODES);
+    const allowed = new Set(nodeIds);
+    const edges = cumulativeEdges.filter(edge =>
+      allowed.has(String(edge.subject)) && allowed.has(String(edge.object))
+    );
+
+    const firstSeen = {};
+    visibleSteps.forEach((step, index) => {
+      const values = [
+        ...(step.retrieved_entities || []), ...(step.selected_entities || []),
+        ...(step.output?.values || []),
+        ...(step.new_evidence || []).flatMap(edge => [edge.subject, edge.object])
+      ];
+      values.forEach(value => { if (firstSeen[value] === undefined) firstSeen[value] = index; });
+    });
+    const groups = new Map();
+    nodeIds.forEach(id => {
+      const column = Math.min(firstSeen[id] ?? stepIndex, stepIndex);
+      if (!groups.has(column)) groups.set(column, []);
+      groups.get(column).push(id);
+    });
+    const columns = [...groups.keys()].sort((a, b) => a - b);
+    const layoutColumns = [];
+    const MAX_ROWS = 6;
+    columns.forEach(column => {
+      const values = groups.get(column);
+      for (let offset = 0; offset < values.length; offset += MAX_ROWS) {
+        layoutColumns.push(values.slice(offset, offset + MAX_ROWS));
+      }
+    });
+    const graphWidth = Math.max(760, 170 * layoutColumns.length + 20);
+    svg.setAttribute("viewBox", `0 0 ${graphWidth} 430`);
+    svg.style.minWidth = `${graphWidth}px`;
+    const positions = {};
+    layoutColumns.forEach((values, columnIndex) => {
+      const x = layoutColumns.length === 1 ? graphWidth / 2 : 85 + columnIndex * 170;
+      values.forEach((id, rowIndex) => {
+        positions[id] = {x, y: 45 + (rowIndex + 1) * (335 / (values.length + 1))};
+      });
+    });
+
+    const defs = document.createElementNS(SVG_NS, "defs");
+    const marker = document.createElementNS(SVG_NS, "marker");
+    marker.setAttribute("id", `${view.id}-arrow`);
+    marker.setAttribute("viewBox", "0 0 10 10"); marker.setAttribute("refX", "9");
+    marker.setAttribute("refY", "5"); marker.setAttribute("markerWidth", "6");
+    marker.setAttribute("markerHeight", "6"); marker.setAttribute("orient", "auto-start-reverse");
+    const arrow = document.createElementNS(SVG_NS, "path");
+    arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); arrow.setAttribute("fill", "#718096");
+    marker.appendChild(arrow); defs.appendChild(marker); svg.appendChild(defs);
+
+    edges.forEach(edge => {
+      const source = positions[edge.subject], target = positions[edge.object];
+      if (!source || !target) return;
+      const key = `${edge.subject}\u0000${edge.relation}\u0000${edge.object}`;
+      const line = document.createElementNS(SVG_NS, "line");
+      line.classList.add("trace-edge");
+      line.setAttribute("x1", source.x); line.setAttribute("y1", source.y);
+      line.setAttribute("x2", target.x); line.setAttribute("y2", target.y);
+      line.setAttribute("stroke", currentEdges.has(key) ? "#16a34a" : "#94a3b8");
+      line.setAttribute("stroke-width", currentEdges.has(key) ? "3" : "1.5");
+      line.setAttribute("marker-end", `url(#${view.id}-arrow)`); svg.appendChild(line);
+      const edgeLabel = document.createElementNS(SVG_NS, "text");
+      edgeLabel.setAttribute("x", (source.x + target.x) / 2);
+      edgeLabel.setAttribute("y", (source.y + target.y) / 2 - 5);
+      edgeLabel.setAttribute("text-anchor", "middle"); edgeLabel.setAttribute("font-size", "10");
+      edgeLabel.classList.add("trace-edge");
+      edgeLabel.setAttribute("fill", "#475569");
+      edgeLabel.textContent = relationDetails[edge.relation]?.label || edge.relation;
+      const showRelation = () => {
+        const relation = relationDetails[edge.relation] || {label: edge.relation};
+        nodeDetail.textContent = JSON.stringify({
+          id: edge.relation, role: "relation", ...relation,
+          edge: {subject: edge.subject, object: edge.object}
+        }, null, 2);
+      };
+      line.addEventListener("click", showRelation);
+      edgeLabel.addEventListener("click", showRelation);
+      svg.appendChild(edgeLabel);
+    });
+
+    nodeIds.forEach(id => {
+      const point = positions[id];
+      const group = document.createElementNS(SVG_NS, "g");
+      group.classList.add("trace-node");
+      group.setAttribute("transform", `translate(${point.x},${point.y})`);
+      let fill = details[id] ? "#f1f5f9" : "#ffedd5", stroke = "#64748b", role = "context";
+      if (inputs.has(id)) { fill = "#dbeafe"; stroke = "#2563eb"; role = "input"; }
+      if (retrieved.has(id)) { fill = "#dcfce7"; stroke = "#16a34a"; role = "retrieved"; }
+      if (selected.has(id)) { fill = "#ede9fe"; stroke = "#7c3aed"; role = "selected"; }
+      if (discarded.has(id)) { fill = "#fee2e2"; stroke = "#dc2626"; role = "discarded"; }
+      if (answerValues.has(id)) { fill = "#ffedd5"; stroke = "#ea580c"; role = "answer"; }
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("x", "-66"); rect.setAttribute("y", "-23");
+      rect.setAttribute("width", "132"); rect.setAttribute("height", "46");
+      rect.setAttribute("rx", details[id] ? "23" : "7"); rect.setAttribute("fill", fill);
+      rect.setAttribute("stroke", stroke); rect.setAttribute("stroke-width", "2");
+      group.appendChild(rect);
+      const title = document.createElementNS(SVG_NS, "text");
+      title.setAttribute("text-anchor", "middle"); title.setAttribute("y", "-2");
+      title.setAttribute("font-size", "12"); title.setAttribute("font-weight", "700");
+      title.textContent = shortLabel(id); group.appendChild(title);
+      const identifier = document.createElementNS(SVG_NS, "text");
+      identifier.setAttribute("text-anchor", "middle"); identifier.setAttribute("y", "13");
+      identifier.setAttribute("font-size", "8"); identifier.setAttribute("fill", "#64748b");
+      identifier.textContent = String(id).length > 22 ? String(id).slice(0, 21) + "…" : String(id);
+      group.appendChild(identifier);
+      group.addEventListener("click", () => {
+        const detail = {id, role, ...(details[id] || {value: id})};
+        nodeDetail.textContent = JSON.stringify(detail, null, 2);
+      });
+      svg.appendChild(group);
+    });
+
+    if (candidates.length > MAX_GRAPH_NODES) {
+      const note = document.createElementNS(SVG_NS, "text");
+      note.setAttribute("x", String(graphWidth - 20)); note.setAttribute("y", "418");
+      note.setAttribute("text-anchor", "end"); note.setAttribute("font-size", "10");
+      note.setAttribute("fill", "#b45309");
+      note.textContent = `为可读性仅显示 ${MAX_GRAPH_NODES} / ${candidates.length} 个相关节点`;
+      svg.appendChild(note);
+    }
+  }
+
+  function render() {
+    const step = steps[current];
+    if (!step) return;
+    nav.querySelectorAll(".trace-step").forEach((button, index) =>
+      button.classList.toggle("active", index === current)
+    );
+    position.textContent = `${current + 1} / ${steps.length}`;
+    previous.disabled = current === 0; next.disabled = current === steps.length - 1;
+    const opLabel = OP_LABELS[step.operation.op] || "执行操作";
+    view.querySelector(".trace-title").textContent =
+      `${current + 1}. ${step.operation.op} · ${opLabel}`;
+    summary.innerHTML = summaryHtml(step);
+    operation.textContent = JSON.stringify(step.operation, null, 2);
+    usage.textContent = JSON.stringify(step.cumulative_usage, null, 2);
+    nodeDetail.textContent = "点击图中的节点查看 label、ID、alias、type 与本步角色";
+    renderGraph(current);
+  }
+  previous.addEventListener("click", () => { if (current > 0) { current--; render(); } });
+  next.addEventListener("click", () => {
+    if (current < steps.length - 1) { current++; render(); }
+  });
+  render();
+}
+document.querySelectorAll(".trace-view").forEach(initTrace);
+"""
     html = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>KQAPro val 模型路径对比</title><style>{css}</style></head>
-<body><main><h1>KQAPro val 模型路径对比</h1>
+<title>KQAPro val 单模型执行路径</title><style>{css}</style></head>
+<body><main><h1>KQAPro val 单模型执行路径</h1>
 <p class="subtitle">当前阶段：{escape(stage)}；GraphScript 版本
 v{escape(str(metrics['graphscript_version']))}。静态抽样 {len(selected)} 个问题。</p>
-<div class="summary">{model_card}</div>{''.join(examples)}</main></body></html>"""
+<div class="summary">{model_card}</div>{''.join(examples)}</main>
+<script>{javascript}</script></body></html>"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
+
+
+def _progress_bar(completed: int, total: int, *, width: int = 20) -> str:
+    filled = width if total <= 0 else min(width, completed * width // total)
+    return "[" + "█" * filled + "░" * (width - filled) + "]"
 
 
 async def evaluate_kqapro_val(
@@ -678,6 +1073,7 @@ async def evaluate_kqapro_val(
     selected_indices: frozenset[int] | None = None,
     backend: GraphBackend | None = None,
     client: CompletionClient | None = None,
+    capture_execution_steps: bool = False,
 ) -> dict[str, Any]:
     if limit is not None and limit < 0:
         raise ValueError("limit must be non-negative")
@@ -707,24 +1103,91 @@ async def evaluate_kqapro_val(
 
     semaphore = asyncio.Semaphore(config.concurrency)
 
-    async def bounded(task: TaskCertificate, index: int) -> dict[str, Any]:
+    async def bounded(task: TaskCertificate, index: int) -> tuple[int, dict[str, Any]]:
         async with semaphore:
-            return await _evaluate_one(
-                task,
-                model_name=model_stage,
-                client=effective_client,
-                backend=effective_backend,
-                relations=relations,
-                config=config,
-                seed=config.seed + index,
+            return (
+                index,
+                await _evaluate_one(
+                    task,
+                    model_name=model_stage,
+                    client=effective_client,
+                    backend=effective_backend,
+                    relations=relations,
+                    config=config,
+                    seed=config.seed + index,
+                    capture_execution_steps=capture_execution_steps,
+                ),
             )
 
-    jobs = [bounded(task, index) for index, task in enumerate(tasks)]
+    pending = {
+        asyncio.create_task(bounded(task, index)) for index, task in enumerate(tasks)
+    }
+    ordered_results: list[dict[str, Any] | None] = [None] * len(tasks)
+    completed = 0
+    correct = 0
+    tool_successes = 0
+    fallbacks = 0
+    terminal_failures = 0
+    cache_hits = 0
+    progress = ProgressLogger(
+        "evaluate.kqapro_val",
+        total=len(tasks),
+        interval_s=5.0,
+    )
+    progress.start(
+        model_stage=model_stage,
+        concurrency=config.concurrency,
+        request_timeout_s=config.request_timeout_s,
+        request_retries=config.request_retries,
+        bar=_progress_bar(0, len(tasks)),
+    )
     try:
-        results = await asyncio.gather(*jobs)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=5.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for future in done:
+                index, row = future.result()
+                ordered_results[index] = row
+                completed += 1
+                correct += int(bool(row["exact_match"]))
+                tool_successes += int(bool(row["tool_succeeded"]))
+                fallbacks += int(bool(row["fallback_used"]))
+                terminal_failures += int(not row["predicted_answers"])
+                cache_hits += int(bool(row["cache_hit"]))
+            progress.update(
+                completed,
+                pending=len(pending),
+                correct=correct,
+                tool_successes=tool_successes,
+                fallbacks=fallbacks,
+                terminal_failures=terminal_failures,
+                cache_hits=cache_hits,
+                bar=_progress_bar(completed, len(tasks)),
+            )
     finally:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if owned_client:
             effective_client.flush()
+    results = [row for row in ordered_results if row is not None]
+    if len(results) != len(tasks):
+        raise RuntimeError(
+            f"KQAPro evaluation completed {len(results)} of {len(tasks)} tasks"
+        )
+    progress.finish(
+        completed,
+        correct=correct,
+        tool_successes=tool_successes,
+        fallbacks=fallbacks,
+        terminal_failures=terminal_failures,
+        cache_hits=cache_hits,
+        bar=_progress_bar(completed, len(tasks)),
+    )
     summary = _metrics(results, config, model_stage)
     summary["input"] = str(input_path)
     summary["examples"] = len(tasks)
@@ -875,6 +1338,7 @@ async def visualize_kqapro_val(
         selected_indices=selected_indices,
         backend=backend,
         client=client,
+        capture_execution_steps=True,
     )
     from graphtask_r1.utils import read_records
 
@@ -896,6 +1360,7 @@ async def visualize_kqapro_val(
             "mode": row["inference_mode"],
             "fallback_used": row["fallback_used"],
             "path": [operation.get("op") for operation in row.get("path", [])],
+            "execution_steps": row.get("execution_steps", []),
             "failure": row.get("rejection_reason"),
         }
         for row in results

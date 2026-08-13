@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
@@ -82,6 +83,34 @@ class GraphScriptExecution(BaseModel):
     support: tuple[Triple, ...]
     relation_path: tuple[str, ...]
     usage: BudgetUsage
+    steps: tuple[ExecutionStepTrace, ...] = ()
+
+
+class HandleTrace(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["entity", "answer", "passage", "program", "empty"]
+    values: tuple[str, ...] = ()
+    total_count: int = 0
+    truncated: bool = False
+
+
+class ExecutionStepTrace(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    index: int
+    operation: dict[str, object]
+    input_handles: dict[str, HandleTrace]
+    output_handle: str | None = None
+    output: HandleTrace | None = None
+    selected_entities: tuple[str, ...] = ()
+    retrieved_entities: tuple[str, ...] = ()
+    discarded_entities: tuple[str, ...] = ()
+    new_evidence: tuple[Triple, ...] = ()
+    new_evidence_total: int = 0
+    evidence_truncated: bool = False
+    latency_ms: float = 0.0
+    cumulative_usage: BudgetUsage
 
 
 @dataclass(frozen=True)
@@ -89,6 +118,84 @@ class _Handle:
     program: Program | None = None
     answers: AnswerSet | None = None
     passages: tuple[PassageHit, ...] = ()
+
+
+def _input_handle_names(op: object) -> tuple[str, ...]:
+    if isinstance(op, IntersectOp | UnionOp):
+        return op.inputs
+    if isinstance(op, QueryRelationOp | QueryRelationQualifierOp):
+        return (op.subject, op.object)
+    if isinstance(op, SelectBetweenOp):
+        return (op.left, op.right)
+    if isinstance(
+        op,
+        PassagePagesOp
+        | FollowOp
+        | FilterTypeOp
+        | FilterLiteralOp
+        | FilterQualifierOp
+        | CountOp
+        | QueryAttributeOp
+        | QueryAttributeUnderConditionOp
+        | QueryAttributeQualifierOp
+        | VerifyOp
+        | SelectAmongOp
+        | RequireUniqueOp
+        | EmitOp,
+    ):
+        return (op.input_handle,)
+    return ()
+
+
+def _preferred_values(
+    values: tuple[str, ...], preferred: set[str], limit: int
+) -> tuple[str, ...]:
+    value_set = set(values)
+    selected = [value for value in sorted(preferred) if value in value_set]
+    selected_set = set(selected)
+    selected.extend(value for value in values if value not in selected_set)
+    return tuple(selected[:limit])
+
+
+def _handle_trace(
+    handle: _Handle, *, preview_limit: int, preferred: set[str] | None = None
+) -> HandleTrace:
+    preferred_values = preferred or set()
+    if handle.answers is not None:
+        raw_values = tuple(str(answer.value) for answer in handle.answers.answers)
+        entity_values = handle.answers.entity_ids()
+        kind: Literal["entity", "answer", "passage", "program", "empty"] = (
+            "entity" if len(entity_values) == len(raw_values) else "answer"
+        )
+        return HandleTrace(
+            kind=kind,
+            values=_preferred_values(raw_values, preferred_values, preview_limit),
+            total_count=len(raw_values),
+            truncated=len(raw_values) > preview_limit,
+        )
+    if handle.passages:
+        values = tuple(passage.page_id for passage in handle.passages)
+        return HandleTrace(
+            kind="passage",
+            values=_preferred_values(values, preferred_values, preview_limit),
+            total_count=len(values),
+            truncated=len(values) > preview_limit,
+        )
+    if handle.program is not None:
+        return HandleTrace(kind="program")
+    return HandleTrace(kind="empty")
+
+
+def _handle_entity_ids(handle: _Handle) -> set[str]:
+    if handle.answers is None:
+        return set()
+    return set(handle.answers.entity_ids())
+
+
+def _bounded(
+    values: set[str], limit: int, *, preferred: set[str] | None = None
+) -> tuple[str, ...]:
+    return _preferred_values(tuple(sorted(values)), preferred or set(), limit)
 
 
 def _entity_program(entity_ids: set[str] | tuple[str, ...]) -> Program:
@@ -484,10 +591,17 @@ def execute_graphscript(
     max_edge_visits: int,
     max_returned_entities: int = 1_000,
     trace_id: str | None = None,
+    capture_steps: bool = False,
+    trace_preview_limit: int = 8,
 ) -> GraphScriptExecution:
+    if not 1 <= trace_preview_limit <= 100:
+        raise ValueError("trace_preview_limit must be between 1 and 100")
     handles: dict[str, _Handle] = {}
     support: set[Triple] = set()
     relation_path: list[str] = []
+    execution_steps: list[ExecutionStepTrace] = []
+    trace_output_entities: list[set[str]] = []
+    trace_evidence: list[tuple[Triple, ...]] = []
     edge_visits = 0
     returned_entities = 0
     graph_calls = 0
@@ -533,6 +647,22 @@ def execute_graphscript(
 
     for index, op in enumerate(script.ops):
         op_trace = f"{trace_id or 'graphscript'}:{index}"
+        step_started = perf_counter()
+        input_names = _input_handle_names(op)
+        input_trace = (
+            {
+                name: _handle_trace(handles[name], preview_limit=trace_preview_limit)
+                for name in input_names
+            }
+            if capture_steps
+            else {}
+        )
+        input_entities = (
+            set().union(*(_handle_entity_ids(handles[name]) for name in input_names))
+            if input_names
+            else set()
+        )
+        support_before = set(support)
         if isinstance(op, StartOp):
             if seed_entity is None:
                 raise GraphScriptError("MISSING_SEED", "start($seed) requires a topic entity")
@@ -733,10 +863,139 @@ def execute_graphscript(
         elif isinstance(op, EmitOp):
             emitted = handles[op.input_handle]
 
+        if capture_steps:
+            output_handle = getattr(op, "out", None)
+            if isinstance(output_handle, str):
+                output_source = handles[output_handle]
+            elif isinstance(op, RequireUniqueOp | EmitOp):
+                output_source = handles[op.input_handle]
+            else:
+                output_source = None
+            output_trace = (
+                _handle_trace(output_source, preview_limit=trace_preview_limit)
+                if output_source is not None
+                else None
+            )
+            output_entities = (
+                _handle_entity_ids(output_source) if output_source is not None else set()
+            )
+            retrieved = (
+                output_entities
+                if isinstance(
+                    op,
+                    StartOp | ResolveEntityOp | SearchPassageOp | PassagePagesOp | FollowOp,
+                )
+                else set()
+            )
+            discarded = (
+                input_entities - output_entities
+                if isinstance(
+                    op,
+                    FilterTypeOp
+                    | FilterLiteralOp
+                    | FilterQualifierOp
+                    | IntersectOp
+                    | SelectBetweenOp
+                    | SelectAmongOp,
+                )
+                else set()
+            )
+            evidence = tuple(sorted(support - support_before, key=Triple.sort_key))
+            execution_steps.append(
+                ExecutionStepTrace(
+                    index=index,
+                    operation=op.model_dump(mode="json", by_alias=True),
+                    input_handles=input_trace,
+                    output_handle=output_handle if isinstance(output_handle, str) else None,
+                    output=output_trace,
+                    selected_entities=_bounded(output_entities, trace_preview_limit),
+                    retrieved_entities=_bounded(retrieved, trace_preview_limit),
+                    discarded_entities=_bounded(discarded, trace_preview_limit),
+                    new_evidence=evidence[:trace_preview_limit],
+                    new_evidence_total=len(evidence),
+                    evidence_truncated=len(evidence) > trace_preview_limit,
+                    latency_ms=(perf_counter() - step_started) * 1_000,
+                    cumulative_usage=BudgetUsage(
+                        edge_visits=edge_visits,
+                        operators=index + 1,
+                        returned_entities=returned_entities,
+                        graph_calls=graph_calls,
+                        passage_searches=passage_searches,
+                        returned_passages=returned_passages,
+                    ),
+                )
+            )
+            trace_output_entities.append(output_entities)
+            trace_evidence.append(evidence)
+
     if emitted is None or emitted.answers is None or emitted.program is None:
         raise GraphScriptError("MISSING_EMIT", "script did not emit an executable answer")
     if not emitted.answers.answers:
         raise GraphScriptError("EMPTY_RESULT", "emitted answer is empty")
+    if capture_steps:
+        downstream_relevant: set[str] = set()
+        for index in reversed(range(len(execution_steps))):
+            output_entities = trace_output_entities[index]
+            if 0 < len(output_entities) <= trace_preview_limit:
+                downstream_relevant.update(output_entities)
+            op = script.ops[index]
+            input_names = _input_handle_names(op)
+            output_handle = getattr(op, "out", None)
+            if isinstance(output_handle, str):
+                output_source = handles[output_handle]
+            elif isinstance(op, RequireUniqueOp | EmitOp):
+                output_source = handles[op.input_handle]
+            else:
+                output_source = None
+            evidence = trace_evidence[index]
+            ordered_evidence = tuple(
+                sorted(
+                    evidence,
+                    key=lambda triple: (
+                        0
+                        if triple.subject in downstream_relevant
+                        or triple.object in downstream_relevant
+                        else 1,
+                        triple.sort_key(),
+                    ),
+                )
+            )
+            step = execution_steps[index]
+            execution_steps[index] = step.model_copy(
+                update={
+                    "input_handles": {
+                        name: _handle_trace(
+                            handles[name],
+                            preview_limit=trace_preview_limit,
+                            preferred=downstream_relevant,
+                        )
+                        for name in input_names
+                    },
+                    "output": (
+                        _handle_trace(
+                            output_source,
+                            preview_limit=trace_preview_limit,
+                            preferred=downstream_relevant,
+                        )
+                        if output_source is not None
+                        else None
+                    ),
+                    "selected_entities": _bounded(
+                        output_entities,
+                        trace_preview_limit,
+                        preferred=downstream_relevant,
+                    ),
+                    "retrieved_entities": _bounded(
+                        set(step.retrieved_entities) | output_entities,
+                        trace_preview_limit,
+                        preferred=downstream_relevant,
+                    )
+                    if step.retrieved_entities
+                    else (),
+                    "new_evidence": ordered_evidence[:trace_preview_limit],
+                    "evidence_truncated": len(ordered_evidence) > trace_preview_limit,
+                }
+            )
     return GraphScriptExecution(
         program=emitted.program,
         answers=emitted.answers,
@@ -750,4 +1009,5 @@ def execute_graphscript(
             passage_searches=passage_searches,
             returned_passages=returned_passages,
         ),
+        steps=tuple(execution_steps),
     )

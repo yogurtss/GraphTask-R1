@@ -4,7 +4,7 @@ import json
 import pytest
 
 from graphtask_r1.generation import compile_trace
-from graphtask_r1.graph import toy_graph
+from graphtask_r1.graph import InMemoryGraphBackend, toy_graph
 from graphtask_r1.graphscript import (
     GraphScriptError,
     execute_graphscript,
@@ -16,10 +16,12 @@ from graphtask_r1.schema import (
     AllEntities,
     AnswerSet,
     Entity,
+    EntityInfo,
     FilterType,
     Hop,
     QueryAttribute,
     SelectBetween,
+    Triple,
     parse_program,
 )
 from graphtask_r1.training.ms_swift_reward import compute_score
@@ -254,6 +256,73 @@ def test_graphscript_v02_supports_bounded_global_filter_program() -> None:
 
     assert execution.program == program
     assert execution.answers == graph.execute_program(program)
+
+
+def test_execution_trace_bounds_large_sets_and_keeps_downstream_entity() -> None:
+    neighbors = tuple(f"candidate-{index:02d}" for index in range(12))
+    target = neighbors[-1]
+    graph = InMemoryGraphBackend(
+        triples=[
+            Triple(subject="root", relation="candidate", object=entity_id)
+            for entity_id in neighbors
+        ],
+        entities=[
+            EntityInfo(entity_id="root", label="Root"),
+            *[
+                EntityInfo(
+                    entity_id=entity_id,
+                    label=f"Candidate {index}",
+                    type_ids=("target",) if entity_id == target else ("distractor",),
+                )
+                for index, entity_id in enumerate(neighbors)
+            ],
+        ],
+    )
+    script = parse_graphscript(
+        {
+            "version": "0.3",
+            "ops": [
+                {
+                    "op": "resolve_entity",
+                    "query": "root",
+                    "match": "id",
+                    "limit": 1,
+                    "out": "h0",
+                },
+                {
+                    "op": "follow",
+                    "in": "h0",
+                    "relation": "candidate",
+                    "direction": "out",
+                    "limit": 20,
+                    "out": "h1",
+                },
+                {"op": "filter_type", "in": "h1", "type_id": "target", "out": "h2"},
+                {"op": "emit", "in": "h2"},
+            ],
+        }
+    )
+
+    execution = execute_graphscript(
+        script,
+        graph,
+        allowed_relations=frozenset({"candidate"}),
+        max_edge_visits=20,
+        capture_steps=True,
+        trace_preview_limit=3,
+    )
+
+    follow = execution.steps[1]
+    filtered = execution.steps[2]
+    assert follow.output is not None
+    assert follow.output.total_count == 12
+    assert follow.output.truncated is True
+    assert len(follow.output.values) == 3
+    assert target in follow.output.values
+    assert target in follow.retrieved_entities
+    assert any(edge.object == target for edge in follow.new_evidence)
+    assert filtered.selected_entities == (target,)
+    assert len(filtered.discarded_entities) == 3
 
 
 def test_graphscript_v02_solver_reward_does_not_require_topic_seed() -> None:

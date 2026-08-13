@@ -12,9 +12,10 @@ model:
   max_completion_tokens: 4096
 
 seed: 42
-concurrency: 8
-request_timeout_s: 180
-request_retries: 2
+# Conservative defaults for one 4B model on a single GPU. Increase only after a bounded smoke.
+concurrency: 2
+request_timeout_s: 600
+request_retries: 1
 max_follow_limit: 100
 max_edge_visits: 200
 max_returned_entities: 1000

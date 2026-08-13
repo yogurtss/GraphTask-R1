@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -121,10 +122,13 @@ def test_single_model_eval_uses_tool_model_direct_fallback(tmp_path: Path) -> No
         assert rows[0]["rejection_reason"]["code"] == "GRAPHSCRIPT_PARSE_FAILED"
 
 
-def test_base_eval_never_attempts_graph_tool(tmp_path: Path) -> None:
+def test_base_eval_never_attempts_graph_tool(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     input_path, config = _fixture(tmp_path)
     import asyncio
 
+    caplog.set_level(logging.INFO, logger="graphtask_r1.progress")
     summary = asyncio.run(
         evaluate_kqapro_val(
             input_path,
@@ -139,6 +143,21 @@ def test_base_eval_never_attempts_graph_tool(tmp_path: Path) -> None:
     assert summary["overall"]["exact_match"] == 1.0
     assert row["tool_attempted"] is False
     assert row["inference_mode"] == "direct"
+    progress_messages = [record.message for record in caplog.records]
+    assert any(
+        'operation="evaluate.kqapro_val"' in message
+        and 'phase="started"' in message
+        and 'model_stage="base"' in message
+        for message in progress_messages
+    )
+    assert any(
+        'operation="evaluate.kqapro_val"' in message
+        and 'phase="completed"' in message
+        and "completed=1" in message
+        and "correct=1" in message
+        and 'bar="[████████████████████]"' in message
+        for message in progress_messages
+    )
 
 
 def test_visualization_is_separate_bounded_and_html_safe(tmp_path: Path) -> None:
@@ -165,8 +184,16 @@ def test_visualization_is_separate_bounded_and_html_safe(tmp_path: Path) -> None
     assert "Who is &lt;Alice&gt;&#x27;s friend?" in html
     assert "Who is <Alice>" not in html
     assert "resolve_entity" in html
+    assert 'class="trace-view"' in html
+    assert 'class="trace-graph"' in html
+    assert "本步获取的节点" in html
+    assert "点击图中的节点查看" in html
     assert len(result["results"]) == 1
     assert result["results"][0]["model"] == "grpo"
+    assert len(result["results"][0]["execution_steps"]) == 3
+    prediction = read_records(tmp_path / "visualization/predictions.parquet")[0]
+    assert prediction["entity_details"]["bob"]["label"] == "Bob"
+    assert prediction["relation_details"]["friend"]["relation_id"] == "friend"
 
 
 def test_compare_reads_separate_single_model_runs(tmp_path: Path) -> None:

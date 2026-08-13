@@ -101,9 +101,9 @@ model:
   max_completion_tokens: 4096
 
 seed: 42
-concurrency: 8
-request_timeout_s: 180
-request_retries: 2
+concurrency: 2
+request_timeout_s: 600
+request_retries: 1
 max_follow_limit: 100
 max_edge_visits: 200
 max_returned_entities: 1000
@@ -112,8 +112,42 @@ max_returned_entities: 1000
 配置中只放当前正在评测的一个模型。`KQAPRO_MODEL` 必须等于服务的 `/v1/models` 返回的模型
 ID。切换 base、SFT、GRPO 时，修改当前服务和这一个环境变量即可。
 
-首次测试建议临时把 `concurrency` 改为 `1` 或 `2`，确认显存和输出格式后再提高。随机 seed、
-GraphScript limit 和图执行预算均显式记录在 `metrics.json` 中。
+这些默认值针对一个 4B 模型部署在单 GPU 上。首次测试仍建议用 `concurrency: 1`，确认显存、单条
+延迟和输出格式后再调到 2；只有服务端确有更多并行容量时才继续提高。SGLang 的队列等待也计入
+`request_timeout_s`。随机 seed、GraphScript limit 和图执行预算均显式记录在 `metrics.json` 中。
+
+### 3.1 当前 SGLang 部署不是 PD 分离
+
+本文的启动命令只运行一个 `python -m sglang.launch_server`。prefill 和 decode 位于同一服务进程
+及同一组 `--tp-size` GPU 上，因此是普通统一部署，不是 prefill/decode（PD）分离。`--tp-size 2`
+表示 tensor parallel，也不等于 PD 分离。
+
+真正的 SGLang PD 分离需要至少两组独立 GPU/实例，分别以 disaggregation prefill/decode 模式
+启动，并在前面配置负责把请求在两侧路由的 router。它适合多 GPU、高并发、prefill 与 decode
+负载明显不平衡的服务；对于单 GPU 上的 4B 离线 eval，PD 无法成立，也通常不是解决 timeout 的
+第一选择。应先降低客户端 concurrency、观察实际每条生成长度、提高合理的总超时，并检查是否有
+请求在服务端排队。
+
+如果确实要采用 PD 分离，应按照所安装 SGLang 版本的
+[PD Disaggregation 官方文档](https://docs.sglang.ai/backend/pd_disaggregation.html)部署。该功能的
+CLI 参数和 router 配置可能随 SGLang 版本变化，不要把本文的普通 `launch_server` 命令直接解释为
+PD 配置。无论服务端是否 PD 分离，GraphTask 客户端仍只配置 router 暴露的一个
+`KQAPRO_MODEL_URL`。
+
+### 3.2 Token 上限与 timeout 是两件事
+
+默认 `max_completion_tokens: 4096` 是模型**输出**上限，不是总上下文长度。对只生成 JSON
+GraphScript 的 SFT/GRPO 来说通常已经充足；盲目增到 8192 或更大，会允许异常样本持续 decode
+更久，反而更容易触发 timeout。建议先从 `predictions.parquet` 的 `completion_tokens` 分布判断：
+
+- 大多数成功样本远低于 4096：保持 4096；
+- 大量输出恰好停在 4096 且 JSON 尾部被截断：再提高到 6144/8192，并同步核对延迟和显存；
+- prompt 本身过长或服务报 context length：应提高 SGLang 的总 context length，或缩短 relation
+  catalog；只改 `max_completion_tokens` 不能扩大总上下文。
+
+模型服务的总上下文必须至少容纳“system/user prompt（含 relation catalog）+ completion 上限”。具体
+的 context-length 参数应以当前安装的 SGLang 版本为准。完整 eval 前建议先跑 20 条，记录实际
+prompt/completion token 与 p95 延迟，再决定是否调整 token 上限。
 
 ## 4. 部署原模型（base）
 
@@ -324,6 +358,41 @@ curl -f http://127.0.0.1:18100/v1/chat/completions \
 - CUDA OOM：降低配置中的 `concurrency`，降低服务显存占用，或增加 tensor parallel GPU；
 - context length error：确认模型服务上下文窗口能容纳 relation catalog 和最多 4096 completion
   tokens。
+- `TimeoutError`：先把 `concurrency` 降到 1，查看 SGLang 日志中的排队和生成速度；确认仍是单请求
+  本身超过 600 秒后，再增加 `request_timeout_s`。不要先增加 concurrency；客户端 timeout 后的
+  retry 可能使尚未结束的服务端请求与重试请求同时占用队列。
+
+### 8.1 Eval 进度输出
+
+`evaluate kqapro-val` 默认每 5 秒向 stderr 写一条结构化进度日志，不需要安装 `tqdm`。开始、等待
+和完成时会看到类似：
+
+```text
+operation="evaluate.kqapro_val" phase="progress" completed=84 total=11768 percent=0.7 \
+elapsed_s=312.4 pending=11684 correct=51 tool_successes=73 fallbacks=11 \
+terminal_failures=0 cache_hits=0 bar="[░░░░░░░░░░░░░░░░░░░░]"
+```
+
+字段含义：
+
+- `completed/total/percent`：已经完成的样本和总进度；
+- `pending`：尚未完成（包含正在请求和等待 semaphore）的样本；
+- `correct`：当前最终回答正确数；
+- `tool_successes`：GraphScript 首次成功执行数；
+- `fallbacks`：SFT/GRPO 已进入直接回答回退的样本数；
+- `terminal_failures`：主路径和回退都没有产生答案的样本数；
+- `cache_hits`：从当前输出目录响应 cache 复用的样本数。
+- `bar`：20 格终端文本进度条；精确进度仍以 `completed/total/percent` 为准。
+
+即使前一批请求仍在等待，heartbeat 也会每 5 秒打印，因此可以区分“进程卡死”和“模型仍在生成”。
+日志使用 CLI 默认的 `--log-level INFO`；如果显式设成 `WARNING` 或 `ERROR`，进度不会显示。需要
+保存日志时可运行：
+
+```bash
+python -m graphtask_r1.cli --log-level INFO evaluate kqapro-val \
+  --config configs/evaluation/kqapro_val.yaml --model-stage grpo --limit 20 \
+  2>&1 | tee outputs/evaluation/kqapro-grpo-smoke.log
+```
 
 ## 9. 浏览 KQAPro val 数据
 
@@ -526,6 +595,7 @@ python -m graphtask_r1.cli visualize kqapro \
 - `graphscript`、`direct` 或 `direct_fallback` 推理模式；
 - 是否发生回退；
 - GraphScript operator path；
+- 每一步有界的输入、输出、获取、保留、过滤实体和新增证据；
 - 结构化失败原因。
 
 同时生成：
@@ -548,10 +618,30 @@ xdg-open outputs/visualization/kqapro-grpo/paths.html
 HTML 展示当前模型的：
 
 - question、gold answer、predicted answer 和正确性；
-- `resolve_entity`、`follow`、filter、query、count、emit 等 operator 顺序；
-- 每一步参数和 handle；
-- 最多 20 条执行 support triples；
+- 左侧 `resolve_entity`、`follow`、filter、query、count、emit 等 operator/handle 数据流；
+- 中间随步骤累积的知识图子图；当前步骤新增边会高亮；
+- 输入、本步获取、选中/输出、过滤掉、数值/答案五种节点角色；
+- 右侧每一步的参数、输入/输出规模、实体 ID/label/type/alias、耗时和累计预算；
+- 上一步/下一步按钮和节点点击详情；
 - GraphScript 失败与直接回答回退状态。
+
+所有交互均由 HTML 内嵌的原生 JavaScript 和 SVG 完成，不依赖 CDN，也不需要部署前后端。
+
+### 13.4 大实体集合如何展示
+
+执行本身仍受 `max_returned_entities`、`max_edge_visits` 等评测预算约束；展示层另做更严格的
+有界预览，避免某次 `follow`、`all_entities` 或 filter 产生几百个节点后把图挤满：
+
+- 每个 handle、每步获取/选中/过滤列表最多写入 8 个实体，同时保留真实 `total_count` 和
+  `truncated` 标记，例如 `8 / 327（截断）`；
+- trace 在执行完成后反向分析后续步骤，优先保留最终被 filter、intersect、select 或 emit 使用的
+  实体，而不是简单取集合前 8 个；
+- 相应的关键 evidence edge 同样优先保留；
+- HTML 的当前累积图最多绘制 18 个相关节点，并明确显示“仅显示 18 / N”的提示；
+- 完整预测、最终答案、评测分数和执行预算不因可视化截断而改变。截断只影响 CLI/HTML 展示。
+
+因此，一个步骤即使选择了大量实体，也会显示少数代表实体以及后续真正操作到的实体，而不会把
+全部候选都塞入 HTML。
 
 不传 `--indices` 时默认只测试前三条；也可以使用 `--limit 5`。为保证案例可比，推荐三个阶段都
 使用相同的 `--indices`。
