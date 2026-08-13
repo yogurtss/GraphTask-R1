@@ -22,6 +22,7 @@ from graphtask_r1.schema import (
     FilterType,
     Hop,
     LiteralValue,
+    Triple,
     Union,
     parse_program,
     program_to_dict,
@@ -217,6 +218,9 @@ def test_sqlite_shortcut_primitives_avoid_full_answer_materialization(tmp_path: 
         assert backend.execute_entity_ids(program) == frozenset({"e_bob"})
         assert ("friend", "out") in backend.relation_hops(("e_alice",))
         assert ("friend", "in") in backend.relation_hops(("e_bob",))
+        assert backend.attribute_facts(
+            ("e_bob",), attribute_ids=("age",), limit=2
+        ) == [Triple(subject="e_bob", relation="age", object="30 year")]
         assert {relation.relation_id for relation in backend.all_relation_infos()} == {
             "age",
             "friend",

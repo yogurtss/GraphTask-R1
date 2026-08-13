@@ -94,6 +94,53 @@ def _script() -> str:
     )
 
 
+def _all_entities_script() -> str:
+    return json.dumps(
+        {
+            "version": "0.3",
+            "ops": [
+                {"op": "all_entities", "max_results": 100, "out": "h0"},
+                {"op": "filter_type", "in": "h0", "type_id": "person", "out": "h1"},
+                {"op": "emit", "in": "h1"},
+            ],
+        }
+    )
+
+
+def _filter_literal_script() -> str:
+    return json.dumps(
+        {
+            "version": "0.3",
+            "ops": [
+                {
+                    "op": "resolve_entity",
+                    "query": "Alice",
+                    "match": "exact",
+                    "limit": 1,
+                    "out": "h0",
+                },
+                {
+                    "op": "follow",
+                    "in": "h0",
+                    "relation": "friend",
+                    "direction": "out",
+                    "limit": 10,
+                    "out": "h1",
+                },
+                {
+                    "op": "filter_literal",
+                    "in": "h1",
+                    "relation": "age",
+                    "comparator": "eq",
+                    "value": {"value": 29, "datatype": "quantity"},
+                    "out": "h2",
+                },
+                {"op": "emit", "in": "h2"},
+            ],
+        }
+    )
+
+
 def test_single_model_eval_uses_tool_model_direct_fallback(tmp_path: Path) -> None:
     input_path, config = _fixture(tmp_path)
     import asyncio
@@ -194,6 +241,68 @@ def test_visualization_is_separate_bounded_and_html_safe(tmp_path: Path) -> None
     prediction = read_records(tmp_path / "visualization/predictions.parquet")[0]
     assert prediction["entity_details"]["bob"]["label"] == "Bob"
     assert prediction["relation_details"]["friend"]["relation_id"] == "friend"
+
+
+def test_visualization_marks_all_entities_as_deferred_not_empty(tmp_path: Path) -> None:
+    input_path, config = _fixture(tmp_path)
+    import asyncio
+
+    result = asyncio.run(
+        visualize_kqapro_val(
+            input_path,
+            tmp_path / "all-entities",
+            config,
+            model_stage="sft",
+            limit=1,
+            backend=toy_graph(),
+            client=FakeCompletionClient([_all_entities_script()]),
+        )
+    )
+
+    steps = result["results"][0]["execution_steps"]
+    assert steps[0]["output"]["state"] == "deferred"
+    assert steps[0]["output"]["limit"] == 100
+    assert steps[1]["output"]["state"] == "materialized"
+    assert steps[1]["output"]["total_count"] == 3
+    html = (tmp_path / "all-entities/paths.html").read_text()
+    assert "延迟集合不是空集合" in html
+    assert "已出现节点不会在后续步骤消失" in html
+    assert "拖动节点可调整布局" in html
+
+
+def test_visualization_connects_filter_property_to_candidate_node(tmp_path: Path) -> None:
+    input_path, config = _fixture(tmp_path)
+    assert config.relation_catalog is not None
+    catalog = json.loads(config.relation_catalog.read_text())
+    catalog.append(toy_graph().relation_info("age").model_dump(mode="json"))
+    write_json(config.relation_catalog, catalog)
+    import asyncio
+
+    asyncio.run(
+        visualize_kqapro_val(
+            input_path,
+            tmp_path / "filter-property",
+            config,
+            model_stage="grpo",
+            limit=1,
+            backend=toy_graph(),
+            client=FakeCompletionClient([_filter_literal_script()]),
+        )
+    )
+
+    prediction = read_records(tmp_path / "filter-property/predictions.parquet")[0]
+    filter_step = prediction["execution_steps"][2]
+    assert {
+        (edge["subject"], edge["relation"], edge["object"])
+        for edge in filter_step["new_evidence"]
+    } == {("bob", "age", "29")}
+    assert prediction["entity_details"]["bob"]["observed_properties"] == {
+        "age": ["29"]
+    }
+    html = (tmp_path / "filter-property/paths.html").read_text()
+    assert "filter_literal" in html
+    assert "observed_properties" in html
+    assert "process-result" in html
 
 
 def test_compare_reads_separate_single_model_runs(tmp_path: Path) -> None:

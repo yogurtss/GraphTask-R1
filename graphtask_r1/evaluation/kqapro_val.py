@@ -399,8 +399,30 @@ async def _evaluate_one(
                     if step.output is not None and step.output.kind == "entity"
                     else ()
                 ),
+                *(triple.subject for triple in step.new_evidence),
             )
         }
+        attribute_ids = {
+            str(value)
+            for step in execution.steps
+            for key in ("attribute", "relation")
+            if step.operation.get("op")
+            in {
+                "filter_literal",
+                "query_attribute",
+                "query_attribute_under_condition",
+                "query_attribute_qualifier",
+                "select_between",
+                "select_among",
+            }
+            and (value := step.operation.get(key)) is not None
+        }
+        observed_properties: dict[str, dict[str, list[str]]] = {}
+        for triple in execution.support:
+            if triple.relation not in attribute_ids or triple.subject not in entity_ids:
+                continue
+            properties = observed_properties.setdefault(triple.subject, {})
+            properties.setdefault(triple.relation, []).append(triple.object)
         entity_details: dict[str, dict[str, Any]] = {}
         for entity_id in sorted(entity_ids):
             try:
@@ -414,6 +436,12 @@ async def _evaluate_one(
                     "aliases": [],
                     "type_ids": [],
                 }
+            entity_details[entity_id]["observed_properties"] = {
+                key: sorted(set(values))
+                for key, values in sorted(
+                    observed_properties.get(entity_id, {}).items()
+                )
+            }
         used_relations = {
             triple.relation for triple in execution.support
         } | set(execution.relation_path)
@@ -618,16 +646,21 @@ def _path_html(row: dict[str, Any], *, example_index: int) -> str:
             '<div class="trace-controls">'
             '<button type="button" data-action="previous">← 上一步</button>'
             '<button type="button" data-action="next">下一步 →</button>'
+            '<button type="button" data-action="reset-layout">重置布局</button>'
+            '<span class="trace-hint">拖动节点可调整布局</span>'
             '<span class="trace-position"></span>'
             '</div><div class="trace-layout">'
             '<nav class="trace-steps" aria-label="GraphScript steps"></nav>'
             '<section class="trace-graph-panel">'
-            '<div class="trace-legend"><span class="input">输入</span>'
+            '<div class="trace-legend"><span class="operator">操作/流程</span>'
+            '<span class="input">输入</span>'
             '<span class="retrieved">本步获取</span><span class="selected">选中/输出</span>'
-            '<span class="discarded">过滤掉</span><span class="answer">数值/答案</span></div>'
+            '<span class="discarded">过滤掉</span><span class="answer">数值/答案</span>'
+            '<span class="deferred">延迟集合</span></div>'
             '<svg class="trace-graph" viewBox="0 0 760 430" role="img"></svg>'
             '</section><aside class="trace-inspector">'
-            '<h4 class="trace-title"></h4><div class="trace-summary"></div>'
+            '<h4 class="trace-title"></h4><div class="trace-effect"></div>'
+            '<div class="trace-summary"></div>'
             '<h5>操作参数</h5><pre class="trace-operation"></pre>'
             '<h5>累计预算</h5><pre class="trace-usage"></pre>'
             '<h5>节点详情</h5><pre class="trace-node-detail">点击图中的节点查看</pre>'
@@ -753,6 +786,7 @@ details ul { max-height:220px; overflow:auto; padding-left:20px }
   padding:7px 10px; cursor:pointer;
 }
 .trace-controls button:disabled { opacity:.4; cursor:default }
+.trace-hint { color:#65717d; font-size:12px }
 .trace-position { color:#65717d; margin-left:auto }
 .trace-layout { display:grid; grid-template-columns:210px minmax(440px,1fr) 300px; gap:12px }
 .trace-steps { max-height:500px; overflow:auto; padding-right:4px }
@@ -770,17 +804,23 @@ details ul { max-height:220px; overflow:auto; padding-left:20px }
   display:flex; flex-wrap:wrap; gap:7px; padding:9px; border-bottom:1px solid var(--line)
 }
 .trace-legend span { border-radius:999px; padding:2px 7px; font-size:11px }
+.trace-legend .operator { background:#f3e8ff }
 .trace-legend .input { background:#dbeafe }.trace-legend .retrieved { background:#dcfce7 }
 .trace-legend .selected { background:#ede9fe }.trace-legend .discarded { background:#fee2e2 }
-.trace-legend .answer { background:#ffedd5 }
+.trace-legend .answer { background:#ffedd5 }.trace-legend .deferred { background:#fef3c7 }
 .trace-inspector { padding:12px; max-height:500px; overflow:auto }
 .trace-inspector h4 { margin:0 0 8px }.trace-inspector h5 { margin:13px 0 4px }
+.trace-effect {
+  background:#f0fdfa; border-left:4px solid var(--accent); border-radius:6px;
+  margin:0 0 10px; padding:8px 10px; font-size:12px
+}
 .trace-inspector pre,.raw-program pre {
   white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px
 }
 .trace-summary dl { margin:0 }.trace-summary dt { color:#65717d; font-size:11px; margin-top:7px }
 .trace-summary dd { margin:1px 0; overflow-wrap:anywhere }.trace-count { font-weight:700 }
 .raw-program { margin-top:10px }.trace-node,.trace-edge { cursor:pointer }
+.trace-node { touch-action:none; user-select:none }.trace-node.dragging { cursor:grabbing }
 @media(max-width:900px) {
   .summary,.models { grid-template-columns:1fr }
   .trace-layout { grid-template-columns:1fr }.trace-steps { max-height:190px }
@@ -812,27 +852,178 @@ function initTrace(view) {
   const relationDetails = data.relation_details || {};
   let current = 0;
   const nav = view.querySelector(".trace-steps");
+  const graphPanel = view.querySelector(".trace-graph-panel");
   const svg = view.querySelector(".trace-graph");
   const position = view.querySelector(".trace-position");
+  const effect = view.querySelector(".trace-effect");
   const summary = view.querySelector(".trace-summary");
   const operation = view.querySelector(".trace-operation");
   const usage = view.querySelector(".trace-usage");
   const nodeDetail = view.querySelector(".trace-node-detail");
   const previous = view.querySelector('[data-action="previous"]');
   const next = view.querySelector('[data-action="next"]');
-  const label = id => details[id]?.label || String(id);
+  const resetLayout = view.querySelector('[data-action="reset-layout"]');
+  const manualPositions = {};
+  const MAX_GRAPH_NODES = 18;
+  const label = id => details[id]?.label || relationDetails[id]?.label || String(id);
   const shortLabel = id => {
     const value = label(id);
     return value.length > 19 ? value.slice(0, 18) + "…" : value;
   };
   const handleText = handle => {
     if (!handle) return "—";
+    if (handle.state === "deferred" || handle.kind === "program") {
+      const limit = handle.limit ? `，最多 ${handle.limit} 个实体` : "";
+      return `entity set · 延迟求值${limit}（不是空结果）`;
+    }
+    if (handle.state === "empty" || handle.kind === "empty") return "empty · 空集合";
     const shown = handle.values.map(value => label(value)).join(", ") || "∅";
     const count = handle.truncated
       ? `${handle.values.length} / ${handle.total_count}（截断）`
       : String(handle.total_count);
     return `${handle.kind} · ${count}: ${shown}`;
   };
+  const handleCount = handle => {
+    if (!handle) return "无输出";
+    if (handle.state === "deferred" || handle.kind === "program") {
+      return handle.limit ? `延迟集合 ≤ ${handle.limit}` : "延迟集合";
+    }
+    return handle.truncated
+      ? `${handle.values.length} / ${handle.total_count}` : String(handle.total_count);
+  };
+  const inputValuesFor = step => Object.values(step.input_handles || {})
+    .flatMap(handle => handle.values || []);
+  const stepValues = step => unique([
+    ...inputValuesFor(step), ...(step.output?.values || []),
+    ...(step.retrieved_entities || []), ...(step.selected_entities || []),
+    ...(step.discarded_entities || []),
+    ...(step.new_evidence || []).flatMap(edge => [edge.subject, edge.object])
+  ]);
+  const operationDetail = operation => {
+    const op = operation.op;
+    if (op === "filter_type") return `type = ${operation.type_id}`;
+    if (op === "filter_literal") {
+      return `${operation.relation} ${operation.comparator} ${operation.value?.value}`;
+    }
+    if (op === "filter_qualifier") {
+      return `${operation.qualifier} ${operation.comparator} ${operation.value?.value}`;
+    }
+    if (op === "follow") return `${operation.direction} · ${operation.relation}`;
+    if (op.startsWith("query_")) {
+      return operation.attribute || operation.relation || operation.qualifier || "query";
+    }
+    if (op.startsWith("select_")) return `${operation.attribute} · ${operation.mode}`;
+    if (op === "verify") return `${operation.comparator} ${operation.value?.value}`;
+    if (op === "all_entities") return `limit = ${operation.max_results}`;
+    return "";
+  };
+  const firstSeen = {};
+  steps.forEach((step, index) => stepValues(step).forEach(value => {
+    if (firstSeen[value] === undefined) firstSeen[value] = index;
+  }));
+  const representatives = steps.flatMap(step => unique([
+    ...(step.selected_entities || []), ...(step.output?.values || []),
+    ...(step.retrieved_entities || []), ...inputValuesFor(step),
+    ...(step.new_evidence || []).flatMap(edge => [edge.subject, edge.object])
+  ]).slice(0, 1));
+  const finalValues = steps.length ? steps.at(-1).output?.values || [] : [];
+  const allCandidates = unique(steps.flatMap(stepValues));
+  const initialValues = steps[0] ? stepValues(steps[0]) : [];
+  const stableCandidates = unique([
+    ...initialValues.slice(0, 2), ...finalValues.slice(0, 3),
+    ...representatives, ...initialValues, ...finalValues, ...allCandidates
+  ]);
+  const stableNodeIds = stableCandidates.slice(0, MAX_GRAPH_NODES);
+  const producerByHandle = {};
+  steps.forEach((step, index) => {
+    if (step.output_handle) producerByHandle[step.output_handle] = index;
+  });
+  const virtualMeta = {};
+  steps.forEach((step, index) => {
+    const operatorId = `__operator__${index}`;
+    virtualMeta[operatorId] = {
+      kind: "operator",
+      step: index,
+      operation: step.operation,
+      label: OP_LABELS[step.operation.op] || step.operation.op,
+      detail: operationDetail(step.operation)
+    };
+    firstSeen[operatorId] = index;
+    if (step.output?.state !== "deferred") return;
+    const id = `__deferred__${index}`;
+    virtualMeta[id] = {
+      kind: "deferred",
+      step: index,
+      handle: step.output_handle || `step-${index + 1}`,
+      limit: step.output.limit,
+      operation: step.operation
+    };
+    firstSeen[id] = index;
+  });
+  const plannedNodeIds = [...Object.keys(virtualMeta), ...stableNodeIds];
+  const layoutGroups = new Map();
+  plannedNodeIds.forEach(id => {
+    const column = firstSeen[id] ?? 0;
+    if (!layoutGroups.has(column)) layoutGroups.set(column, []);
+    layoutGroups.get(column).push(id);
+  });
+  const layoutColumns = [];
+  [...layoutGroups.keys()].sort((left, right) => left - right).forEach(column => {
+    const values = layoutGroups.get(column);
+    for (let offset = 0; offset < values.length; offset += 6) {
+      layoutColumns.push(values.slice(offset, offset + 6));
+    }
+  });
+  const graphWidth = Math.max(760, 170 * layoutColumns.length + 20);
+  const basePositions = {};
+  layoutColumns.forEach((values, columnIndex) => {
+    const x = layoutColumns.length === 1 ? graphWidth / 2 : 85 + columnIndex * 170;
+    values.forEach((id, rowIndex) => {
+      basePositions[id] = {x, y: 45 + (rowIndex + 1) * (335 / (values.length + 1))};
+    });
+  });
+
+  function effectText(step) {
+    const op = step.operation.op || "unknown";
+    const inputs = Object.values(step.input_handles || {});
+    const inputText = inputs.length ? inputs.map(handleCount).join(" + ") : "无输入";
+    const outputText = handleCount(step.output);
+    const selectedText = (step.selected_entities || []).length
+      ? (step.selected_entities || []).map(label).join(", ") : "无实体节点";
+    if (op === "all_entities") {
+      return `建立候选全集查询，上限 ${step.operation.max_results}；本步只登记查询，` +
+        "由后续 filter/query 在图后端物化，因此不是 0 个结果。";
+    }
+    if (op === "resolve_entity") {
+      return `将“${step.operation.query}”解析为 ${outputText}：${selectedText}。`;
+    }
+    if (op === "follow") {
+      return `从 ${inputText} 沿 ${step.operation.direction} 方向的 ` +
+        `${step.operation.relation} 扩展，得到 ${outputText}，新增 ` +
+        `${step.new_evidence_total} 条关系证据。`;
+    }
+    if (["filter_type", "filter_literal", "filter_qualifier"].includes(op)) {
+      const deferred = inputs.some(handle => handle.state === "deferred")
+        ? "输入是延迟集合，过滤与物化在同一次后端查询中完成；" : "";
+      return `${deferred}从 ${inputText} 中保留 ${outputText}：${selectedText}。`;
+    }
+    if (["intersect", "union"].includes(op)) {
+      return `${op === "intersect" ? "求交集" : "合并集合"}：${inputText} → ${outputText}。`;
+    }
+    if (op === "count") return `统计 ${inputText}，得到计数 ${outputText}。`;
+    if (op.startsWith("query_")) {
+      return `对 ${inputText} 执行查询，得到 ${outputText}：` +
+        `${(step.output?.values || []).map(label).join(", ") || "无可展示值"}。`;
+    }
+    if (op.startsWith("select_")) {
+      return `按 ${step.operation.attribute} 执行 ${step.operation.mode} 选择，` +
+        `保留 ${outputText}：${selectedText}。`;
+    }
+    if (op === "verify") return `验证 ${inputText}，得到 ${outputText}。`;
+    if (op === "require_unique") return `确认 ${inputText} 中恰好只有一个结果。`;
+    if (op === "emit") return `输出最终答案 ${outputText}：${selectedText}。`;
+    return `${inputText} → ${outputText}。`;
+  }
 
   steps.forEach((step, index) => {
     const button = document.createElement("button");
@@ -844,7 +1035,7 @@ function initTrace(view) {
     const title = document.createElement("b");
     title.textContent = `${index + 1}. ${op} · ${OP_LABELS[op] || "执行操作"}`;
     const flow = document.createElement("small");
-    flow.textContent = `${inputs} → ${output}`;
+    flow.textContent = `${inputs} → ${output} · ${handleCount(step.output)}`;
     button.append(title, flow);
     button.addEventListener("click", () => { current = index; render(); });
     nav.appendChild(button);
@@ -887,54 +1078,63 @@ function initTrace(view) {
     const currentEdges = new Set((currentStep.new_evidence || []).map(edge =>
       `${edge.subject}\u0000${edge.relation}\u0000${edge.object}`
     ));
-    const priority = unique([
-      ...selected, ...retrieved, ...outputValues, ...inputValues,
-      ...discarded,
-      ...(currentStep.new_evidence || []).flatMap(edge => [edge.subject, edge.object])
-    ]);
-    const candidates = unique([
-      ...priority,
-      ...cumulativeEdges.flatMap(edge => [edge.subject, edge.object])
-    ]);
-    const MAX_GRAPH_NODES = 18;
-    const nodeIds = candidates.slice(0, MAX_GRAPH_NODES);
+    const nodeIds = plannedNodeIds.filter(id => (firstSeen[id] ?? 0) <= stepIndex);
     const allowed = new Set(nodeIds);
-    const edges = cumulativeEdges.filter(edge =>
-      allowed.has(String(edge.subject)) && allowed.has(String(edge.object))
-    );
-
-    const firstSeen = {};
-    visibleSteps.forEach((step, index) => {
-      const values = [
-        ...(step.retrieved_entities || []), ...(step.selected_entities || []),
-        ...(step.output?.values || []),
-        ...(step.new_evidence || []).flatMap(edge => [edge.subject, edge.object])
-      ];
-      values.forEach(value => { if (firstSeen[value] === undefined) firstSeen[value] = index; });
-    });
-    const groups = new Map();
-    nodeIds.forEach(id => {
-      const column = Math.min(firstSeen[id] ?? stepIndex, stepIndex);
-      if (!groups.has(column)) groups.set(column, []);
-      groups.get(column).push(id);
-    });
-    const columns = [...groups.keys()].sort((a, b) => a - b);
-    const layoutColumns = [];
-    const MAX_ROWS = 6;
-    columns.forEach(column => {
-      const values = groups.get(column);
-      for (let offset = 0; offset < values.length; offset += MAX_ROWS) {
-        layoutColumns.push(values.slice(offset, offset + MAX_ROWS));
-      }
-    });
-    const graphWidth = Math.max(760, 170 * layoutColumns.length + 20);
     svg.setAttribute("viewBox", `0 0 ${graphWidth} 430`);
     svg.style.minWidth = `${graphWidth}px`;
     const positions = {};
-    layoutColumns.forEach((values, columnIndex) => {
-      const x = layoutColumns.length === 1 ? graphWidth / 2 : 85 + columnIndex * 170;
-      values.forEach((id, rowIndex) => {
-        positions[id] = {x, y: 45 + (rowIndex + 1) * (335 / (values.length + 1))};
+    nodeIds.forEach(id => {
+      positions[id] = manualPositions[id] || basePositions[id];
+    });
+
+    const edges = cumulativeEdges.filter(edge =>
+      allowed.has(String(edge.subject)) && allowed.has(String(edge.object))
+    ).map(edge => ({...edge, type: "knowledge"}));
+    visibleSteps.forEach((step, visibleIndex) => {
+      const operator = `__operator__${visibleIndex}`;
+      Object.keys(step.input_handles || {}).forEach(handleName => {
+        const producer = producerByHandle[handleName];
+        if (producer === undefined) return;
+        edges.push({
+          subject: `__operator__${producer}`,
+          relation: handleName,
+          object: operator,
+          type: "process",
+          current: visibleIndex === stepIndex
+        });
+      });
+      const resultNodes = unique([
+        ...(step.selected_entities || []), ...(step.output?.values || []),
+        ...(step.retrieved_entities || [])
+      ]).filter(value => allowed.has(value)).slice(0, 3);
+      resultNodes.forEach(target => edges.push({
+        subject: operator,
+        relation: step.output_handle || (step.operation.op === "emit" ? "answer" : "result"),
+        object: target,
+        type: "process-result",
+        current: visibleIndex === stepIndex
+      }));
+      if (step.output?.state === "deferred") {
+        edges.push({
+          subject: operator,
+          relation: step.output_handle || "deferred",
+          object: `__deferred__${visibleIndex}`,
+          type: "process-result",
+          current: visibleIndex === stepIndex
+        });
+      }
+      Object.entries(step.input_handles || {}).forEach(([handleName, handle]) => {
+        if (handle.state !== "deferred") return;
+        const producer = producerByHandle[handleName];
+        const source = `__deferred__${producer}`;
+        if (!allowed.has(source)) return;
+        edges.push({
+          subject: source,
+          relation: handleName,
+          object: operator,
+          type: "dataflow",
+          current: visibleIndex === stepIndex
+        });
       });
     });
 
@@ -948,25 +1148,50 @@ function initTrace(view) {
     arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); arrow.setAttribute("fill", "#718096");
     marker.appendChild(arrow); defs.appendChild(marker); svg.appendChild(defs);
 
+    const edgeElements = [];
+    const updateEdge = item => {
+      const source = positions[item.edge.subject];
+      const target = positions[item.edge.object];
+      if (!source || !target) return;
+      const dx = target.x - source.x, dy = target.y - source.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const sourceOffset = virtualMeta[item.edge.subject]?.kind === "operator" ? 82 : 66;
+      const targetOffset = virtualMeta[item.edge.object]?.kind === "operator" ? 82 : 66;
+      item.line.setAttribute("x1", source.x + dx * sourceOffset / distance);
+      item.line.setAttribute("y1", source.y + dy * 24 / distance);
+      item.line.setAttribute("x2", target.x - dx * targetOffset / distance);
+      item.line.setAttribute("y2", target.y - dy * 24 / distance);
+      item.label.setAttribute("x", (source.x + target.x) / 2);
+      item.label.setAttribute("y", (source.y + target.y) / 2 - 5);
+    };
     edges.forEach(edge => {
       const source = positions[edge.subject], target = positions[edge.object];
       if (!source || !target) return;
       const key = `${edge.subject}\u0000${edge.relation}\u0000${edge.object}`;
       const line = document.createElementNS(SVG_NS, "line");
       line.classList.add("trace-edge");
-      line.setAttribute("x1", source.x); line.setAttribute("y1", source.y);
-      line.setAttribute("x2", target.x); line.setAttribute("y2", target.y);
-      line.setAttribute("stroke", currentEdges.has(key) ? "#16a34a" : "#94a3b8");
-      line.setAttribute("stroke-width", currentEdges.has(key) ? "3" : "1.5");
+      const isCurrent = edge.current || currentEdges.has(key);
+      const historicalColor = edge.type === "process" || edge.type === "process-result"
+        ? "#7c3aed" : edge.type === "dataflow" ? "#b45309" : "#94a3b8";
+      line.setAttribute("stroke", isCurrent ? "#16a34a" : historicalColor);
+      line.setAttribute("stroke-width", isCurrent ? "3" : "1.5");
+      if (edge.type === "dataflow") line.setAttribute("stroke-dasharray", "6 4");
       line.setAttribute("marker-end", `url(#${view.id}-arrow)`); svg.appendChild(line);
       const edgeLabel = document.createElementNS(SVG_NS, "text");
-      edgeLabel.setAttribute("x", (source.x + target.x) / 2);
-      edgeLabel.setAttribute("y", (source.y + target.y) / 2 - 5);
       edgeLabel.setAttribute("text-anchor", "middle"); edgeLabel.setAttribute("font-size", "10");
       edgeLabel.classList.add("trace-edge");
       edgeLabel.setAttribute("fill", "#475569");
-      edgeLabel.textContent = relationDetails[edge.relation]?.label || edge.relation;
+      edgeLabel.textContent = edge.type !== "knowledge"
+        ? edge.relation
+        : relationDetails[edge.relation]?.label || edge.relation;
       const showRelation = () => {
+        if (edge.type !== "knowledge") {
+          nodeDetail.textContent = JSON.stringify({
+            role: edge.type, handle: edge.relation,
+            from: edge.subject, to: edge.object
+          }, null, 2);
+          return;
+        }
         const relation = relationDetails[edge.relation] || {label: edge.relation};
         nodeDetail.textContent = JSON.stringify({
           id: edge.relation, role: "relation", ...relation,
@@ -976,6 +1201,9 @@ function initTrace(view) {
       line.addEventListener("click", showRelation);
       edgeLabel.addEventListener("click", showRelation);
       svg.appendChild(edgeLabel);
+      const item = {edge, line, label: edgeLabel};
+      edgeElements.push(item);
+      updateEdge(item);
     });
 
     nodeIds.forEach(id => {
@@ -984,41 +1212,107 @@ function initTrace(view) {
       group.classList.add("trace-node");
       group.setAttribute("transform", `translate(${point.x},${point.y})`);
       let fill = details[id] ? "#f1f5f9" : "#ffedd5", stroke = "#64748b", role = "context";
+      const virtual = virtualMeta[id];
+      const isOperator = virtual?.kind === "operator";
+      const isDeferred = virtual?.kind === "deferred";
+      if (isOperator) { fill = "#f3e8ff"; stroke = "#7c3aed"; role = "operator"; }
+      if (isDeferred) { fill = "#fef3c7"; stroke = "#b45309"; role = "deferred-set"; }
       if (inputs.has(id)) { fill = "#dbeafe"; stroke = "#2563eb"; role = "input"; }
       if (retrieved.has(id)) { fill = "#dcfce7"; stroke = "#16a34a"; role = "retrieved"; }
       if (selected.has(id)) { fill = "#ede9fe"; stroke = "#7c3aed"; role = "selected"; }
       if (discarded.has(id)) { fill = "#fee2e2"; stroke = "#dc2626"; role = "discarded"; }
       if (answerValues.has(id)) { fill = "#ffedd5"; stroke = "#ea580c"; role = "answer"; }
       const rect = document.createElementNS(SVG_NS, "rect");
-      rect.setAttribute("x", "-66"); rect.setAttribute("y", "-23");
-      rect.setAttribute("width", "132"); rect.setAttribute("height", "46");
-      rect.setAttribute("rx", details[id] ? "23" : "7"); rect.setAttribute("fill", fill);
+      rect.setAttribute("x", isOperator ? "-82" : "-66"); rect.setAttribute("y", "-23");
+      rect.setAttribute("width", isOperator ? "164" : "132");
+      rect.setAttribute("height", "46");
+      rect.setAttribute("rx", details[id] ? "23" : isOperator ? "6" : "12");
+      rect.setAttribute("fill", fill);
       rect.setAttribute("stroke", stroke); rect.setAttribute("stroke-width", "2");
       group.appendChild(rect);
       const title = document.createElementNS(SVG_NS, "text");
       title.setAttribute("text-anchor", "middle"); title.setAttribute("y", "-2");
       title.setAttribute("font-size", "12"); title.setAttribute("font-weight", "700");
-      title.textContent = shortLabel(id); group.appendChild(title);
+      title.textContent = isOperator ? `${virtual.step + 1}. ${virtual.operation.op}`
+        : isDeferred ? `All entities${virtual.limit ? ` ≤${virtual.limit}` : ""}`
+        : shortLabel(id);
+      group.appendChild(title);
       const identifier = document.createElementNS(SVG_NS, "text");
       identifier.setAttribute("text-anchor", "middle"); identifier.setAttribute("y", "13");
       identifier.setAttribute("font-size", "8"); identifier.setAttribute("fill", "#64748b");
-      identifier.textContent = String(id).length > 22 ? String(id).slice(0, 21) + "…" : String(id);
+      const typeText = details[id]?.type_ids?.length
+        ? ` · ${details[id].type_ids.slice(0, 2).join("/")}` : "";
+      identifier.textContent = isOperator
+        ? `${virtual.label}${virtual.detail ? ` · ${virtual.detail}` : ""}`
+        : isDeferred ? `${virtual.handle} · 延迟求值`
+        : `${String(id).length > 17 ? String(id).slice(0, 16) + "…" : String(id)}${typeText}`;
       group.appendChild(identifier);
+      let dragStart = null;
+      let dragged = false;
+      group.addEventListener("pointerdown", event => {
+        event.preventDefault();
+        dragged = false;
+        dragStart = {x: event.clientX, y: event.clientY};
+        group.classList.add("dragging");
+        group.setPointerCapture(event.pointerId);
+      });
+      group.addEventListener("pointermove", event => {
+        if (!dragStart || !group.hasPointerCapture(event.pointerId)) return;
+        const matrix = svg.getScreenCTM();
+        if (!matrix) return;
+        const cursor = svg.createSVGPoint();
+        cursor.x = event.clientX; cursor.y = event.clientY;
+        const transformed = cursor.matrixTransform(matrix.inverse());
+        const nextPoint = {
+          x: Math.max(70, Math.min(graphWidth - 70, transformed.x)),
+          y: Math.max(28, Math.min(400, transformed.y))
+        };
+        dragged = dragged || Math.hypot(
+          event.clientX - dragStart.x, event.clientY - dragStart.y
+        ) > 3;
+        positions[id] = nextPoint;
+        manualPositions[id] = nextPoint;
+        group.setAttribute("transform", `translate(${nextPoint.x},${nextPoint.y})`);
+        edgeElements.forEach(updateEdge);
+      });
+      group.addEventListener("pointerup", event => {
+        dragStart = null;
+        group.classList.remove("dragging");
+        if (group.hasPointerCapture(event.pointerId)) {
+          group.releasePointerCapture(event.pointerId);
+        }
+      });
+      group.addEventListener("pointercancel", () => {
+        dragStart = null;
+        group.classList.remove("dragging");
+      });
       group.addEventListener("click", () => {
-        const detail = {id, role, ...(details[id] || {value: id})};
+        if (dragged) { dragged = false; return; }
+        const detail = isDeferred
+          ? {id, role, ...virtual, note: "延迟集合不是空集合"}
+          : isOperator ? {id, role, ...virtual}
+          : {id, role, ...(details[id] || {value: id})};
         nodeDetail.textContent = JSON.stringify(detail, null, 2);
       });
       svg.appendChild(group);
     });
 
-    if (candidates.length > MAX_GRAPH_NODES) {
+    if (allCandidates.length > MAX_GRAPH_NODES) {
       const note = document.createElementNS(SVG_NS, "text");
       note.setAttribute("x", String(graphWidth - 20)); note.setAttribute("y", "418");
       note.setAttribute("text-anchor", "end"); note.setAttribute("font-size", "10");
       note.setAttribute("fill", "#b45309");
-      note.textContent = `为可读性仅显示 ${MAX_GRAPH_NODES} / ${candidates.length} 个相关节点`;
+      note.textContent = `固定显示 ${MAX_GRAPH_NODES} / ${allCandidates.length} 个关键节点；` +
+        "已出现节点不会在后续步骤消失";
       svg.appendChild(note);
     }
+    const currentIds = unique([
+      `__operator__${stepIndex}`,
+      ...selected, ...outputValues, ...retrieved, ...inputValues,
+      `__deferred__${stepIndex}`
+    ]);
+    const focusId = currentIds.find(id => allowed.has(id));
+    return focusId ? positions[focusId]?.x : undefined;
   }
 
   function render() {
@@ -1032,15 +1326,25 @@ function initTrace(view) {
     const opLabel = OP_LABELS[step.operation.op] || "执行操作";
     view.querySelector(".trace-title").textContent =
       `${current + 1}. ${step.operation.op} · ${opLabel}`;
+    effect.textContent = effectText(step);
     summary.innerHTML = summaryHtml(step);
     operation.textContent = JSON.stringify(step.operation, null, 2);
     usage.textContent = JSON.stringify(step.cumulative_usage, null, 2);
     nodeDetail.textContent = "点击图中的节点查看 label、ID、alias、type 与本步角色";
-    renderGraph(current);
+    const focusX = renderGraph(current);
+    if (focusX !== undefined) {
+      requestAnimationFrame(() => {
+        graphPanel.scrollLeft = Math.max(0, focusX - graphPanel.clientWidth / 2);
+      });
+    }
   }
   previous.addEventListener("click", () => { if (current > 0) { current--; render(); } });
   next.addEventListener("click", () => {
     if (current < steps.length - 1) { current++; render(); }
+  });
+  resetLayout.addEventListener("click", () => {
+    Object.keys(manualPositions).forEach(id => delete manualPositions[id]);
+    render();
   });
   render();
 }

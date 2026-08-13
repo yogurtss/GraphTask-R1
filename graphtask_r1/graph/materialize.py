@@ -96,10 +96,9 @@ def materialize_program(
             inputs = backend.execute_program(node.input).entity_ids()
             nodes.update(inputs)
             remaining = max_edges - len(facts)
-            edges = backend.neighbors(
+            edges = backend.attribute_facts(
                 inputs,
-                direction="out",
-                relation_ids=[node.relation],
+                attribute_ids=[node.relation],
                 limit=max(0, remaining + 1),
             )
             if len(edges) > remaining:
@@ -126,10 +125,9 @@ def materialize_program(
             nodes.update(inputs)
             remaining = max_edges - len(facts)
             relation = node.attribute
-            edges = backend.neighbors(
+            edges = backend.attribute_facts(
                 inputs,
-                direction="out",
-                relation_ids=[relation],
+                attribute_ids=[relation],
                 limit=max(0, remaining + 1),
             )
             if len(edges) > remaining:
@@ -170,10 +168,9 @@ def materialize_program(
             )
             nodes.update(candidates)
             remaining = max_edges - len(facts)
-            edges = backend.neighbors(
+            edges = backend.attribute_facts(
                 candidates,
-                direction="out",
-                relation_ids=[node.attribute],
+                attribute_ids=[node.attribute],
                 limit=max(0, remaining + 1),
             )
             if len(edges) > remaining:

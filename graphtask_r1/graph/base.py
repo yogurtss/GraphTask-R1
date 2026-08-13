@@ -28,6 +28,15 @@ class GraphBackend(Protocol):
         trace_id: str | None = None,
     ) -> list[Triple]: ...
 
+    def attribute_facts(
+        self,
+        entity_ids: Sequence[str],
+        *,
+        attribute_ids: Sequence[str] | None = None,
+        limit: int = 100,
+        trace_id: str | None = None,
+    ) -> list[Triple]: ...
+
     def execute_program(self, program: Program) -> AnswerSet: ...
 
     def execute_sparql(self, sparql: str) -> AnswerSet: ...

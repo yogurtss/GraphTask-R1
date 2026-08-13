@@ -248,6 +248,22 @@ class VirtuosoBackend:
             for row in bindings
         ]
 
+    def attribute_facts(
+        self,
+        entity_ids: Sequence[str],
+        *,
+        attribute_ids: Sequence[str] | None = None,
+        limit: int = 100,
+        trace_id: str | None = None,
+    ) -> list[Triple]:
+        return self.neighbors(
+            entity_ids,
+            direction="out",
+            relation_ids=attribute_ids,
+            limit=limit,
+            trace_id=trace_id,
+        )
+
     def execute_program(self, program: Program) -> AnswerSet:
         from graphtask_r1.dsl.compiler import compile_sparql
 

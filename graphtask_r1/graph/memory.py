@@ -153,6 +153,24 @@ class InMemoryGraphBackend:
         ]
         return selected[: max(0, limit)]
 
+    def attribute_facts(
+        self,
+        entity_ids: Sequence[str],
+        *,
+        attribute_ids: Sequence[str] | None = None,
+        limit: int = 100,
+        trace_id: str | None = None,
+    ) -> list[Triple]:
+        del trace_id
+        entities = set(entity_ids)
+        attributes = set(attribute_ids) if attribute_ids else None
+        return [
+            triple
+            for triple in self._triples
+            if triple.subject in entities
+            and (attributes is None or triple.relation in attributes)
+        ][: max(0, limit)]
+
     def _execute_entities(self, program: Program) -> set[str]:
         if isinstance(program, AllEntities):
             return set(self.all_entities(limit=program.max_results))

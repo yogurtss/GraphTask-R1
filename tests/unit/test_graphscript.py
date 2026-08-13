@@ -252,10 +252,21 @@ def test_graphscript_v02_supports_bounded_global_filter_program() -> None:
         graph,
         allowed_relations=frozenset(),
         max_edge_visits=10,
+        capture_steps=True,
     )
 
     assert execution.program == program
     assert execution.answers == graph.execute_program(program)
+    all_entities = execution.steps[0]
+    filtered = execution.steps[1]
+    assert all_entities.output is not None
+    assert all_entities.output.kind == "program"
+    assert all_entities.output.state == "deferred"
+    assert all_entities.output.limit == 100
+    assert filtered.input_handles["h0"].state == "deferred"
+    assert filtered.output is not None
+    assert filtered.output.state == "materialized"
+    assert filtered.output.total_count == 2
 
 
 def test_execution_trace_bounds_large_sets_and_keeps_downstream_entity() -> None:

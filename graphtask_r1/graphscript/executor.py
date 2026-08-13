@@ -90,9 +90,11 @@ class HandleTrace(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["entity", "answer", "passage", "program", "empty"]
+    state: Literal["materialized", "deferred", "empty"] = "materialized"
     values: tuple[str, ...] = ()
     total_count: int = 0
     truncated: bool = False
+    limit: int | None = None
 
 
 class ExecutionStepTrace(BaseModel):
@@ -182,8 +184,14 @@ def _handle_trace(
             truncated=len(values) > preview_limit,
         )
     if handle.program is not None:
-        return HandleTrace(kind="program")
-    return HandleTrace(kind="empty")
+        if isinstance(handle.program, AllEntities):
+            return HandleTrace(
+                kind="program",
+                state="deferred",
+                limit=handle.program.max_results,
+            )
+        return HandleTrace(kind="program", state="deferred")
+    return HandleTrace(kind="empty", state="empty")
 
 
 def _handle_entity_ids(handle: _Handle) -> set[str]:

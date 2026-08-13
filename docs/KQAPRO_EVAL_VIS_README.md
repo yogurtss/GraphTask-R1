@@ -620,9 +620,11 @@ HTML 展示当前模型的：
 - question、gold answer、predicted answer 和正确性；
 - 左侧 `resolve_entity`、`follow`、filter、query、count、emit 等 operator/handle 数据流；
 - 中间随步骤累积的知识图子图；当前步骤新增边会高亮；
-- 输入、本步获取、选中/输出、过滤掉、数值/答案五种节点角色；
-- 右侧每一步的参数、输入/输出规模、实体 ID/label/type/alias、耗时和累计预算；
-- 上一步/下一步按钮和节点点击详情；
+- 节点采用整条 trace 的固定选择与固定初始布局：一旦出现，后续步骤不会删除或换掉它；
+- 输入、本步获取、选中/输出、过滤掉、数值/答案、延迟集合六种节点角色；
+- 右侧先用自然语言说明“本步实际做了什么”，再展示参数、输入/输出规模、实体
+  ID/label/type/alias、耗时和累计预算；
+- 上一步/下一步、拖动节点、重置布局和节点/关系点击详情；
 - GraphScript 失败与直接回答回退状态。
 
 所有交互均由 HTML 内嵌的原生 JavaScript 和 SVG 完成，不依赖 CDN，也不需要部署前后端。
@@ -637,11 +639,42 @@ HTML 展示当前模型的：
 - trace 在执行完成后反向分析后续步骤，优先保留最终被 filter、intersect、select 或 emit 使用的
   实体，而不是简单取集合前 8 个；
 - 相应的关键 evidence edge 同样优先保留；
-- HTML 的当前累积图最多绘制 18 个相关节点，并明确显示“仅显示 18 / N”的提示；
+- HTML 为整条 trace 固定选择最多 18 个真实实体节点，并明确显示“固定显示 18 / N”；步骤切换
+  只增加已经到达的节点，不会重新选择 18 个节点，因此先前结果不会消失；
 - 完整预测、最终答案、评测分数和执行预算不因可视化截断而改变。截断只影响 CLI/HTML 展示。
 
 因此，一个步骤即使选择了大量实体，也会显示少数代表实体以及后续真正操作到的实体，而不会把
 全部候选都塞入 HTML。
+
+### 13.5 Operator 的执行语义与展示
+
+页面区分“操作结果”“新增 KG 证据”和“延迟查询”，三者不能用同一个空列表表示：
+
+| Operator 类别 | 执行器实际行为 | 页面展示 |
+| --- | --- | --- |
+| `resolve_entity` / `start` | 物化实体 handle | 解析到的实体节点、真实数量与 label/ID |
+| `all_entities` | 只建立有 `max_results` 上限的 `AllEntities` program，不立即枚举全部实体 | 黄色 `All entities ≤ N` 延迟集合节点，明确标注“不是空结果” |
+| `follow` | 调用 bounded neighbors，物化目标实体并记录访问到的 triples | 输入实体、获取实体、关系边、方向、证据数 |
+| filter | 对实体 handle 或延迟 program 执行后端过滤；延迟输入可在同一次查询中物化 | 保留节点、已知的过滤节点；延迟集合到结果使用虚线 dataflow edge |
+| `intersect` / `union` | 对已经物化的多个实体集合求交或合并 | 多输入 handle、输出集合和被排除的代表节点 |
+| query / `count` / `verify` | 产生 literal、relation、count 或布尔答案，不一定产生新实体 | 橙色答案节点及实际值；`0` 是有效计数，不再当作空结果 |
+| `select_between` / `select_among` | 查询比较属性并物化被选实体 | 候选输入、选择属性/mode、最终选中节点 |
+| `require_unique` / `emit` | 验证唯一性或复用输入 handle 输出答案，不执行新的图遍历 | 复用并保留已有节点，说明验证/输出效果；不会清空前序图 |
+
+`new_evidence_total == 0` 只表示本步没有新增 support triple，不代表本步结果为空。例如 `emit` 复用
+已有 handle，`count` 产生数值，`all_entities` 建立延迟 program，它们都可能没有新增 KG edge。
+
+最终图包含两层连线，并在切到后续步骤时持续保留：
+
+1. 紫色流程层：`producer operator --handle--> consumer operator`，以及
+   `operator --output handle--> result`。即使 operator 没有 KG evidence，流程仍然连通；
+2. 灰色/绿色证据层：实体之间的 relation，以及实体到属性值的 attribute edge；当前步骤新增的
+   evidence 为绿色。比如 `filter_literal(age > 30)` 会同时在 operator 节点显示 `age > 30`，并在
+   候选实体旁显示 `entity --age--> actual value`。
+
+实体节点下方直接显示 ID 和最多两个 type；点击节点可看完整 type、alias，以及本条执行实际读取的
+`observed_properties`。属性展示也遵循 trace 的有界规则，只展示本次程序涉及和读取到的相关属性，
+不会为每个实体无界加载整个知识库属性表。
 
 不传 `--indices` 时默认只测试前三条；也可以使用 `--limit 5`。为保证案例可比，推荐三个阶段都
 使用相同的 `--indices`。

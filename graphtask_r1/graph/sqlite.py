@@ -338,6 +338,52 @@ class SQLiteGraphBackend:
             self._neighbors_cache[cache_key] = result
         return list(result)
 
+    def attribute_facts(
+        self,
+        entity_ids: Sequence[str],
+        *,
+        attribute_ids: Sequence[str] | None = None,
+        limit: int = 100,
+        trace_id: str | None = None,
+    ) -> list[Triple]:
+        del trace_id
+        if not entity_ids or limit <= 0:
+            return []
+        entities = tuple(sorted(set(entity_ids)))
+        attributes = tuple(sorted(set(attribute_ids or ())))
+        bind_budget = self._sql_variable_limit() - 1
+        entity_batch_size = max(1, bind_budget // 2) if attributes else bind_budget
+        attribute_batch_size = max(1, bind_budget - entity_batch_size)
+        attribute_batches: list[Sequence[str]] = (
+            _chunks(attributes, attribute_batch_size) if attributes else [()]
+        )
+        found: dict[tuple[str, str, str], Triple] = {}
+        for entity_batch in _chunks(entities, entity_batch_size):
+            entity_placeholders = ",".join("?" for _ in entity_batch)
+            for attribute_batch in attribute_batches:
+                attribute_clause = ""
+                if attribute_batch:
+                    placeholders = ",".join("?" for _ in attribute_batch)
+                    attribute_clause = f" AND key IN ({placeholders})"
+                rows = self.connection.execute(
+                    "SELECT entity_id, key, value, datatype, unit FROM attributes "
+                    f"WHERE entity_id IN ({entity_placeholders}){attribute_clause} "
+                    "ORDER BY entity_id, key, value LIMIT ?",
+                    (*entity_batch, *attribute_batch, limit),
+                ).fetchall()
+                for entity_id, attribute, value, datatype, unit in rows:
+                    triple = Triple(
+                        subject=str(entity_id),
+                        relation=str(attribute),
+                        object=format_attribute_value(
+                            str(value),
+                            str(datatype),
+                            None if unit is None else str(unit),
+                        ),
+                    )
+                    found[triple.sort_key()] = triple
+        return sorted(found.values(), key=Triple.sort_key)[:limit]
+
     def entity_degrees(self, entity_ids: Sequence[str]) -> dict[str, int]:
         """Return total in/out hyperlink degrees in bounded SQL batches."""
 
