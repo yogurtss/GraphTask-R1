@@ -171,6 +171,10 @@ GRPO、查找新 LoRA adapter，并写入 round manifest。合并模型保存在
 adapter 路径和 ms-swift 版本用于恢复；修改配置后不能从旧 manifest 继续。外部图调用保留 timeout、
 retry、cache 和 trace ID。
 
+合并命令使用 `--load_args false` 并显式传入模型类型、LoRA 类型和精度，不恢复 checkpoint
+`args.json` 中可能已经失效的 `external_plugins` 绝对路径。因此移动项目目录或复制 checkpoint 后
+无需修改 `args.json`，也不需要为旧项目目录建立软链接。
+
 默认 4×H100 布局为 actor GPU `0,1,2`、frozen opponent GPU `3`；actor rollout 使用 colocate，
 不另占 GPU。每轮确定性抽取 256 条 Questioner rows 和 256 条 Solver rows，使用
 `rollout_n=4`、`opponent_samples=4`、4096 completion 上限。三轮理论上限为 6144 条 actor

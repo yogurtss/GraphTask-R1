@@ -231,14 +231,25 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
         "export",
         "--model",
         "Qwen/Qwen3-4B-Instruct-2507",
+        "--model_type",
+        "qwen3",
         "--adapters",
         str((tmp_path / "adapter").resolve()),
+        "--train_type",
+        "lora",
+        "--torch_dtype",
+        "bfloat16",
+        "--load_args",
+        "false",
         "--merge_lora",
         "true",
         "--output_dir",
         merged_model,
     ]
     assert plan["merged_opponent_model"] == merged_model
+    assert plan["commands"]["merge"][
+        plan["commands"]["merge"].index("--load_args") + 1
+    ] == "false"
     sglang_command = plan["commands"]["sglang"]
     assert sglang_command[sglang_command.index("--model-path") + 1] == merged_model
     assert "--enable-lora" not in sglang_command

@@ -297,6 +297,11 @@ adapter、base tasks、seed 和验证集。
 传递 `--enable-lora` 或 `--lora-paths`。认证 Questioner 提案后才执行生成 gold，并按
 base/archive/new 比例组装下一轮数据。round manifest 保存配置哈希、数据哈希、adapter 和版本；
 只有配置完全一致时才能 `--resume`。
+
+自动合并显式使用 `--load_args false`，并重新传入 `model_type`、`train_type=lora` 和 BF16。这样
+`swift export` 不会从 adapter 的 `args.json` 恢复 SFT 时记录的 `external_plugins` 绝对路径；项目或
+checkpoint 移动到新目录后，也不会因为旧插件目录不存在而在 `swift/utils/utils.py` 的 `py_dir`
+检查处失败。保留原始 `args.json` 作为训练溯源，不要手工改写它。
 Self-play 的正式预算字段位于 `configs/training/selfplay.yaml`：
 
 ```yaml
