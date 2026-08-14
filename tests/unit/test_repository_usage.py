@@ -87,6 +87,22 @@ def test_main_readme_links_dedicated_ms_swift_cuda124_guide() -> None:
     assert "qwen3_4b_sft_ms_swift_cuda124.yaml" in guide.read_text()
 
 
+def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
+    main_readme = (PROJECT_ROOT / "README.md").read_text()
+    training_guide = (PROJECT_ROOT / "docs/TRAINING.md").read_text()
+    kqapro_guide = (PROJECT_ROOT / "docs/KQAPRO_TRAINING.md").read_text()
+
+    assert "SFT → self-play → val 选模" in main_readme
+    assert "Solver-only GRPO 不是前置依赖" in main_readme
+    assert (
+        "export INITIAL_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last"
+        in training_guide
+    )
+    assert "## 4. 可选：KQAPro Solver-only GRPO warm-up" in training_guide
+    assert "## 5. 可选：Solver-only GRPO warm-up" in kqapro_guide
+    assert "默认直接用 SFT adapter 初始化 self-play" in kqapro_guide
+
+
 def test_cli_logs_to_stderr_and_keeps_json_on_stdout() -> None:
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)

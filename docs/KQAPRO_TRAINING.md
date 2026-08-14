@@ -1,7 +1,8 @@
 # KQAPro 训练流程
 
-本流程只覆盖 KQAPro：先用官方 train 做 Solver SFT，再做 GRPO 和 Questioner/Solver
-self-play，最后只在官方 val 上选择 checkpoint。KILT/OpenQA 使用 GraphScript v0.2 与独立
+本流程只覆盖 KQAPro：先用官方 train 做 Solver SFT，随后直接做 Questioner/Solver self-play，
+最后只在官方 val 上选择 checkpoint。独立的 Solver-only GRPO 是可选 warm-up/消融，不是
+self-play 前置依赖。KILT/OpenQA 使用 GraphScript v0.2 与独立
 checkpoint，不进入本流程。
 
 ## 1. 数据边界与已验证上界
@@ -237,22 +238,30 @@ export GRADIENT_ACCUMULATION_STEPS=16
 若配置启用了 `scale_learning_rate_with_micro_batch`，`learning_rate` 是 micro batch 为 1 的基准；
 micro 大于 1 时 launcher 会线性放大最终 `LR`。显式环境变量 `LR` 始终优先且不会再次缩放。
 
-## 5. Solver GRPO
+## 5. 可选：Solver-only GRPO warm-up
+
+默认主线跳过本节，完成 SFT 后直接进入第 6 节。Self-play 自身仍通过 mixed-role GRPO 更新共享
+LoRA；本节只是额外的 Solver-only 强化学习阶段。仅当 SFT Solver 的 GraphScript
+parse/execution/F1 不稳定，或实验需要拆分 Solver RL 与 self-play 增益时使用。
 
 GRPO train rows 只来自 KQAPro train；val rows 只供 rollout evaluation/checkpoint selection：
 
 ```bash
-for split in train val; do
-  python -m graphtask_r1.cli data export-rl \
-    --input "$KQAPRO_DIR/$split/training_tasks.parquet" \
-    --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_$split.parquet" \
-    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-    --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
-done
+python -m graphtask_r1.cli data export-rl \
+  --input "$KQAPRO_DIR/train/training_tasks.parquet" \
+  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_train.parquet" \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
+
+python -m graphtask_r1.cli data export-rl \
+  --input "$KQAPRO_DIR/val/training_tasks.parquet" \
+  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet" \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
 
 export MS_SWIFT_SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
 export SOLVER_RL_TRAIN_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_train.parquet
-export SOLVER_RL_VAL_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_val.parquet
+export SOLVER_RL_VAL_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet
 export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/grpo/qwen3-4b-kqapro-v03
 export NUM_GPUS=1
 export VLLM_MODE=colocate
@@ -352,13 +361,19 @@ python -m graphtask_r1.cli data sample-seeds \
   --relation-catalog "$KQAPRO_DIR/relation_catalog.json"
 ```
 
-用选定的 Solver GRPO adapter 初始化 self-play；若只比较“有/无 self-play”，对照组应固定同一个
-adapter、base tasks、seed 和验证集。
+默认直接用 SFT adapter 初始化 self-play。Self-play val 必须使用 RL row schema；如果跳过了第 5
+节，先单独导出只读 Solver val。这只是数据格式转换，不会执行 Solver-only GRPO：
 
 ```bash
-export INITIAL_ADAPTER=$PWD/outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last
+python -m graphtask_r1.cli data export-rl \
+  --input "$KQAPRO_DIR/val/training_tasks.parquet" \
+  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet" \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
+
+export INITIAL_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
 export BASE_TASKS=$KQAPRO_DIR/train/training_tasks.parquet
-export VAL_DATA=$SOLVER_RL_VAL_DATA
+export VAL_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet
 export QUESTIONER_SEEDS=$KQAPRO_TRAINING/kqapro_questioner_seeds.parquet
 export KQAPRO_RELATION_CATALOG=$KQAPRO_DIR/relation_catalog.json
 
@@ -370,6 +385,9 @@ python -m graphtask_r1.cli train self-play \
   --output-dir outputs/selfplay/kqapro-v03
 ```
 
+若 SFT 指标不足并运行了第 5 节，可以把 `INITIAL_ADAPTER` 改为对应 Solver GRPO checkpoint；
+这是可选起点。比较“有/无 self-play”时，应固定同一个起始 adapter、base tasks、seed 和验证集。
+
 每轮冻结 opponent，认证 Questioner 提案后才执行生成 gold，并按 base/archive/new 比例组装下一轮
 数据。round manifest 保存配置哈希、数据哈希、adapter 和版本；只有配置完全一致时才能 `--resume`。
 Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认 actor GPU 为 2 张，因此
@@ -378,7 +396,7 @@ Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认
 ## 7. val 选模与提升判定
 
 所有候选 checkpoint 都使用同一份
-`kqapro_graphscript_v03_grpo_val.parquet`，报告至少以下指标：
+`kqapro_graphscript_v03_solver_rl_val.parquet`，报告至少以下指标：
 
 - answer exact match/F1；
 - GraphScript parse rate；
@@ -387,7 +405,7 @@ Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认
 - completion tokens、operator count 和执行 latency；
 - Questioner acceptance/rejection reason 与 Solver reward components。
 
-判断 self-play 是否有效时，至少比较同一 SFT/GRPO 起点下的 `0 round`、每个 self-play round 和
+判断 self-play 是否有效时，至少比较同一起始 adapter 下的 `0 round`、每个 self-play round 和
 最佳 round；不要用 val 调 prompt、生成训练样本或回填 archive。最终保留 checkpoint、配置、
 manifest、preflight summary 和 val 指标，才能把提升归因到 self-play，而不是数据或算子变化。
 

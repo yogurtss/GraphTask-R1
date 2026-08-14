@@ -1,6 +1,7 @@
 # ms-swift 训练手册
 
-仓库只有一条训练运行时：ms-swift。SFT、GRPO 和 self-play 共享本地数据适配器
+仓库只有一条训练运行时：ms-swift。默认主线是 **SFT → self-play → val 选模**；独立的
+Solver-only GRPO 只是可选 warm-up/消融。SFT、GRPO 和 self-play 共享本地数据适配器
 `graphtask_r1/training/ms_swift_plugin.py`；训练 Parquet 保持 GraphTask 自身的中立 schema，
 加载时才转换为 ms-swift 的 `messages`、`tools` 和 reward 输入。
 
@@ -23,8 +24,8 @@
 data/training/
 ├── kqapro_graphscript_v03_sft_train.parquet
 ├── kqapro_graphscript_v03_sft_val.parquet
-├── kqapro_graphscript_v03_grpo_train.parquet
-└── kqapro_graphscript_v03_grpo_val.parquet
+├── kqapro_graphscript_v03_solver_rl_val.parquet
+└── kqapro_graphscript_v03_grpo_train.parquet  # 仅可选 Solver GRPO 需要
 ```
 
 Qwen3-8B 使用相同的配置驱动入口，无需修改训练代码。仓库已提供
@@ -80,18 +81,26 @@ python -m graphtask_r1.cli train sft \
 上述 batch 参数已经是 experiment YAML 的正式字段，环境变量可临时覆盖；完整计算例子见
 [KQAPro 训练流程](KQAPRO_TRAINING.md#sft-batch-设置)。
 
-## 4. KQAPro GRPO
+## 4. 可选：KQAPro Solver-only GRPO warm-up
 
-从认证的 KQAPro train/val 分别导出 Solver GRPO 数据：
+默认流程可跳过本节，直接进入第 5 节。Self-play 内部仍使用 mixed-role GRPO 更新共享 LoRA；
+这里“可选”的只是 self-play 之前额外运行的 Solver-only GRPO 作业。仅当 SFT Solver 的
+GraphScript parse/execution/F1 不稳定，或需要单独测量 Solver RL 增益时，再运行本节。
+
+从认证的 KQAPro train 导出 Solver GRPO 数据，并复用主线的只读 Solver RL val：
 
 ```bash
-for split in train val; do
-  python -m graphtask_r1.cli data export-rl \
-    --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v03_grpo_$split.parquet \
-    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-    --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
-done
+python -m graphtask_r1.cli data export-rl \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+  --output data/training/kqapro_graphscript_v03_grpo_train.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+
+python -m graphtask_r1.cli data export-rl \
+  --input data/processed/kqapro/kqapro-v1/val/training_tasks.parquet \
+  --output data/training/kqapro_graphscript_v03_solver_rl_val.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
 
 ### colocate smoke test
@@ -99,7 +108,7 @@ done
 ```bash
 export MS_SWIFT_SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
 export SOLVER_RL_TRAIN_DATA=$PWD/data/training/kqapro_graphscript_v03_grpo_train.parquet
-export SOLVER_RL_VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_grpo_val.parquet
+export SOLVER_RL_VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_solver_rl_val.parquet
 export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/grpo/kqapro-v03-smoke
 export NUM_GPUS=1
 export VLLM_MODE=colocate
@@ -124,21 +133,36 @@ GRPO 的训练、采样与评测 batch 约束见
 router，主要用于多 GPU 高吞吐服务；单 GPU 4B eval 应优先使用低 concurrency、bounded limit 和
 足够的 request timeout 排查问题。
 
-## 5. Self-play
+## 5. Self-play（默认接在 SFT 后）
 
-默认配置是 KQAPro + GraphScript v0.3：
+默认配置是 KQAPro + GraphScript v0.3。Self-play 的验证集使用 RL row schema，因此即使跳过
+Solver-only GRPO，也需要从冻结的 KQAPro val 导出一份只读 Solver RL val；这一步只做格式转换，
+不会训练模型：
 
 ```bash
-export INITIAL_ADAPTER=$MS_SWIFT_SFT_ADAPTER
+python -m graphtask_r1.cli data export-rl \
+  --input data/processed/kqapro/kqapro-v1/val/training_tasks.parquet \
+  --output data/training/kqapro_graphscript_v03_solver_rl_val.parquet \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+
+export INITIAL_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
 export BASE_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/training_tasks.parquet
-export VAL_DATA=$SOLVER_RL_VAL_DATA
+export VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_solver_rl_val.parquet
 export QUESTIONER_SEEDS=$PWD/data/training/kqapro_questioner_seeds.parquet
 export KQAPRO_RELATION_CATALOG=$PWD/data/processed/kqapro/kqapro-v1/relation_catalog.json
 
 python -m graphtask_r1.cli train self-play \
   --config configs/training/selfplay.yaml \
   --output-dir outputs/selfplay --dry-run
+
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay.yaml \
+  --output-dir outputs/selfplay
 ```
+
+若有意运行了第 4 节，可选地把 `INITIAL_ADAPTER` 改为 Solver-only GRPO checkpoint；self-play
+其余配置不变。
 
 真实运行每轮会启动一个冻结的 SGLang opponent、组装 questioner/solver mixed Parquet、调用
 ms-swift GRPO、查找新 LoRA adapter，并写入 round manifest。配置 hash、dataset hash、adapter
@@ -224,7 +248,7 @@ Transformers Qwen3-4B LoRA；若以后切换到 Megatron/MCore、MoE 或混合�
 
 ## 7. KQAPro val 验证
 
-本阶段只用 `kqapro_graphscript_v03_grpo_val.parquet` 的冻结 val 行评测并选择 checkpoint；它由
+本阶段只用 `kqapro_graphscript_v03_solver_rl_val.parquet` 的冻结 val 行评测并选择 checkpoint；它由
 官方 `val.json` 的认证程序产生，不从隐藏 test 构造标签。KILT/HotpotQA 的检索型评测等独立路线
 完成设计后再启用，不能替代当前 KQAPro val checkpoint 选择。
 
@@ -236,7 +260,7 @@ latency，避免把“代码格式失败”“执行失败”和“程序语义�
 | 用途 | 文件 |
 | --- | --- |
 | SFT | `scripts/train_ms_swift_sft.sh` |
-| GRPO | `scripts/train_ms_swift_grpo.sh` |
+| Self-play 内部 GRPO / 可选 Solver-only GRPO | `scripts/train_ms_swift_grpo.sh` |
 | rollout server | `scripts/rollout_ms_swift.sh` |
 | 合并 LoRA | `swift export --adapters ... --merge_lora true` |
 | SFT 模板预检 | `scripts/preflight_ms_swift_sft.py` |

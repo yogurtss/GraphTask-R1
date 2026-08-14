@@ -3,7 +3,7 @@ set -euo pipefail
 
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
 : "${MODEL_TYPE:=qwen3}"
-: "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift SFT checkpoint}"
+: "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift LoRA checkpoint (SFT by default)}"
 : "${TRAIN_DATA:?Set TRAIN_DATA to a Solver RL parquet file}"
 : "${VAL_DATA:=$TRAIN_DATA}"
 : "${OUTPUT_DIR:=outputs/ms-swift-solver-grpo-cu124}"

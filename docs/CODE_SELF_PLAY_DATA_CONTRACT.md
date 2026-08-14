@@ -7,7 +7,8 @@
 | 阶段 | 数据 | 模型输入 | 模型输出 | 数据用途 |
 |---|---|---|---|---|
 | SFT | KQAPro train | question + KQAPro catalog | GraphScript v0.3 | code 冷启动 |
-| GRPO/self-play | KQAPro train | 同 SFT | GraphScript v0.3 | Questioner/Solver reward |
+| Self-play（mixed-role GRPO） | KQAPro train | 同 SFT | GraphScript v0.3 | Questioner/Solver reward |
+| 可选 Solver-only GRPO | KQAPro train | 同 SFT | GraphScript v0.3 | self-play 前的 Solver warm-up/消融 |
 | 内部选择 | KQAPro val | 同 SFT | GraphScript v0.3 | checkpoint 选择，只读 |
 
 SSP test 不得用于 relation catalog、entity seed、问题生成、reward 调参或训练数据回填。这里仅借用

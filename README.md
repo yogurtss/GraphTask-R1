@@ -9,7 +9,8 @@ GraphTask-R1 训练模型把自然语言问题编译为可执行程序，再由�
 | 阶段 | 数据 | 输出 | 目的 |
 | --- | --- | --- | --- |
 | SFT | KQAPro train | GraphScript v0.3 | 建立完整 KoPL-to-code 能力 |
-| GRPO / self-play | KQAPro train | GraphScript v0.3 | 提高 Questioner 与 Solver 的推理能力 |
+| Self-play（内部使用 mixed-role GRPO） | KQAPro train | GraphScript v0.3 | 让共享模型的 Questioner 与 Solver 跨轮协同进化 |
+| 可选 Solver-only GRPO | KQAPro train | GraphScript v0.3 | 在 self-play 前单独增强 Solver，或用于消融 |
 | 模型选择 | KQAPro val | 执行结果 | 只用于评测与 checkpoint 选择 |
 
 KQAPro 三个阶段使用同一个 v0.3 算子表与执行器；`val` 的 question、program 和 answer 只读，
@@ -17,7 +18,8 @@ KQAPro 三个阶段使用同一个 v0.3 算子表与执行器；`val` 的 questi
 包括恰好也出现在 val 中的实体。KILT/OpenQA 保留为独立的 v0.2 passage-search 路线，暂不混入
 KQAPro 的 SFT、GRPO、relation catalog 或 checkpoint。
 
-从原始数据到 SFT、GRPO、self-play 与 val 选模的命令见
+默认主线是 **SFT → self-play → val 选模**；Solver-only GRPO 不是前置依赖。若 SFT Solver 的
+GraphScript parse/execution/F1 尚不稳定，可把它作为可选 warm-up。完整命令见
 [KQAPro 训练流程](docs/KQAPRO_TRAINING.md)。完整数据边界和算子表见
 [Code-first 数据契约](docs/CODE_SELF_PLAY_DATA_CONTRACT.md)。
 
@@ -128,6 +130,7 @@ python -m graphtask_r1.cli train sft \
   --config configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml --dry-run
 ```
 
-KQAPro GRPO、frozen-opponent self-play 和 val 验证命令见 [训练手册](docs/TRAINING.md)。完整原始数据准备
+直接从 SFT checkpoint 启动 frozen-opponent self-play、可选 Solver-only GRPO 和 val 验证命令见
+[训练手册](docs/TRAINING.md)。完整原始数据准备
 见 [数据准备](docs/DATA_PREPARATION.md)，GraphScript 与显式工具模式的边界见
 [交互模式](docs/INTERACTION_MODES.md)。

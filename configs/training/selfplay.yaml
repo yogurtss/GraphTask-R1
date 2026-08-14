@@ -1,5 +1,7 @@
 model_path: Qwen/Qwen3-4B-Instruct-2507
 model_type: qwen3
+# Mainline: point this at the completed SFT LoRA. A Solver-only GRPO LoRA is an
+# optional warm-up/ablation starting point, not a prerequisite.
 initial_adapter: ${INITIAL_ADAPTER}
 base_tasks: ${BASE_TASKS}
 val_data: ${VAL_DATA}
