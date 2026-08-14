@@ -16,6 +16,7 @@ from graphtask_r1.schema import (
     RelationInfo,
     TaskCertificate,
     TaskProposal,
+    TaskTrainingRecord,
     Triple,
 )
 from graphtask_r1.training.ms_swift_data import convert_rl_row
@@ -223,6 +224,21 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert "--interaction-mode" in plan["commands"]["opponent"]
     mode_index = plan["commands"]["opponent"].index("--interaction-mode")
     assert plan["commands"]["opponent"][mode_index + 1] == "graphscript"
+    assert plan["actor_gpus"] == "0,1,2"
+    assert plan["opponent_gpus"] == "3"
+    assert plan["train_environment"]["TRAIN_CUDA_VISIBLE_DEVICES"] == "0,1,2"
+    assert plan["train_environment"]["NUM_GPUS"] == "3"
+    assert plan["train_environment"]["MAX_COMPLETION_LENGTH"] == "4096"
+    assert plan["train_environment"]["VLLM_MAX_MODEL_LEN"] == "16384"
+    assert plan["train_environment"]["VLLM_GPU_MEMORY_UTILIZATION"] == "0.6"
+    assert plan["train_environment"]["VLLM_SLEEP_LEVEL"] == "1"
+    assert plan["train_environment"]["VLLM_MODE"] == "colocate"
+    assert plan["rollout_budget"] == {
+        "questioner_prompts": 256,
+        "solver_prompts": 256,
+        "actor_completions_upper_bound": 2_048,
+        "opponent_completions_upper_bound": 4_096,
+    }
 
 
 def test_interaction_task_selection_and_catalog_are_deterministic(tmp_path: Path) -> None:
@@ -279,11 +295,48 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     assert config.interaction_mode == "graphscript"
     assert config.graphscript_version == "0.3"
     assert config.program_profile == "graphscript_v0_3"
-    assert config.micro_batch_size == 1
-    assert config.eval_batch_size == 2
-    assert config.gradient_accumulation_steps == 4
+    assert config.questioner_episodes == 256
+    assert config.solver_episodes == 256
+    assert config.opponent_samples == 4
+    assert config.actor_gpus == "0,1,2"
+    assert config.opponent_gpus == "3"
+    assert config.max_completion_tokens == 4_096
+    assert config.vllm_max_model_len == 16_384
+    assert config.vllm_gpu_memory_utilization == 0.6
+    assert config.vllm_sleep_level == 1
+    assert config.micro_batch_size == 4
+    assert config.eval_batch_size == 8
+    assert config.gradient_accumulation_steps == 2
     assert config.steps_per_generation == 4
     assert config.rollout_n == 4
+
+
+def test_selfplay_rejects_overlapping_actor_and_opponent_gpus() -> None:
+    with pytest.raises(ValueError, match="must be disjoint"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "actor_gpus": "0,1",
+                "opponent_gpus": "1,2",
+            }
+        )
+
+
+def test_selfplay_reserves_vllm_context_for_the_prompt() -> None:
+    with pytest.raises(ValueError, match="must exceed max_completion_tokens"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "max_completion_tokens": 4_096,
+                "vllm_max_model_len": 4_096,
+            }
+        )
 
 
 def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
@@ -435,7 +488,10 @@ def test_graphscript_selfplay_assembles_mixed_single_turn_dataset(tmp_path: Path
     tasks_path = tmp_path / "tasks.parquet"
     seeds_path = tmp_path / "seeds.parquet"
     catalog_path = tmp_path / "relations.json"
-    write_records(tasks_path, [_task().model_dump(mode="json")])
+    # Production BASE_TASKS points at the compact audit training view, not a full
+    # TaskCertificate with witnesses and provenance.
+    training_task = TaskTrainingRecord.model_validate(_task().model_dump(mode="json"))
+    write_records(tasks_path, [training_task.model_dump(mode="json")])
     write_json(catalog_path, [value.model_dump(mode="json") for value in _catalog()])
     sample_questioner_seeds(
         "toy-v1",
@@ -473,6 +529,49 @@ def test_graphscript_selfplay_assembles_mixed_single_turn_dataset(tmp_path: Path
     assert table.num_rows == 2
     assert "agent_name" not in table.column_names
     assert "tools_kwargs" not in table.column_names
+
+
+def test_selfplay_bounds_questioner_rows_per_round(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "tasks.parquet"
+    seeds_path = tmp_path / "seeds.parquet"
+    catalog_path = tmp_path / "relations.json"
+    training_task = TaskTrainingRecord.model_validate(_task().model_dump(mode="json"))
+    write_records(tasks_path, [training_task.model_dump(mode="json")])
+    write_json(catalog_path, [value.model_dump(mode="json") for value in _catalog()])
+    sample_questioner_seeds(
+        "toy-v1",
+        seeds_path,
+        count=3,
+        seed=42,
+        min_degree=1,
+        interaction_mode="graphscript",
+        graphscript_version="0.1",
+        relation_catalog=_catalog(),
+    )
+    config = SelfPlayConfig(
+        initial_adapter="adapter",
+        base_tasks=tasks_path,
+        val_data=tmp_path / "val.parquet",
+        questioner_seeds=seeds_path,
+        graph_snapshot="toy-v1",
+        questioner_episodes=1,
+        solver_episodes=1,
+        interaction_mode="graphscript",
+        graphscript_version="0.1",
+        relation_catalog=catalog_path,
+        relation_catalogs={"toy-v1": catalog_path},
+        program_profile="graphscript_v0_1",
+    )
+
+    counts = _assemble_dataset(
+        config,
+        tmp_path / "archive.sqlite",
+        tmp_path / "mixed.parquet",
+        round_index=1,
+        opponent_url="http://127.0.0.1:18080",
+    )
+
+    assert counts == {"questioner": 1, "solver": 1, "total": 2}
 
 
 def test_kqapro_questioner_seeds_default_to_graphscript_v03(tmp_path: Path) -> None:

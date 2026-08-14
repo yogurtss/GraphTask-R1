@@ -261,6 +261,9 @@ python -m graphtask_r1.cli data sample-seeds \
   --relation-catalog "$KQAPRO_DIR/relation_catalog.json"
 ```
 
+4096 是可复用的 seed pool，不代表每轮全部进入训练。默认 4×H100/24 小时预算配置每轮只按显式
+seed 和 round index 确定性抽取 256 条 Questioner rows；完整 pool 用于跨轮保持覆盖度。
+
 默认直接用 SFT adapter 初始化 self-play。Self-play val 必须使用 RL row schema，因此
 需要先单独导出只读 Solver val。这只是数据格式转换，不会执行 Solver-only GRPO：
 
@@ -291,8 +294,51 @@ adapter、base tasks、seed 和验证集。
 
 每轮冻结 opponent，认证 Questioner 提案后才执行生成 gold，并按 base/archive/new 比例组装下一轮
 数据。round manifest 保存配置哈希、数据哈希、adapter 和版本；只有配置完全一致时才能 `--resume`。
-Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认 actor GPU 为 2 张，因此
-训练 batch 为 8、采样 batch 为 8、评测 batch 为 4，均可按 `rollout_n=4` 正确分组。
+Self-play 的正式预算字段位于 `configs/training/selfplay.yaml`：
+
+```yaml
+rounds: 3
+questioner_episodes: 256
+solver_episodes: 256
+opponent_samples: 4
+actor_gpus: "0,1,2"
+opponent_gpus: "3"
+max_completion_tokens: 4096
+vllm_max_model_len: 16384
+vllm_gpu_memory_utilization: 0.6
+vllm_sleep_level: 1
+micro_batch_size: 4
+eval_batch_size: 8
+gradient_accumulation_steps: 2
+steps_per_generation: 4
+rollout_n: 4
+```
+
+GPU 0–2 同时承担共享 actor 的训练和 colocate rollout；GPU 3 只运行冻结 Solver opponent。
+两组 GPU 必须非空、无重复且互不重叠，配置加载时会提前校验。每个 prompt 生成 4 条
+completion。每轮最多包含 512 prompts、2048 条 actor
+completions；只有通过 Questioner 基础认证的 completion 才会触发 opponent，理论上限为 4096 条
+opponent completions。三轮上限分别为 6144 和 12288。`--dry-run` 的 `rollout_budget` 会打印这些
+上限，便于在启动 GPU 作业前复核。
+
+训练全局 batch 为 `3 × 4 × 2 = 24 completions`；采样全局 batch 为
+`3 × 4 × 4 = 48 completions`，即每次采样包含 12 个 prompt；评测 batch 为
+`3 × 8 = 24 completions`。相比 micro batch 2 的配置，训练有效 batch 保持 24 不变，但每卡
+micro batch、单次采样和评测吞吐均扩大。4B 模型在 80GB H100 上默认使用 micro batch 4。
+colocate vLLM 使用 60% 显存上限、16384 总上下文，并在反向阶段启用 `sleep_level=1` 释放 vLLM
+cache。该档位面向 80GB H100 的较高利用率，不建议未经实测直接提高到 0.8–0.9。
+
+24 小时是这组 4B/4×H100 参数的目标预算，不是跨驱动、模型和数据环境的硬保证。先完成第 1 轮并
+读取 `round_001/logs/ms_swift.log` 的实际耗时；若超过 7 小时，不要原样启动后两轮，应优先将
+`questioner_episodes` 降到 128、`opponent_samples` 降到 2，仍不足时再把 `rounds` 降到 2。
+不要先压缩 Solver base/archive/new 的 256 条预算，以免速度提升来自削弱 Solver 训练。
+
+首轮同时用 `nvidia-smi dmon` 观察 GPU 0–2。若生成阶段 OOM，先把
+`vllm_gpu_memory_utilization` 从 0.6 降到 0.5；若反向传播阶段 OOM，则改为
+`micro_batch_size: 2`、`gradient_accumulation_steps: 4`，保持训练有效 batch 仍为 24。若训练和
+生成阶段都长期有较多余量，可试验 `micro_batch_size: 6`，但这会把训练有效 batch 提到 36，需将其
+作为单独实验重新核对学习率和收敛曲线。不要通过缩短 16384 总上下文来掩盖正常样本超长，除非
+重新做过真实模板长度审计。
 
 ## 6. val 选模与提升判定
 

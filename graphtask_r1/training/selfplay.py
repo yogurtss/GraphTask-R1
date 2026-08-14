@@ -5,8 +5,9 @@ import random
 import subprocess
 import time
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -14,13 +15,19 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from graphtask_r1.archive import TaskArchive
-from graphtask_r1.schema import TaskCertificate
+from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
 from graphtask_r1.training.prompts import GraphScriptVersion, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
 from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.utils import file_hash, read_json, read_records, write_json
 
 MS_SWIFT_VERSION = "3.6.4"
+SelfPlayTask = TaskCertificate | TaskTrainingRecord
+TaskT = TypeVar("TaskT")
+
+
+def _gpu_ids(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 class SelfPlayConfig(BaseModel):
@@ -34,14 +41,15 @@ class SelfPlayConfig(BaseModel):
     questioner_seeds: Path
     graph_snapshot: str = "kqapro-v1"
     rounds: int = Field(default=3, gt=0)
+    questioner_episodes: int = Field(default=256, gt=0, le=4_096)
     solver_episodes: int = Field(default=256, gt=0)
-    opponent_samples: int = Field(default=8, gt=0)
+    opponent_samples: int = Field(default=4, gt=0, le=64)
     base_ratio: float = 0.35
     archive_ratio: float = 0.35
     new_ratio: float = 0.30
     seed: int = 42
-    actor_gpus: str = "0,1"
-    opponent_gpus: str = "2,3"
+    actor_gpus: str = "0,1,2"
+    opponent_gpus: str = "3"
     sglang_port: int = 30000
     opponent_port: int = 18080
     train_script: Path = Path("scripts/train_ms_swift_grpo.sh")
@@ -53,10 +61,13 @@ class SelfPlayConfig(BaseModel):
     max_follow_limit: int = Field(default=100, gt=0, le=1_000)
     max_edge_visits: int = Field(default=200, gt=0)
     max_returned_entities: int = Field(default=1_000, gt=0)
-    max_completion_tokens: int = Field(default=32_768, gt=0, le=40_960)
-    micro_batch_size: int = Field(default=1, gt=0)
-    eval_batch_size: int = Field(default=2, gt=0)
-    gradient_accumulation_steps: int = Field(default=4, gt=0)
+    max_completion_tokens: int = Field(default=4_096, gt=0, le=40_960)
+    vllm_max_model_len: int = Field(default=16_384, gt=0, le=40_960)
+    vllm_gpu_memory_utilization: float = Field(default=0.6, gt=0.0, lt=1.0)
+    vllm_sleep_level: Literal[0, 1, 2] = 1
+    micro_batch_size: int = Field(default=4, gt=0)
+    eval_batch_size: int = Field(default=8, gt=0)
+    gradient_accumulation_steps: int = Field(default=2, gt=0)
     steps_per_generation: int = Field(default=4, gt=0)
     rollout_n: int = Field(default=4, gt=0)
     program_profile: Literal[
@@ -77,7 +88,26 @@ class SelfPlayConfig(BaseModel):
                 f"{self.interaction_mode} mode requires "
                 f"program_profile={expected_profile}"
             )
-        actor_count = len([value for value in self.actor_gpus.split(",") if value.strip()])
+        if self.vllm_max_model_len <= self.max_completion_tokens:
+            raise ValueError(
+                "vllm_max_model_len must exceed max_completion_tokens to leave room "
+                "for the prompt"
+            )
+        actor_ids = _gpu_ids(self.actor_gpus)
+        opponent_ids = _gpu_ids(self.opponent_gpus)
+        if not actor_ids or not opponent_ids:
+            raise ValueError("actor_gpus and opponent_gpus must each select at least one GPU")
+        if len(set(actor_ids)) != len(actor_ids) or len(set(opponent_ids)) != len(
+            opponent_ids
+        ):
+            raise ValueError("actor_gpus and opponent_gpus cannot contain duplicate GPU IDs")
+        overlap = sorted(set(actor_ids) & set(opponent_ids))
+        if overlap:
+            raise ValueError(
+                "actor_gpus and opponent_gpus must be disjoint; overlap: "
+                + ", ".join(overlap)
+            )
+        actor_count = len(actor_ids)
         generation_batch = actor_count * self.micro_batch_size * self.steps_per_generation
         evaluation_batch = actor_count * self.eval_batch_size
         if self.steps_per_generation % self.gradient_accumulation_steps:
@@ -97,7 +127,7 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
     return SelfPlayConfig.model_validate(yaml.safe_load(raw))
 
 
-def _sample(values: list[TaskCertificate], count: int, rng: random.Random) -> list[TaskCertificate]:
+def _sample(values: Sequence[TaskT], count: int, rng: random.Random) -> list[TaskT]:
     if not values or count <= 0:
         return []
     if count <= len(values):
@@ -107,8 +137,12 @@ def _sample(values: list[TaskCertificate], count: int, rng: random.Random) -> li
 
 def _round_tasks(
     config: SelfPlayConfig, archive_path: Path, *, round_index: int
-) -> list[TaskCertificate]:
-    base = [TaskCertificate.model_validate(value) for value in read_records(config.base_tasks)]
+) -> list[SelfPlayTask]:
+    # ``base_tasks`` normally points at the compact training view emitted by
+    # ``data audit --training-view-output``. Archive entries remain full certificates.
+    base = [
+        TaskTrainingRecord.model_validate(value) for value in read_records(config.base_tasks)
+    ]
     with TaskArchive(archive_path) as archive:
         archived = archive.all()
     new = [task for task in archived if task.generation.get("round") == round_index - 1]
@@ -123,11 +157,11 @@ def _round_tasks(
     if not old:
         base_count += archive_count
         archive_count = 0
-    return [
-        *_sample(base, base_count, rng),
-        *_sample(old, archive_count, rng),
-        *_sample(new, new_count, rng),
-    ]
+    selected: list[SelfPlayTask] = []
+    selected.extend(_sample(base, base_count, rng))
+    selected.extend(_sample(old, archive_count, rng))
+    selected.extend(_sample(new, new_count, rng))
+    return selected
 
 
 def _assemble_dataset(
@@ -160,6 +194,10 @@ def _assemble_dataset(
     )
     seed_table = pq.read_table(config.questioner_seeds)
     seed_rows = seed_table.to_pylist()
+    questioner_rng = random.Random(config.seed + 10_000 + round_index)
+    seed_rows = questioner_rng.sample(
+        seed_rows, k=min(config.questioner_episodes, len(seed_rows))
+    )
     for row in seed_rows:
         extra = dict(row["extra_info"])
         topic_ids = [str(value) for value in extra.get("topic_entity_ids", [])]
@@ -253,7 +291,7 @@ def _commands(
         "--tp-size",
         "1",
         "--dp-size",
-        str(len(config.opponent_gpus.split(","))),
+        str(len(_gpu_ids(config.opponent_gpus))),
         "--enable-lora",
         "--lora-paths",
         f"{model_name}={adapter}",
@@ -329,12 +367,38 @@ def run_self_play(
             mixed_data=mixed_data,
             round_dir=round_dir,
         )
+        train_overrides = {
+            "CUDA_VISIBLE_DEVICES": config.actor_gpus,
+            "TRAIN_CUDA_VISIBLE_DEVICES": config.actor_gpus,
+            "MODEL_PATH": config.model_path,
+            "MODEL_TYPE": config.model_type,
+            "LORA_ADAPTER_PATH": str(adapter),
+            "TRAIN_DATA": str(mixed_data.resolve()),
+            "VAL_DATA": str(config.val_data.resolve()),
+            "NUM_GPUS": str(len(_gpu_ids(config.actor_gpus))),
+            "MICRO_BATCH_SIZE": str(config.micro_batch_size),
+            "EVAL_BATCH_SIZE": str(config.eval_batch_size),
+            "GRADIENT_ACCUMULATION_STEPS": str(config.gradient_accumulation_steps),
+            "STEPS_PER_GENERATION": str(config.steps_per_generation),
+            "ROLLOUT_N": str(config.rollout_n),
+            "MAX_COMPLETION_LENGTH": str(config.max_completion_tokens),
+            "VLLM_MAX_MODEL_LEN": str(config.vllm_max_model_len),
+            "VLLM_GPU_MEMORY_UTILIZATION": str(config.vllm_gpu_memory_utilization),
+            "VLLM_SLEEP_LEVEL": str(config.vllm_sleep_level),
+            "OUTPUT_DIR": str(round_dir.resolve()),
+            "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
+            "INTERACTION_MODE": config.interaction_mode,
+            "GRAPHSCRIPT_VERSION": config.graphscript_version,
+            "VLLM_MODE": "colocate",
+            "SAVE_STEPS": "1",
+        }
         plan = {
             "round": round_index,
             "adapter_in": str(adapter),
             "dataset": str(mixed_data),
             "counts": counts,
             "commands": commands,
+            "train_environment": train_overrides,
             "actor_gpus": config.actor_gpus,
             "opponent_gpus": config.opponent_gpus,
             "interaction_mode": config.interaction_mode,
@@ -344,6 +408,25 @@ def run_self_play(
             else None,
             "program_profile": config.program_profile,
             "max_completion_tokens": config.max_completion_tokens,
+            "rollout_budget": {
+                "questioner_prompts": (
+                    counts["questioner"] if not dry_run else config.questioner_episodes
+                ),
+                "solver_prompts": counts["solver"] if not dry_run else config.solver_episodes,
+                "actor_completions_upper_bound": (
+                    (
+                        counts["questioner"] + counts["solver"]
+                        if not dry_run
+                        else config.questioner_episodes + config.solver_episodes
+                    )
+                    * config.rollout_n
+                ),
+                "opponent_completions_upper_bound": (
+                    (counts["questioner"] if not dry_run else config.questioner_episodes)
+                    * config.rollout_n
+                    * config.opponent_samples
+                ),
+            },
         }
         plans.append(plan)
         if dry_run:
@@ -371,29 +454,7 @@ def run_self_play(
                 )
             try:
                 _wait_for(opponent_url + "/health", timeout_s=60)
-                train_env = {
-                    **os.environ,
-                    "CUDA_VISIBLE_DEVICES": config.actor_gpus,
-                    "MODEL_PATH": config.model_path,
-                    "MODEL_TYPE": config.model_type,
-                    "LORA_ADAPTER_PATH": str(adapter),
-                    "TRAIN_DATA": str(mixed_data.resolve()),
-                    "VAL_DATA": str(config.val_data.resolve()),
-                    "NUM_GPUS": str(len(config.actor_gpus.split(","))),
-                    "MICRO_BATCH_SIZE": str(config.micro_batch_size),
-                    "EVAL_BATCH_SIZE": str(config.eval_batch_size),
-                    "GRADIENT_ACCUMULATION_STEPS": str(
-                        config.gradient_accumulation_steps
-                    ),
-                    "STEPS_PER_GENERATION": str(config.steps_per_generation),
-                    "ROLLOUT_N": str(config.rollout_n),
-                    "OUTPUT_DIR": str(round_dir.resolve()),
-                    "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
-                    "INTERACTION_MODE": config.interaction_mode,
-                    "GRAPHSCRIPT_VERSION": config.graphscript_version,
-                    "VLLM_MODE": "colocate",
-                    "SAVE_STEPS": "1",
-                }
+                train_env = {**os.environ, **train_overrides}
                 with (logs / "ms_swift.log").open("w") as train_log:
                     subprocess.run(
                         commands["train"],

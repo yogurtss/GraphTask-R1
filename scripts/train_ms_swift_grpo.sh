@@ -23,6 +23,14 @@ if [[ "$VLLM_MODE" != "server" && "$VLLM_MODE" != "colocate" ]]; then
   echo "VLLM_MODE must be server or colocate" >&2
   exit 2
 fi
+VLLM_COLOCATE_ARGS=()
+if [[ "$VLLM_MODE" == "colocate" ]]; then
+  VLLM_COLOCATE_ARGS=(
+    --vllm_gpu_memory_utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.5}"
+    --vllm_max_model_len "${VLLM_MAX_MODEL_LEN:-16384}"
+    --sleep_level "${VLLM_SLEEP_LEVEL:-1}"
+  )
+fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -66,6 +74,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --loss_scale default \
   --use_vllm true \
   --vllm_mode "$VLLM_MODE" \
+  "${VLLM_COLOCATE_ARGS[@]}" \
   --vllm_server_host "${VLLM_SERVER_HOST:-127.0.0.1}" \
   --vllm_server_port "${VLLM_SERVER_PORT:-8000}" \
   "${MULTI_TURN_ARGS[@]}" \

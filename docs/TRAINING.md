@@ -169,6 +169,17 @@ ms-swift GRPO、查找新 LoRA adapter，并写入 round manifest。配置 hash�
 路径和 ms-swift 版本用于恢复；修改配置后不能从旧 manifest 继续。外部图调用保留 timeout、retry、
 cache 和 trace ID。
 
+默认 4×H100 布局为 actor GPU `0,1,2`、frozen opponent GPU `3`；actor rollout 使用 colocate，
+不另占 GPU。每轮确定性抽取 256 条 Questioner rows 和 256 条 Solver rows，使用
+`rollout_n=4`、`opponent_samples=4`、4096 completion 上限。三轮理论上限为 6144 条 actor
+completions 和 12288 条 opponent completions。详细的一天预算、首轮外推和降级顺序见
+[KQAPro 训练流程：Questioner/Solver self-play](KQAPRO_TRAINING.md#5-questionersolver-self-play)。
+
+4B/80GB 默认采用 `micro_batch_size=4`、`eval_batch_size=8`、
+`gradient_accumulation_steps=2`、`vllm_gpu_memory_utilization=0.6`、
+`vllm_max_model_len=16384` 和 `vllm_sleep_level=1`。三张 actor GPU 的训练有效 batch 为 24，
+采样 batch 为 48；首轮显存监控以及生成/反向传播 OOM 的分别退档方式见上面的 KQAPro 小节。
+
 ## 6. 合并 SFT/GRPO LoRA 权重
 
 训练脚本使用 LoRA，因此 `checkpoint-last` 默认只包含增量 adapter；它不是可以脱离基础模型单独

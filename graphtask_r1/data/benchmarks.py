@@ -394,7 +394,7 @@ def prepare_benchmark(
         if dataset == "ssp":
             parsed = _ssp_rows(payload, split, workers, selected_datasets)
         elif dataset in openqa_datasets:
-            parsed = _openqa_rows(cast(OpenQADataset, dataset), payload, split, workers)
+            parsed = _openqa_rows(dataset, payload, split, workers)
         else:
             parsed = adapters[dataset](payload, split, workers)
         if limit is not None:

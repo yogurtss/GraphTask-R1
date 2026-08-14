@@ -74,6 +74,9 @@ def test_ms_swift_grpo_keeps_rollout_and_trainer_gpus_separate() -> None:
     assert '--model_type "$MODEL_TYPE"' in trainer
     assert 'INTERACTION_MODE="${INTERACTION_MODE:-graphscript}"' in trainer
     assert "export INTERACTION_MODE" in trainer
+    assert "--vllm_gpu_memory_utilization" in trainer
+    assert "--vllm_max_model_len" in trainer
+    assert "--sleep_level" in trainer
     assert "multi_turn_scheduler graphtask_solver" in trainer
     assert "multi_turn_scheduler graphtask_solver" in rollout
 
