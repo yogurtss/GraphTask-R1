@@ -99,7 +99,11 @@ def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
         in training_guide
     )
     assert "## 4. 可选：KQAPro Solver-only GRPO warm-up" in training_guide
-    assert "## 5. 可选：Solver-only GRPO warm-up" in kqapro_guide
+    assert "## 5. Questioner/Solver self-play" in kqapro_guide
+    assert "## 附录 A：可选的 Solver-only GRPO warm-up" in kqapro_guide
+    assert kqapro_guide.index("## 5. Questioner/Solver self-play") < kqapro_guide.index(
+        "## 附录 A：可选的 Solver-only GRPO warm-up"
+    )
     assert "默认直接用 SFT adapter 初始化 self-play" in kqapro_guide
 
 

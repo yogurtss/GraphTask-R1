@@ -5,6 +5,11 @@
 self-play 前置依赖。KILT/OpenQA 使用 GraphScript v0.2 与独立
 checkpoint，不进入本流程。
 
+```text
+默认：Solver SFT → Questioner/Solver self-play → KQAPro val 选模
+可选：Solver SFT → Solver-only GRPO warm-up → self-play → KQAPro val 选模
+```
+
 ## 1. 数据边界与已验证上界
 
 - train 的 question、program、answer 可用于 SFT、GRPO、base task 和 self-play；
@@ -49,19 +54,21 @@ ms-swift 3.6.4 的安装见 [ms-swift 环境说明](MS_SWIFT_CUDA_12_4.md)。
 
 ### 2.1 Qwen3-8B 配置示例
 
-训练入口不依赖固定参数量：基础模型由 `model_path` 和 `model_type` 选择，SFT/GRPO 都采用
+训练入口不依赖固定参数量：基础模型由 `model_path` 和 `model_type` 选择，SFT、self-play
+和可选 Solver-only GRPO 都采用
 LoRA、BF16、gradient checkpointing，因此同一条代码路径可以配置 Qwen3-8B。仓库提供三份仅作
 配置起点的示例：
 
 - `configs/experiments/qwen3_8b_sft_ms_swift_cuda124.yaml`；
-- `configs/experiments/qwen3_8b_solver_grpo_ms_swift_cuda124.yaml`；
+- `configs/experiments/qwen3_8b_solver_grpo_ms_swift_cuda124.yaml`（可选 warm-up）；
 - `configs/evaluation/kqapro_val_qwen3_8b.yaml`。
 
 示例使用官方 [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B)，按一台 4×H100 服务器
 配置，并给出一个 `micro_batch_size=2` 的较大 batch 档位：
 
 - SFT 使用全部 4 张 GPU，`4 × 2 × 8 = 64` 的全局有效 batch；
-- GRPO 使用 GPU 0 运行 rollout server、GPU 1–3 训练；训练 batch、采样 batch 和评测 batch
+- self-play 内部 GRPO 或可选 Solver-only GRPO 使用 GPU 0 运行 rollout server、GPU 1–3 训练；
+  训练 batch、采样 batch 和评测 batch
   分别为 24、24 和 12 completions，每个 prompt 采样 4 条 completion。
 
 该档位没有经过真实训练验证，因此不是显存或吞吐保证；实际可用上限取决于 H100 显存规格、
@@ -95,7 +102,8 @@ micro_batch_size = 1 时：final LR = learning_rate
 不再自动缩放。正式运行前仍应先用目标 tokenizer 做长度 preflight，并从 bounded 数据开始；若
 micro 2 显存不足，改回 1 后 LR 会自动回到基准值。不要通过自动截断丢掉 GraphScript 尾部。
 
-未来实际运行 8B GRPO 时，应先在一个终端用 GPU 0 启动 rollout server，再启动 learner；以下
+未来实际运行 8B self-play 内部 GRPO 或可选 Solver-only GRPO 时，应先在一个终端用 GPU 0
+启动 rollout server，再启动 learner；以下
 只是部署示例，本次配置检查不会执行它：
 
 ```bash
@@ -238,115 +246,7 @@ export GRADIENT_ACCUMULATION_STEPS=16
 若配置启用了 `scale_learning_rate_with_micro_batch`，`learning_rate` 是 micro batch 为 1 的基准；
 micro 大于 1 时 launcher 会线性放大最终 `LR`。显式环境变量 `LR` 始终优先且不会再次缩放。
 
-## 5. 可选：Solver-only GRPO warm-up
-
-默认主线跳过本节，完成 SFT 后直接进入第 6 节。Self-play 自身仍通过 mixed-role GRPO 更新共享
-LoRA；本节只是额外的 Solver-only 强化学习阶段。仅当 SFT Solver 的 GraphScript
-parse/execution/F1 不稳定，或实验需要拆分 Solver RL 与 self-play 增益时使用。
-
-GRPO train rows 只来自 KQAPro train；val rows 只供 rollout evaluation/checkpoint selection：
-
-```bash
-python -m graphtask_r1.cli data export-rl \
-  --input "$KQAPRO_DIR/train/training_tasks.parquet" \
-  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_train.parquet" \
-  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-  --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
-
-python -m graphtask_r1.cli data export-rl \
-  --input "$KQAPRO_DIR/val/training_tasks.parquet" \
-  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet" \
-  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-  --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
-
-export MS_SWIFT_SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
-export SOLVER_RL_TRAIN_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_train.parquet
-export SOLVER_RL_VAL_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet
-export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/grpo/qwen3-4b-kqapro-v03
-export NUM_GPUS=1
-export VLLM_MODE=colocate
-export ROLLOUT_N=2
-export MAX_COMPLETION_LENGTH=4096
-
-python -m graphtask_r1.cli train solver-grpo \
-  --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml --dry-run
-python -m graphtask_r1.cli train solver-grpo \
-  --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml
-```
-
-### GRPO batch 设置
-
-GRPO 配置增加了五个明确字段：
-
-```yaml
-num_gpus: 3
-micro_batch_size: 1
-eval_batch_size: 4
-gradient_accumulation_steps: 4
-steps_per_generation: 4
-rollout_n: 4
-```
-
-这里的 batch 单位是 completion，而不是原始 prompt：
-
-```text
-训练全局 batch = num_gpus × micro_batch_size × gradient_accumulation_steps
-采样 batch     = num_gpus × micro_batch_size × steps_per_generation
-每轮 prompt 数 = 采样 batch ÷ rollout_n
-评测 batch     = num_gpus × eval_batch_size
-```
-
-默认训练和采样 batch 都是 12 completions，每个 prompt 生成 4 条 completion，因此每次采样包含
-3 个 prompt；评测 batch 也是 12。launcher 会提前拒绝不合法组合：`steps_per_generation` 必须是
-`gradient_accumulation_steps` 的整数倍，采样 batch 和评测 batch 都必须能被 `rollout_n` 整除。
-
-单 GPU smoke 可以使用文档上面的 `ROLLOUT_N=2`；若显存不足并把 `EVAL_BATCH_SIZE` 改为 2，
-也应保持 `ROLLOUT_N=2`。常用覆盖示例：
-
-```bash
-export NUM_GPUS=1
-export MICRO_BATCH_SIZE=1
-export EVAL_BATCH_SIZE=2
-export GRADIENT_ACCUMULATION_STEPS=4
-export STEPS_PER_GENERATION=4
-export ROLLOUT_N=2
-```
-
-这些关系遵循 ms-swift 的 completion-level GRPO batch 定义。不要把 `rollout_n` 当成普通训练
-batch；它表示同一个 prompt 的候选 completion 数。
-
-GRPO 使用与 SFT 相同的 micro batch LR 规则。注意 LR 只随 `micro_batch_size` 缩放，不随
-`num_gpus`、`gradient_accumulation_steps` 或 `rollout_n` 自动变化。
-
-以上是单 GPU bounded smoke 参数。确认 parse、execution、reward 分量和显存后，再增加 GPU、
-rollout 数与 completion 上限。正式 server 模式的启动方式见 [训练手册](TRAINING.md)。
-
-### 可选：把 LoRA checkpoint 合并为完整权重
-
-SFT 和 GRPO 默认产出 LoRA adapter。需要独立模型目录用于 SGLang 部署、复制或归档时，应分别
-合并对应 checkpoint；GRPO 合并时不能误用其 SFT 初始化 adapter：
-
-```bash
-export BASE_MODEL=Qwen/Qwen3-4B-Instruct-2507
-
-export SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
-export SFT_MERGED=$PWD/outputs/merged/qwen3-4b-kqapro-sft
-CUDA_VISIBLE_DEVICES=0 swift export \
-  --model "$BASE_MODEL" --adapters "$SFT_ADAPTER" \
-  --merge_lora true --output_dir "$SFT_MERGED"
-
-export GRPO_ADAPTER=$PWD/outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last
-export GRPO_MERGED=$PWD/outputs/merged/qwen3-4b-kqapro-grpo
-CUDA_VISIBLE_DEVICES=0 swift export \
-  --model "$BASE_MODEL" --adapters "$GRPO_ADAPTER" \
-  --merge_lora true --output_dir "$GRPO_MERGED"
-```
-
-完整的产物检查、磁盘注意事项、adapter/merged 等价性 smoke 和部署方式见
-[训练手册：合并 SFT/GRPO LoRA 权重](TRAINING.md#6-合并-sftgrpo-lora-权重)及
-[评测与可视化 README：合并权重后的等价性检查](KQAPRO_EVAL_VIS_README.md#7-合并权重后的等价性检查)。
-
-## 6. Questioner/Solver self-play
+## 5. Questioner/Solver self-play
 
 Questioner seeds 直接从完整 KQAPro 图按 degree 约束确定性采样。这里不传 `--exclude`：seed
 选择既不打开 val 文件，也不读取 val question/program/answer。命令显式固定 v0.3，导出行也会
@@ -361,8 +261,8 @@ python -m graphtask_r1.cli data sample-seeds \
   --relation-catalog "$KQAPRO_DIR/relation_catalog.json"
 ```
 
-默认直接用 SFT adapter 初始化 self-play。Self-play val 必须使用 RL row schema；如果跳过了第 5
-节，先单独导出只读 Solver val。这只是数据格式转换，不会执行 Solver-only GRPO：
+默认直接用 SFT adapter 初始化 self-play。Self-play val 必须使用 RL row schema，因此
+需要先单独导出只读 Solver val。这只是数据格式转换，不会执行 Solver-only GRPO：
 
 ```bash
 python -m graphtask_r1.cli data export-rl \
@@ -385,15 +285,16 @@ python -m graphtask_r1.cli train self-play \
   --output-dir outputs/selfplay/kqapro-v03
 ```
 
-若 SFT 指标不足并运行了第 5 节，可以把 `INITIAL_ADAPTER` 改为对应 Solver GRPO checkpoint；
-这是可选起点。比较“有/无 self-play”时，应固定同一个起始 adapter、base tasks、seed 和验证集。
+若 SFT 指标不足并运行了附录 A 的 Solver-only GRPO，可以把 `INITIAL_ADAPTER` 改为
+对应 GRPO checkpoint。这是可选起点。比较“有/无 self-play”时，应固定同一个起始
+adapter、base tasks、seed 和验证集。
 
 每轮冻结 opponent，认证 Questioner 提案后才执行生成 gold，并按 base/archive/new 比例组装下一轮
 数据。round manifest 保存配置哈希、数据哈希、adapter 和版本；只有配置完全一致时才能 `--resume`。
 Self-play 的同名 batch 字段位于 `configs/training/selfplay.yaml`，默认 actor GPU 为 2 张，因此
 训练 batch 为 8、采样 batch 为 8、评测 batch 为 4，均可按 `rollout_n=4` 正确分组。
 
-## 7. val 选模与提升判定
+## 6. val 选模与提升判定
 
 所有候选 checkpoint 都使用同一份
 `kqapro_graphscript_v03_solver_rl_val.parquet`，报告至少以下指标：
@@ -440,7 +341,8 @@ python -m graphtask_r1.cli evaluate kqapro-val --model-stage grpo \
 
 评测协议有意不同：base 只收到问题、严格答案格式与格式示例，不收到 relation catalog、图工具
 结果或 gold 类型；base_tool 收到 GraphScript 函数说明、handle 规则、四类示例和 catalog，但
-工具失败不回退；SFT 和 GRPO 生成 GraphScript v0.3，由同一个有界执行器访问图，并在 GraphScript
+工具失败不回退；SFT、self-play 和可选 GRPO 都生成 GraphScript v0.3，由同一个有界执行器
+访问图，并在 GraphScript
 请求、解析、版本检查或执行失败时使用同一 checkpoint 再发一次严格直接回答 prompt。
 `predictions.parquet` 会保留 `tool_attempted`、`tool_succeeded`、`fallback_used`、结构化
 `rejection_reason`、程序步骤、support triples 和预算；各目录的 `metrics.json` 报告当前模型的
@@ -496,3 +398,93 @@ make lint
 make typecheck
 make test
 ```
+
+## 附录 A：可选的 Solver-only GRPO warm-up
+
+默认主线不运行本附录。Self-play 自身仍通过 mixed-role GRPO 更新共享 LoRA；这里可选的
+是 self-play 前额外的 Solver-only 强化学习作业。仅当 SFT Solver 的 GraphScript
+parse/execution/F1 不稳定，或需要单独测量 Solver RL 增益时使用。如果使用，应在第 5 节
+self-play 之前运行。
+
+### A.1 数据与训练
+
+GRPO train rows 只来自 KQAPro train；val rows 只供 rollout evaluation/checkpoint selection：
+
+```bash
+python -m graphtask_r1.cli data export-rl \
+  --input "$KQAPRO_DIR/train/training_tasks.parquet" \
+  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_train.parquet" \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
+
+python -m graphtask_r1.cli data export-rl \
+  --input "$KQAPRO_DIR/val/training_tasks.parquet" \
+  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet" \
+  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
+
+export MS_SWIFT_SFT_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/checkpoint-last
+export SOLVER_RL_TRAIN_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_grpo_train.parquet
+export SOLVER_RL_VAL_DATA=$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_rl_val.parquet
+export SOLVER_GRPO_OUTPUT_DIR=$PWD/outputs/grpo/qwen3-4b-kqapro-v03
+export NUM_GPUS=1
+export VLLM_MODE=colocate
+export ROLLOUT_N=2
+export MAX_COMPLETION_LENGTH=4096
+
+python -m graphtask_r1.cli train solver-grpo \
+  --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml --dry-run
+python -m graphtask_r1.cli train solver-grpo \
+  --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml
+```
+
+运行完后，将第 5 节的 `INITIAL_ADAPTER` 指向
+`outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last`。
+
+### A.2 GRPO batch 设置
+
+```yaml
+num_gpus: 3
+micro_batch_size: 1
+eval_batch_size: 4
+gradient_accumulation_steps: 4
+steps_per_generation: 4
+rollout_n: 4
+```
+
+这里的 batch 单位是 completion，而不是原始 prompt：
+
+```text
+训练全局 batch = num_gpus × micro_batch_size × gradient_accumulation_steps
+采样 batch     = num_gpus × micro_batch_size × steps_per_generation
+每轮 prompt 数 = 采样 batch ÷ rollout_n
+评测 batch     = num_gpus × eval_batch_size
+```
+
+默认训练和采样 batch 都是 12 completions，每个 prompt 生成 4 条 completion，因此每次采样包含
+3 个 prompt；评测 batch 也是 12。launcher 会拒绝不合法组合：`steps_per_generation` 必须是
+`gradient_accumulation_steps` 的整数倍，采样 batch 和评测 batch 都必须能被 `rollout_n` 整除。
+
+单 GPU smoke 可使用 `ROLLOUT_N=2`；若把 `EVAL_BATCH_SIZE` 改为 2，也应保持
+`ROLLOUT_N=2`。GRPO 的 LR 只随 `micro_batch_size` 缩放，不随 `num_gpus`、
+`gradient_accumulation_steps` 或 `rollout_n` 自动变化。确认 parse、execution、reward 分量和显存
+后，再增加 GPU、rollout 数与 completion 上限。正式 server 模式见 [训练手册](TRAINING.md)。
+
+### A.3 可选：合并 LoRA checkpoint
+
+SFT 和 GRPO 默认产出 LoRA adapter。需要独立模型目录时，应合并实际需要部署的 checkpoint；
+GRPO 合并时不能误用其 SFT 初始 adapter：
+
+```bash
+export BASE_MODEL=Qwen/Qwen3-4B-Instruct-2507
+export GRPO_ADAPTER=$PWD/outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last
+export GRPO_MERGED=$PWD/outputs/merged/qwen3-4b-kqapro-grpo
+
+CUDA_VISIBLE_DEVICES=0 swift export \
+  --model "$BASE_MODEL" --adapters "$GRPO_ADAPTER" \
+  --merge_lora true --output_dir "$GRPO_MERGED"
+```
+
+完整的产物检查、磁盘注意事项和 adapter/merged 等价性 smoke 见
+[训练手册：合并 SFT/GRPO LoRA 权重](TRAINING.md#6-合并-sftgrpo-lora-权重)及
+[评测与可视化 README：合并权重后的等价性检查](KQAPRO_EVAL_VIS_README.md#7-合并权重后的等价性检查)。
