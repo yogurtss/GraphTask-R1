@@ -164,10 +164,12 @@ python -m graphtask_r1.cli train self-play \
 若有意运行了第 4 节，可选地把 `INITIAL_ADAPTER` 改为 Solver-only GRPO checkpoint；self-play
 其余配置不变。
 
-真实运行每轮会启动一个冻结的 SGLang opponent、组装 questioner/solver mixed Parquet、调用
-ms-swift GRPO、查找新 LoRA adapter，并写入 round manifest。配置 hash、dataset hash、adapter
-路径和 ms-swift 版本用于恢复；修改配置后不能从旧 manifest 继续。外部图调用保留 timeout、retry、
-cache 和 trace ID。
+真实运行每轮会先用 ms-swift 合并基础模型与当前 LoRA，然后让 SGLang 直接加载合并后的冻结
+opponent；SGLang 不使用动态 LoRA 参数。随后组装 questioner/solver mixed Parquet、调用 ms-swift
+GRPO、查找新 LoRA adapter，并写入 round manifest。合并模型保存在
+`round_NNN/opponent_merged/`，日志保存在 `round_NNN/logs/merge.log`。配置 hash、dataset hash、
+adapter 路径和 ms-swift 版本用于恢复；修改配置后不能从旧 manifest 继续。外部图调用保留 timeout、
+retry、cache 和 trace ID。
 
 默认 4×H100 布局为 actor GPU `0,1,2`、frozen opponent GPU `3`；actor rollout 使用 colocate，
 不另占 GPU。每轮确定性抽取 256 条 Questioner rows 和 256 条 Solver rows，使用

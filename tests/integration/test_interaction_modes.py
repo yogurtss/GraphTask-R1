@@ -26,6 +26,7 @@ from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.selfplay import (
     SelfPlayConfig,
     _assemble_dataset,
+    _validate_merged_model,
     load_selfplay_config,
     run_self_play,
 )
@@ -224,6 +225,26 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert "--interaction-mode" in plan["commands"]["opponent"]
     mode_index = plan["commands"]["opponent"].index("--interaction-mode")
     assert plan["commands"]["opponent"][mode_index + 1] == "graphscript"
+    merged_model = str((tmp_path / "run" / "round_001" / "opponent_merged").resolve())
+    assert plan["commands"]["merge"] == [
+        "swift",
+        "export",
+        "--model",
+        "Qwen/Qwen3-4B-Instruct-2507",
+        "--adapters",
+        str((tmp_path / "adapter").resolve()),
+        "--merge_lora",
+        "true",
+        "--output_dir",
+        merged_model,
+    ]
+    assert plan["merged_opponent_model"] == merged_model
+    sglang_command = plan["commands"]["sglang"]
+    assert sglang_command[sglang_command.index("--model-path") + 1] == merged_model
+    assert "--enable-lora" not in sglang_command
+    assert "--lora-paths" not in sglang_command
+    opponent_command = plan["commands"]["opponent"]
+    assert opponent_command[opponent_command.index("--model") + 1] == merged_model
     assert plan["actor_gpus"] == "0,1,2"
     assert plan["opponent_gpus"] == "3"
     assert plan["train_environment"]["TRAIN_CUDA_VISIBLE_DEVICES"] == "0,1,2"
@@ -239,6 +260,19 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
         "actor_completions_upper_bound": 2_048,
         "opponent_completions_upper_bound": 4_096,
     }
+
+
+def test_selfplay_validates_merged_opponent_artifacts(tmp_path: Path) -> None:
+    merged = tmp_path / "opponent_merged"
+    merged.mkdir()
+    with pytest.raises(RuntimeError, match="config.json"):
+        _validate_merged_model(merged)
+
+    (merged / "config.json").write_text("{}")
+    (merged / "tokenizer_config.json").write_text("{}")
+    (merged / "model-00001-of-00002.safetensors").touch()
+
+    _validate_merged_model(merged)
 
 
 def test_interaction_task_selection_and_catalog_are_deterministic(tmp_path: Path) -> None:

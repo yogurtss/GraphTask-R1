@@ -258,6 +258,46 @@ def _adapter_from_checkpoint(round_dir: Path) -> Path:
     return candidates[-1].parent
 
 
+def _validate_merged_model(model_dir: Path) -> None:
+    missing = [
+        name
+        for name in ("config.json", "tokenizer_config.json")
+        if not (model_dir / name).is_file()
+    ]
+    has_weights = any(model_dir.glob("model*.safetensors")) or (
+        model_dir / "model.safetensors.index.json"
+    ).is_file()
+    if not has_weights:
+        missing.append("model*.safetensors")
+    if missing:
+        raise RuntimeError(
+            f"merged opponent model is incomplete under {model_dir}; missing: "
+            + ", ".join(missing)
+        )
+
+
+def _opponent_merge_spec(config: SelfPlayConfig, adapter: Path) -> dict[str, str]:
+    adapter_config = adapter / "adapter_config.json"
+    adapter_weights = adapter / "adapter_model.safetensors"
+    missing = [
+        str(path)
+        for path in (adapter_config, adapter_weights)
+        if not path.is_file()
+    ]
+    if missing:
+        raise RuntimeError("cannot merge incomplete LoRA adapter; missing: " + ", ".join(missing))
+    adapter_config_hash = file_hash(adapter_config)
+    adapter_weights_hash = file_hash(adapter_weights)
+    if adapter_config_hash is None or adapter_weights_hash is None:
+        raise RuntimeError(f"cannot hash LoRA adapter under {adapter}")
+    return {
+        "base_model": config.model_path,
+        "adapter": str(adapter.resolve()),
+        "adapter_config_sha256": adapter_config_hash,
+        "adapter_weights_sha256": adapter_weights_hash,
+    }
+
+
 def _stop(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
@@ -277,13 +317,25 @@ def _commands(
     mixed_data: Path,
     round_dir: Path,
 ) -> dict[str, list[str]]:
-    model_name = "frozen-opponent"
+    merged_model = (round_dir / "opponent_merged").resolve()
+    merge = [
+        "swift",
+        "export",
+        "--model",
+        config.model_path,
+        "--adapters",
+        str(adapter.resolve()),
+        "--merge_lora",
+        "true",
+        "--output_dir",
+        str(merged_model),
+    ]
     sglang = [
         "python",
         "-m",
         "sglang.launch_server",
         "--model-path",
-        config.model_path,
+        str(merged_model),
         "--host",
         "127.0.0.1",
         "--port",
@@ -292,9 +344,6 @@ def _commands(
         "1",
         "--dp-size",
         str(len(_gpu_ids(config.opponent_gpus))),
-        "--enable-lora",
-        "--lora-paths",
-        f"{model_name}={adapter}",
     ]
     opponent = [
         "python",
@@ -303,7 +352,7 @@ def _commands(
         "--model-url",
         f"http://127.0.0.1:{config.sglang_port}",
         "--model",
-        model_name,
+        str(merged_model),
         "--archive",
         str(archive_path),
         "--port",
@@ -322,7 +371,7 @@ def _commands(
     if config.relation_catalog is not None:
         opponent.extend(["--relation-catalog", str(config.relation_catalog)])
     train = ["bash", str(config.train_script)]
-    return {"sglang": sglang, "opponent": opponent, "train": train}
+    return {"merge": merge, "sglang": sglang, "opponent": opponent, "train": train}
 
 
 def run_self_play(
@@ -401,6 +450,7 @@ def run_self_play(
             "train_environment": train_overrides,
             "actor_gpus": config.actor_gpus,
             "opponent_gpus": config.opponent_gpus,
+            "merged_opponent_model": str((round_dir / "opponent_merged").resolve()),
             "interaction_mode": config.interaction_mode,
             "graphscript_version": config.graphscript_version,
             "relation_catalog": str(config.relation_catalog)
@@ -436,6 +486,33 @@ def run_self_play(
         logs = round_dir / "logs"
         logs.mkdir(exist_ok=True)
         opponent_env = {**os.environ, "CUDA_VISIBLE_DEVICES": config.opponent_gpus}
+        merged_model = (round_dir / "opponent_merged").resolve()
+        merge_manifest_path = round_dir / "opponent_merge.json"
+        merge_spec = _opponent_merge_spec(config, adapter)
+        if merged_model.exists():
+            if not merge_manifest_path.is_file() or read_json(merge_manifest_path) != merge_spec:
+                raise RuntimeError(
+                    f"refusing to reuse unverified merged opponent model at {merged_model}; "
+                    "move or remove that directory before retrying"
+                )
+            _validate_merged_model(merged_model)
+        else:
+            merge_log_path = logs / "merge.log"
+            with merge_log_path.open("w") as merge_log:
+                try:
+                    subprocess.run(
+                        commands["merge"],
+                        env=opponent_env,
+                        stdout=merge_log,
+                        stderr=subprocess.STDOUT,
+                        check=True,
+                    )
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    raise RuntimeError(
+                        f"failed to merge frozen opponent model; see {merge_log_path}"
+                    ) from exc
+            _validate_merged_model(merged_model)
+            write_json(merge_manifest_path, merge_spec)
         with (logs / "sglang.log").open("w") as sglang_log:
             sglang_process = subprocess.Popen(
                 commands["sglang"], env=opponent_env, stdout=sglang_log, stderr=subprocess.STDOUT

@@ -292,8 +292,11 @@ python -m graphtask_r1.cli train self-play \
 对应 GRPO checkpoint。这是可选起点。比较“有/无 self-play”时，应固定同一个起始
 adapter、base tasks、seed 和验证集。
 
-每轮冻结 opponent，认证 Questioner 提案后才执行生成 gold，并按 base/archive/new 比例组装下一轮
-数据。round manifest 保存配置哈希、数据哈希、adapter 和版本；只有配置完全一致时才能 `--resume`。
+每轮先用 `swift export --merge_lora true` 将基础模型与当前 adapter 合并到
+`round_NNN/opponent_merged/`，再由 SGLang 直接加载这个完整模型作为冻结 opponent；不向 SGLang
+传递 `--enable-lora` 或 `--lora-paths`。认证 Questioner 提案后才执行生成 gold，并按
+base/archive/new 比例组装下一轮数据。round manifest 保存配置哈希、数据哈希、adapter 和版本；
+只有配置完全一致时才能 `--resume`。
 Self-play 的正式预算字段位于 `configs/training/selfplay.yaml`：
 
 ```yaml
@@ -315,6 +318,9 @@ rollout_n: 4
 ```
 
 GPU 0–2 同时承担共享 actor 的训练和 colocate rollout；GPU 3 只运行冻结 Solver opponent。
+GPU 3 会先完成本轮 LoRA 合并，合并进程退出后再启动 SGLang；合并日志位于
+`round_NNN/logs/merge.log`，SGLang 日志位于 `round_NNN/logs/sglang.log`。每轮保留一份完整合并
+模型，因此三轮运行需额外预留约三份 4B 模型权重的磁盘空间。
 两组 GPU 必须非空、无重复且互不重叠，配置加载时会提前校验。每个 prompt 生成 4 条
 completion。每轮最多包含 512 prompts、2048 条 actor
 completions；只有通过 Questioner 基础认证的 completion 才会触发 opponent，理论上限为 4096 条
