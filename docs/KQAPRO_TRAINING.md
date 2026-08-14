@@ -337,7 +337,9 @@ opponent completions。三轮上限分别为 6144 和 12288。`--dry-run` 的 `r
 `3 × 8 = 24 completions`。相比 micro batch 2 的配置，训练有效 batch 保持 24 不变，但每卡
 micro batch、单次采样和评测吞吐均扩大。4B 模型在 80GB H100 上默认使用 micro batch 4。
 colocate vLLM 使用 60% 显存上限、16384 总上下文，并在反向阶段启用 `sleep_level=1` 释放 vLLM
-cache。该档位面向 80GB H100 的较高利用率，不建议未经实测直接提高到 0.8–0.9。
+cache。colocate 模式不传 `vllm_server_host/port`，因此不会尝试连接 `127.0.0.1:8000`；8000 只属于
+显式 `VLLM_MODE=server` 的独立 rollout 服务。该档位面向 80GB H100 的较高利用率，不建议未经
+实测直接提高到 0.8–0.9。
 
 24 小时是这组 4B/4×H100 参数的目标预算，不是跨驱动、模型和数据环境的硬保证。先完成第 1 轮并
 读取 `round_001/logs/ms_swift.log` 的实际耗时；若超过 7 小时，不要原样启动后两轮，应优先将

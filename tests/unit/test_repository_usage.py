@@ -81,6 +81,46 @@ def test_ms_swift_grpo_keeps_rollout_and_trainer_gpus_separate() -> None:
     assert "multi_turn_scheduler graphtask_solver" in rollout
 
 
+def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_swift = fake_bin / "swift"
+    fake_swift.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE_ARGS"\n')
+    fake_swift.chmod(0o755)
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    train_data = tmp_path / "train.parquet"
+    val_data = tmp_path / "val.parquet"
+    train_data.touch()
+    val_data.touch()
+    script = PROJECT_ROOT / "scripts/train_ms_swift_grpo.sh"
+
+    def launch(mode: str) -> list[str]:
+        capture = tmp_path / f"{mode}.args"
+        environment = {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "CAPTURE_ARGS": str(capture),
+            "LORA_ADAPTER_PATH": str(adapter),
+            "TRAIN_DATA": str(train_data),
+            "VAL_DATA": str(val_data),
+            "OUTPUT_DIR": str(tmp_path / f"output-{mode}"),
+            "VLLM_MODE": mode,
+        }
+        subprocess.run(["bash", str(script)], cwd=PROJECT_ROOT, env=environment, check=True)
+        return capture.read_text().splitlines()
+
+    colocate = launch("colocate")
+    assert "--vllm_gpu_memory_utilization" in colocate
+    assert "--vllm_server_host" not in colocate
+    assert "--vllm_server_port" not in colocate
+
+    server = launch("server")
+    assert server[server.index("--vllm_server_host") + 1] == "127.0.0.1"
+    assert server[server.index("--vllm_server_port") + 1] == "8000"
+    assert "--vllm_gpu_memory_utilization" not in server
+
+
 def test_main_readme_links_dedicated_ms_swift_cuda124_guide() -> None:
     main_readme = (PROJECT_ROOT / "README.md").read_text()
     guide = PROJECT_ROOT / "docs/MS_SWIFT_CUDA_12_4.md"

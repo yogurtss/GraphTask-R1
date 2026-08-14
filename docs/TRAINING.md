@@ -125,6 +125,8 @@ python -m graphtask_r1.cli train solver-grpo \
 确认 smoke test 后再提高 completion length、generation 数和 GPU 数。正式 server 模式先在独立
 GPU 上运行 `scripts/rollout_ms_swift.sh`，再以 `VLLM_MODE=server` 启动 GRPO。GraphScript 是单次
 程序生成，不启用多轮 scheduler；只有显式 `INTERACTION_MODE=tool` 的消融实验才启用它。
+launcher 只在 server 模式传入 `VLLM_SERVER_HOST/PORT`；colocate 模式不会连接默认的
+`127.0.0.1:8000`，而是在训练 GPU 上创建本地 vLLM engine。
 GRPO 的训练、采样与评测 batch 约束见
 [KQAPro 训练流程](KQAPRO_TRAINING.md#grpo-batch-设置)；不合法组合会在启动训练前报错。
 
