@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import subprocess
 import time
 import urllib.request
@@ -44,12 +45,16 @@ class SelfPlayConfig(BaseModel):
     questioner_episodes: int = Field(default=256, gt=0, le=4_096)
     solver_episodes: int = Field(default=256, gt=0)
     opponent_samples: int = Field(default=4, gt=0, le=64)
-    base_ratio: float = 0.35
-    archive_ratio: float = 0.35
-    new_ratio: float = 0.30
+    base_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
+    archive_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
+    new_ratio: float = Field(default=0.30, ge=0.0, le=1.0)
     seed: int = 42
     actor_gpus: str = "0,1,2"
     opponent_gpus: str = "3"
+    allow_gpu_overlap: bool = False
+    use_vllm: bool = True
+    opponent_backend: Literal["sglang", "transformers"] = "sglang"
+    opponent_device: str = "cuda:0"
     sglang_port: int = 30000
     opponent_port: int = 18080
     train_script: Path = Path("scripts/train_ms_swift_grpo.sh")
@@ -88,6 +93,10 @@ class SelfPlayConfig(BaseModel):
                 f"{self.interaction_mode} mode requires "
                 f"program_profile={expected_profile}"
             )
+        if abs(self.base_ratio + self.archive_ratio + self.new_ratio - 1.0) > 1e-9:
+            raise ValueError("base_ratio, archive_ratio, and new_ratio must sum to 1")
+        if self.opponent_backend == "transformers" and self.opponent_samples != 1:
+            raise ValueError("the deterministic Transformers opponent requires opponent_samples=1")
         if self.vllm_max_model_len <= self.max_completion_tokens:
             raise ValueError(
                 "vllm_max_model_len must exceed max_completion_tokens to leave room "
@@ -102,10 +111,15 @@ class SelfPlayConfig(BaseModel):
         ):
             raise ValueError("actor_gpus and opponent_gpus cannot contain duplicate GPU IDs")
         overlap = sorted(set(actor_ids) & set(opponent_ids))
-        if overlap:
+        if overlap and not self.allow_gpu_overlap:
             raise ValueError(
                 "actor_gpus and opponent_gpus must be disjoint; overlap: "
                 + ", ".join(overlap)
+            )
+        if overlap and (self.use_vllm or self.opponent_backend != "transformers"):
+            raise ValueError(
+                "overlapping GPUs require use_vllm=false and "
+                "opponent_backend=transformers"
             )
         actor_count = len(actor_ids)
         generation_batch = actor_count * self.micro_batch_size * self.steps_per_generation
@@ -248,14 +262,27 @@ def _wait_for(url: str, *, timeout_s: int) -> None:
     raise RuntimeError(f"service did not become healthy: {url}") from last_error
 
 
-def _adapter_from_checkpoint(round_dir: Path) -> Path:
-    candidates = sorted(
-        round_dir.rglob("adapter_model.safetensors"),
-        key=lambda path: path.stat().st_mtime,
-    )
+def _checkpoint_step(path: Path) -> int:
+    for parent in path.parents:
+        match = re.fullmatch(r"checkpoint-(\d+)", parent.name)
+        if match:
+            return int(match.group(1))
+        if parent.name.startswith("round_"):
+            break
+    return -1
+
+
+def _adapter_from_checkpoint(
+    round_dir: Path, *, known_adapters: frozenset[Path] = frozenset()
+) -> Path:
+    candidates = [
+        path
+        for path in round_dir.rglob("adapter_model.safetensors")
+        if path.resolve() not in known_adapters
+    ]
     if not candidates:
-        raise RuntimeError(f"ms-swift did not emit a LoRA adapter under {round_dir}")
-    return candidates[-1].parent
+        raise RuntimeError(f"ms-swift did not emit a new LoRA adapter under {round_dir}")
+    return max(candidates, key=lambda path: (_checkpoint_step(path), str(path))).parent
 
 
 def _validate_merged_model(model_dir: Path) -> None:
@@ -374,6 +401,17 @@ def _commands(
         "--max-completion-tokens",
         str(config.max_completion_tokens),
     ]
+    if config.opponent_backend == "transformers":
+        sglang = []
+        model_url_index = opponent.index("--model-url")
+        del opponent[model_url_index : model_url_index + 2]
+        opponent.extend(
+            [
+                "--local-model",
+                "--device",
+                config.opponent_device,
+            ]
+        )
     if config.interaction_mode == "graphscript" or config.program_profile == "graphscript_v0_1":
         opponent.extend(["--max-edge-visits", str(config.max_edge_visits)])
     if config.relation_catalog is not None:
@@ -442,6 +480,7 @@ def run_self_play(
             "VLLM_MAX_MODEL_LEN": str(config.vllm_max_model_len),
             "VLLM_GPU_MEMORY_UTILIZATION": str(config.vllm_gpu_memory_utilization),
             "VLLM_SLEEP_LEVEL": str(config.vllm_sleep_level),
+            "USE_VLLM": str(config.use_vllm).lower(),
             "OUTPUT_DIR": str(round_dir.resolve()),
             "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
             "INTERACTION_MODE": config.interaction_mode,
@@ -458,6 +497,9 @@ def run_self_play(
             "train_environment": train_overrides,
             "actor_gpus": config.actor_gpus,
             "opponent_gpus": config.opponent_gpus,
+            "allow_gpu_overlap": config.allow_gpu_overlap,
+            "use_vllm": config.use_vllm,
+            "opponent_backend": config.opponent_backend,
             "merged_opponent_model": str((round_dir / "opponent_merged").resolve()),
             "interaction_mode": config.interaction_mode,
             "graphscript_version": config.graphscript_version,
@@ -490,6 +532,9 @@ def run_self_play(
         if dry_run:
             continue
         round_dir.mkdir(parents=True, exist_ok=True)
+        known_adapters = frozenset(
+            path.resolve() for path in round_dir.rglob("adapter_model.safetensors")
+        )
         write_json(round_dir / "plan.json", plan)
         logs = round_dir / "logs"
         logs.mkdir(exist_ok=True)
@@ -521,15 +566,21 @@ def run_self_play(
                     ) from exc
             _validate_merged_model(merged_model)
             write_json(merge_manifest_path, merge_spec)
-        with (logs / "sglang.log").open("w") as sglang_log:
-            sglang_process = subprocess.Popen(
-                commands["sglang"], env=opponent_env, stdout=sglang_log, stderr=subprocess.STDOUT
-            )
+        sglang_process: subprocess.Popen[Any] | None = None
+        if commands["sglang"]:
+            with (logs / "sglang.log").open("w") as sglang_log:
+                sglang_process = subprocess.Popen(
+                    commands["sglang"],
+                    env=opponent_env,
+                    stdout=sglang_log,
+                    stderr=subprocess.STDOUT,
+                )
         try:
-            _wait_for(
-                f"http://127.0.0.1:{config.sglang_port}/health",
-                timeout_s=config.sglang_start_timeout_s,
-            )
+            if sglang_process is not None:
+                _wait_for(
+                    f"http://127.0.0.1:{config.sglang_port}/health",
+                    timeout_s=config.sglang_start_timeout_s,
+                )
             with (logs / "opponent.log").open("w") as opponent_log:
                 opponent_process = subprocess.Popen(
                     commands["opponent"],
@@ -540,19 +591,26 @@ def run_self_play(
             try:
                 _wait_for(opponent_url + "/health", timeout_s=60)
                 train_env = {**os.environ, **train_overrides}
-                with (logs / "ms_swift.log").open("w") as train_log:
-                    subprocess.run(
-                        commands["train"],
-                        env=train_env,
-                        stdout=train_log,
-                        stderr=subprocess.STDOUT,
-                        check=True,
-                    )
+                train_log_path = logs / "ms_swift.log"
+                with train_log_path.open("w") as train_log:
+                    try:
+                        subprocess.run(
+                            commands["train"],
+                            env=train_env,
+                            stdout=train_log,
+                            stderr=subprocess.STDOUT,
+                            check=True,
+                        )
+                    except (OSError, subprocess.CalledProcessError) as exc:
+                        raise RuntimeError(
+                            f"self-play GRPO training failed; see {train_log_path}"
+                        ) from exc
             finally:
                 _stop(opponent_process)
         finally:
-            _stop(sglang_process)
-        adapter = _adapter_from_checkpoint(round_dir)
+            if sglang_process is not None:
+                _stop(sglang_process)
+        adapter = _adapter_from_checkpoint(round_dir, known_adapters=known_adapters)
         write_json(
             round_dir / "manifest.json",
             {

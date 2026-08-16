@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -127,7 +128,7 @@ class FrozenSolverService:
     def __init__(
         self,
         *,
-        model_url: str,
+        model_url: str | None,
         model: str,
         archive_path: Path,
         max_turns: int = 8,
@@ -138,10 +139,16 @@ class FrozenSolverService:
         max_follow_limit: int = 100,
         max_edge_visits: int | None = None,
         max_completion_tokens: int = 32_768,
+        local_model: bool = False,
+        device: str = "cuda:0",
     ) -> None:
         if not 1 <= max_completion_tokens <= 40_960:
             raise ValueError("max_completion_tokens must be between 1 and 40960")
-        self.model_url = model_url.rstrip("/")
+        if local_model and interaction_mode != "graphscript":
+            raise ValueError("the local Transformers opponent supports graphscript mode only")
+        if not local_model and not model_url:
+            raise ValueError("model_url is required unless local_model is enabled")
+        self.model_url = model_url.rstrip("/") if model_url else None
         self.model = model
         self.archive = TaskArchive(archive_path)
         self.max_turns = max_turns
@@ -152,6 +159,10 @@ class FrozenSolverService:
         self.max_follow_limit = max_follow_limit
         self.max_edge_visits = max_edge_visits
         self.max_completion_tokens = max_completion_tokens
+        self.local_model = local_model
+        self.device = device
+        self._local_tokenizer: Any | None = None
+        self._local_generator: Any | None = None
         self.backends: dict[str, GraphBackend] = {}
 
     def backend(self, snapshot: str) -> GraphBackend:
@@ -162,8 +173,14 @@ class FrozenSolverService:
     async def _completion(
         self, messages: list[dict[str, Any]], *, use_tools: bool
     ) -> dict[str, Any]:
+        if self.local_model:
+            if use_tools:
+                raise ValueError("the local Transformers opponent does not support tools")
+            return await asyncio.to_thread(self._local_completion, messages)
         import aiohttp
 
+        if self.model_url is None:  # guarded in __init__; keeps the type contract explicit
+            raise RuntimeError("remote opponent model URL is not configured")
         timeout = aiohttp.ClientTimeout(total=self.request_timeout_s)
         payload = {
             "model": self.model,
@@ -182,6 +199,49 @@ class FrozenSolverService:
             if response.status != 200:
                 raise OpponentUnavailable(f"SGLang returned {response.status}: {body}")
             return dict(body["choices"][0]["message"])
+
+    def _load_local_model(self) -> tuple[Any, Any]:
+        if self._local_tokenizer is None or self._local_generator is None:
+            import torch
+            from transformers import (  # type: ignore[import-not-found]
+                AutoModelForCausalLM,
+                AutoTokenizer,
+            )
+
+            self._local_tokenizer = AutoTokenizer.from_pretrained(self.model)
+            self._local_generator = AutoModelForCausalLM.from_pretrained(
+                self.model,
+                torch_dtype=torch.bfloat16,
+            ).to(self.device)
+            self._local_generator.generation_config.temperature = None
+            self._local_generator.generation_config.top_p = None
+            self._local_generator.generation_config.top_k = None
+            self._local_generator.eval()
+        return self._local_tokenizer, self._local_generator
+
+    def _local_completion(self, messages: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        import torch
+
+        tokenizer, model = self._load_local_model()
+        template_kwargs = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "enable_thinking": False,
+        }
+        prompt = tokenizer.apply_chat_template(list(messages), **template_kwargs)
+        inputs = tokenizer(prompt, return_tensors="pt").to(self.device)
+        with torch.inference_mode():
+            output = model.generate(
+                **inputs,
+                do_sample=False,
+                max_new_tokens=self.max_completion_tokens,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        generated = output[0, inputs["input_ids"].shape[1] :]
+        return {
+            "role": "assistant",
+            "content": tokenizer.decode(generated, skip_special_tokens=True),
+        }
 
     @staticmethod
     def _arguments(tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -575,8 +635,10 @@ def create_app(service: FrozenSolverService) -> Any:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="graphtask-opponent")
-    parser.add_argument("--model-url", required=True)
+    parser.add_argument("--model-url")
     parser.add_argument("--model", required=True)
+    parser.add_argument("--local-model", action="store_true")
+    parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
@@ -601,7 +663,11 @@ def main() -> int:
         max_follow_limit=args.max_follow_limit,
         max_edge_visits=args.max_edge_visits,
         max_completion_tokens=args.max_completion_tokens,
+        local_model=args.local_model,
+        device=args.device,
     )
+    if args.local_model:
+        service._load_local_model()
     web.run_app(create_app(service), host=args.host, port=args.port)
     return 0
 

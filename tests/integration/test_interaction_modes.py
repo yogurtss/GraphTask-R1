@@ -25,7 +25,9 @@ from graphtask_r1.training.relations import build_relation_catalog, load_relatio
 from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.selfplay import (
     SelfPlayConfig,
+    _adapter_from_checkpoint,
     _assemble_dataset,
+    _commands,
     _validate_merged_model,
     load_selfplay_config,
     run_self_play,
@@ -345,6 +347,9 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     assert config.opponent_samples == 4
     assert config.actor_gpus == "0,1,2"
     assert config.opponent_gpus == "3"
+    assert config.allow_gpu_overlap is False
+    assert config.use_vllm is True
+    assert config.opponent_backend == "sglang"
     assert config.max_completion_tokens == 4_096
     assert config.vllm_max_model_len == 16_384
     assert config.vllm_gpu_memory_utilization == 0.6
@@ -370,6 +375,68 @@ def test_selfplay_rejects_overlapping_actor_and_opponent_gpus() -> None:
         )
 
 
+def test_selfplay_allows_explicit_single_gpu_transformers_smoke() -> None:
+    config = SelfPlayConfig.model_validate(
+        {
+            "initial_adapter": "adapter",
+            "base_tasks": "tasks.parquet",
+            "val_data": "val.parquet",
+            "questioner_seeds": "seeds.parquet",
+            "actor_gpus": "0",
+            "opponent_gpus": "0",
+            "allow_gpu_overlap": True,
+            "use_vllm": False,
+            "opponent_backend": "transformers",
+            "opponent_samples": 1,
+            "micro_batch_size": 1,
+            "eval_batch_size": 2,
+            "gradient_accumulation_steps": 1,
+            "steps_per_generation": 2,
+            "rollout_n": 2,
+        }
+    )
+
+    commands = _commands(
+        config,
+        adapter=Path("adapter"),
+        archive_path=Path("archive.sqlite"),
+        mixed_data=Path("mixed.parquet"),
+        round_dir=Path("round"),
+    )
+    assert config.actor_gpus == "0"
+    assert config.opponent_gpus == "0"
+    assert config.allow_gpu_overlap is True
+    assert config.use_vllm is False
+    assert config.opponent_backend == "transformers"
+    assert commands["sglang"] == []
+    assert "--local-model" in commands["opponent"]
+    assert "--model-url" not in commands["opponent"]
+
+
+@pytest.mark.parametrize(
+    ("use_vllm", "opponent_backend"),
+    [(True, "transformers"), (False, "sglang")],
+)
+def test_selfplay_rejects_unsafe_single_gpu_overlap(
+    use_vllm: bool, opponent_backend: str
+) -> None:
+    with pytest.raises(ValueError, match="overlapping GPUs require"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "actor_gpus": "0",
+                "opponent_gpus": "0",
+                "allow_gpu_overlap": True,
+                "use_vllm": use_vllm,
+                "opponent_backend": opponent_backend,
+                "opponent_samples": 1,
+            }
+        )
+
+
 def test_selfplay_reserves_vllm_context_for_the_prompt() -> None:
     with pytest.raises(ValueError, match="must exceed max_completion_tokens"):
         SelfPlayConfig.model_validate(
@@ -382,6 +449,36 @@ def test_selfplay_reserves_vllm_context_for_the_prompt() -> None:
                 "vllm_max_model_len": 4_096,
             }
         )
+
+
+def test_selfplay_requires_mixture_ratios_to_sum_to_one() -> None:
+    with pytest.raises(ValueError, match="must sum to 1"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "base_ratio": 0.8,
+                "archive_ratio": 0.3,
+                "new_ratio": 0.0,
+            }
+        )
+
+
+def test_selfplay_retry_selects_only_new_highest_checkpoint(tmp_path: Path) -> None:
+    stale = tmp_path / "v0" / "checkpoint-99" / "adapter_model.safetensors"
+    fresh_low = tmp_path / "v1" / "checkpoint-1" / "adapter_model.safetensors"
+    fresh_high = tmp_path / "v1" / "checkpoint-2" / "adapter_model.safetensors"
+    for path in (stale, fresh_low, fresh_high):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+    selected = _adapter_from_checkpoint(
+        tmp_path, known_adapters=frozenset({stale.resolve()})
+    )
+
+    assert selected == fresh_high.parent
 
 
 def test_default_selfplay_file_uses_kqapro_snapshot() -> None:

@@ -188,6 +188,17 @@ completions 和 12288 条 opponent completions。详细的一天预算、首轮�
 `vllm_max_model_len=16384` 和 `vllm_sleep_level=1`。三张 actor GPU 的训练有效 batch 为 24，
 采样 batch 为 48；首轮显存监控以及生成/反向传播 OOM 的分别退档方式见上面的 KQAPro 小节。
 
+### 单卡 Qwen3-0.6B smoke
+
+`configs/training/selfplay_qwen3_0_6b_smoke.yaml` 用于 ToyGraph 上的两轮最小链路检查。它显式使用
+`use_vllm=false` 和进程内 Transformers frozen opponent，因此不需要安装 vLLM/SGLang。单卡重叠
+只有在 `allow_gpu_overlap=true`、`opponent_backend=transformers`、`use_vllm=false` 同时成立时才会
+通过配置验证；该 opponent 是确定性生成，所以 `opponent_samples` 必须为 1。此配置只验证 LoRA
+合并、mixed-role reward、checkpoint 传递和恢复，不替代 KQAPro v0.3 的正式训练或模型质量评测。
+
+运行前把 `SMOKE_MODEL_PATH` 指向本地 `Qwen/Qwen3-0.6B`，并设置配置中其余数据与 adapter 环境
+变量。GRPO 启动脚本会预检 `math_verify`；缺失时会在加载模型前快速失败。
+
 ## 6. 合并 SFT/GRPO LoRA 权重
 
 训练脚本使用 LoRA，因此 `checkpoint-last` 默认只包含增量 adapter；它不是可以脱离基础模型单独

@@ -23,14 +23,24 @@ if [[ "$VLLM_MODE" != "server" && "$VLLM_MODE" != "colocate" ]]; then
   echo "VLLM_MODE must be server or colocate" >&2
   exit 2
 fi
+USE_VLLM="${USE_VLLM:-true}"
+if [[ "$USE_VLLM" != "true" && "$USE_VLLM" != "false" ]]; then
+  echo "USE_VLLM must be true or false" >&2
+  exit 2
+fi
 VLLM_COLOCATE_ARGS=()
 VLLM_SERVER_ARGS=()
-if [[ "$VLLM_MODE" == "server" ]]; then
+VLLM_MODE_ARGS=()
+if [[ "$USE_VLLM" == "false" ]]; then
+  :
+elif [[ "$VLLM_MODE" == "server" ]]; then
+  VLLM_MODE_ARGS=(--vllm_mode "$VLLM_MODE")
   VLLM_SERVER_ARGS=(
     --vllm_server_host "${VLLM_SERVER_HOST:-127.0.0.1}"
     --vllm_server_port "${VLLM_SERVER_PORT:-8000}"
   )
 else
+  VLLM_MODE_ARGS=(--vllm_mode "$VLLM_MODE")
   VLLM_COLOCATE_ARGS=(
     --vllm_gpu_memory_utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.5}"
     --vllm_max_model_len "${VLLM_MAX_MODEL_LEN:-16384}"
@@ -44,6 +54,10 @@ export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if ! command -v swift >/dev/null 2>&1; then
   echo "ms-swift CLI not found; install the optional vLLM GRPO environment first" >&2
+  exit 2
+fi
+if ! python -c 'import math_verify' >/dev/null 2>&1; then
+  echo "math_verify is required by ms-swift GRPO; install it in the training environment" >&2
   exit 2
 fi
 if [[ ! -d "$LORA_ADAPTER_PATH" ]]; then
@@ -78,8 +92,8 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --reward_funcs graphtask_score \
   --agent_template hermes \
   --loss_scale default \
-  --use_vllm true \
-  --vllm_mode "$VLLM_MODE" \
+  --use_vllm "$USE_VLLM" \
+  "${VLLM_MODE_ARGS[@]}" \
   "${VLLM_COLOCATE_ARGS[@]}" \
   "${VLLM_SERVER_ARGS[@]}" \
   "${MULTI_TURN_ARGS[@]}" \
