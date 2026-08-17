@@ -270,6 +270,7 @@ def plot_selfplay_report(report: Mapping[str, Any], output_path: Path) -> None:
         ("questioner", "validity", "Questioner validity"),
         ("questioner", "frontier", "Questioner frontier"),
         ("questioner", "novelty", "Questioner novelty"),
+        ("questioner", "target_alignment", "Questioner target alignment"),
         ("questioner", "opponent_success_rate", "Frozen Solver success"),
         ("solver", "f1", "Solver F1"),
         ("solver", "exact_match", "Solver exact match"),

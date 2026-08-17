@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections.abc import Iterable, Mapping, Sized
 from pathlib import Path
@@ -18,6 +19,7 @@ from graphtask_r1.training.questioner_context import (
     build_questioner_seed_context,
     render_questioner_seed_payload,
 )
+from graphtask_r1.training.questioner_sampling import select_questioner_tasks
 from graphtask_r1.training.relations import require_catalog_covers_program
 from graphtask_r1.utils import ParquetRowWriter, ProgressLogger, file_hash, write_json
 
@@ -339,41 +341,17 @@ def export_questioner_sft_dataset(
     relation_catalog: tuple[RelationInfo, ...] = (),
     relation_catalogs: Mapping[str, tuple[RelationInfo, ...]] | None = None,
 ) -> dict[str, int]:
-    """Deterministically reservoir-sample an exact Questioner-only SFT set."""
-    if count < 1:
-        raise ValueError("Questioner SFT count must be positive")
-    rng = random.Random(seed)
-    reservoir: list[tuple[int, TrainingTask]] = []
-    scanned = 0
-    eligible = 0
-    progress = ProgressLogger("data.sample_questioner_sft")
-    progress.start(requested=count, seed=seed, eligibility="single_seed")
-    for index, task in enumerate(tasks):
-        scanned = index + 1
-        if len(task.topic_entities) != 1:
-            progress.update(scanned, eligible=eligible, selected=len(reservoir))
-            continue
-        eligible += 1
-        item = (index, task)
-        if len(reservoir) < count:
-            reservoir.append(item)
-            progress.update(scanned, eligible=eligible, selected=len(reservoir))
-            continue
-        replacement = rng.randrange(eligible)
-        if replacement < count:
-            reservoir[replacement] = item
-        progress.update(scanned, eligible=eligible, selected=len(reservoir))
-    progress.finish(scanned, eligible=eligible, selected=min(eligible, count))
-    if eligible < count:
-        raise ValueError(
-            f"requested {count} Questioner SFT rows, but only {eligible} "
-            "single-seed tasks are eligible"
-        )
-    selected = [task for _, task in sorted(reservoir, key=lambda value: value[0])]
+    """Deterministically select target-structured Questioner-only SFT rows."""
+    selected, sampling = select_questioner_tasks(
+        tasks,
+        count=count,
+        seed=seed,
+        selection_mode="random",
+    )
     rows = export_sft_dataset(
         selected,
         output_path,
-        total=count,
+        total=len(selected),
         include_questioner=True,
         include_solver=False,
         seed=seed,
@@ -382,13 +360,24 @@ def export_questioner_sft_dataset(
         relation_catalog=relation_catalog,
         relation_catalogs=relation_catalogs,
     )
-    metrics = {"scanned": scanned, "eligible": eligible, "selected": rows, "seed": seed}
+    metric_names = (
+        "scanned",
+        "requested",
+        "eligible",
+        "unique_selected",
+        "repeated_rows",
+        "shortfall",
+        "selected",
+        "seed",
+    )
+    metrics = {key: int(sampling[key]) for key in metric_names}
+    if rows != metrics["selected"]:
+        raise RuntimeError("Questioner export row count differs from sampler selection")
     write_json(
         output_path.with_suffix(".metrics.json"),
         {
-            **metrics,
+            **sampling,
             "role": "questioner",
-            "sampler": "single-seed-reservoir-v1",
             "selected_task_ids": [task.task_id for task in selected],
         },
     )
@@ -401,8 +390,10 @@ def combine_sft_datasets(
     output_path: Path,
     *,
     seed: int,
+    solver_weight: int | None = None,
+    questioner_weight: int | None = None,
 ) -> dict[str, int]:
-    """Validate role-isolated SFT files, deterministically shuffle, and combine them."""
+    """Validate, optionally balance without replacement, shuffle, and combine SFT rows."""
     solver = pq.read_table(solver_path)
     questioner = pq.read_table(questioner_path)
     required = set(SFT_SCHEMA.names)
@@ -416,9 +407,34 @@ def combine_sft_datasets(
         roles = {str(value) for value in table["role"].to_pylist()}
         if roles != {role}:
             raise ValueError(f"{path} must contain only role={role}, found {sorted(roles)}")
+    input_solver_rows = len(solver)
+    input_questioner_rows = len(questioner)
+    if (solver_weight is None) != (questioner_weight is None):
+        raise ValueError("solver_weight and questioner_weight must be provided together")
+    rng = random.Random(seed)
+    if solver_weight is not None and questioner_weight is not None:
+        if solver_weight < 1 or questioner_weight < 1:
+            raise ValueError("SFT role weights must be positive")
+        divisor = math.gcd(solver_weight, questioner_weight)
+        solver_weight //= divisor
+        questioner_weight //= divisor
+        groups = min(
+            input_solver_rows // solver_weight,
+            input_questioner_rows // questioner_weight,
+        )
+        if groups < 1:
+            raise ValueError(
+                "not enough unique SFT rows to satisfy the requested Solver:Questioner ratio"
+            )
+        solver_target = groups * solver_weight
+        questioner_target = groups * questioner_weight
+        solver_indices = sorted(rng.sample(range(input_solver_rows), solver_target))
+        questioner_indices = sorted(rng.sample(range(input_questioner_rows), questioner_target))
+        solver = solver.take(pa.array(solver_indices, type=pa.int64()))
+        questioner = questioner.take(pa.array(questioner_indices, type=pa.int64()))
     combined = pa.concat_tables([solver, questioner], promote_options="default")
     order = list(range(len(combined)))
-    random.Random(seed).shuffle(order)
+    rng.shuffle(order)
     combined = combined.take(pa.array(order, type=pa.int64()))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(combined, output_path)
@@ -427,6 +443,10 @@ def combine_sft_datasets(
         "questioner": len(questioner),
         "total": len(combined),
         "seed": seed,
+        "solver_input_rows": input_solver_rows,
+        "questioner_input_rows": input_questioner_rows,
+        "solver_dropped": input_solver_rows - len(solver),
+        "questioner_dropped": input_questioner_rows - len(questioner),
     }
     write_json(
         output_path.with_suffix(".metrics.json"),
@@ -436,6 +456,8 @@ def combine_sft_datasets(
             "solver_sha256": file_hash(solver_path),
             "questioner_input": str(questioner_path),
             "questioner_sha256": file_hash(questioner_path),
+            "solver_weight": solver_weight,
+            "questioner_weight": questioner_weight,
         },
     )
     return metrics

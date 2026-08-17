@@ -178,11 +178,17 @@ def test_questioner_reward_records_frozen_solver_success(
                 "opponent_url": "http://unused",
                 "opponent_samples": 2,
                 "round": 1,
+                "source_stratum": (
+                    "roots=1-1|terminal=hop|nodes=1-3|"
+                    "ops=entity,hop|answers=entity"
+                ),
             },
         )
     )
 
     assert score["opponent_success_rate"] == 0.5
+    assert score["target_alignment"] == 1.0
+    assert score["target_terminal_match"] == 1.0
 
 
 def test_program_converter_rejects_non_chain_program() -> None:

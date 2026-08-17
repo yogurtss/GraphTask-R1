@@ -70,6 +70,7 @@ def render_questioner_seed_payload(
         "Seed metadata exposes only labels, types, and bounded relation IDs; "
         "it does not expose answers.",
     ]
+    multiple_seeds = len(contexts) > 1
     for index, context in enumerate(contexts):
         entity_id = str(context.get("entity_id", "")).strip()
         if not entity_id:
@@ -89,7 +90,8 @@ def render_questioner_seed_payload(
                 "- required_root_op: "
                 + '{"op":"resolve_entity","query":'
                 + _json_string(entity_id)
-                + f',"match":"id","limit":1,"out":"h{index}"}}',
+                + ',"match":"id","limit":1,"out":'
+                + ('"<fresh_handle>"}' if multiple_seeds else f'"h{index}"}}'),
             ]
         )
     return "\n".join(lines)

@@ -18,6 +18,7 @@ from graphtask_r1.schema import AnswerSet, TaskProposal
 from graphtask_r1.training.opponent import request_opponent
 from graphtask_r1.training.parsing import parse_solver_output, parse_task_proposal
 from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode
+from graphtask_r1.training.questioner_sampling import target_structure_alignment
 from graphtask_r1.verification import verify_task
 
 
@@ -38,6 +39,7 @@ async def compute_score(
     if data_source == "graphtask/questioner":
         try:
             graph_usage: dict[str, float] = {}
+            proposal_answers: AnswerSet | None = None
             if interaction_mode == "graphscript":
                 topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
                 raw_version = str(info.get("graphscript_version", "0.1"))
@@ -75,6 +77,7 @@ async def compute_score(
                         "bounded GraphScript result differs from certified Program execution",
                     )
                 proposal = TaskProposal(topic_entities=topic_ids, program=execution.program)
+                proposal_answers = execution.answers
                 graph_usage = {
                     "edge_visits": float(execution.usage.edge_visits),
                     "graph_calls": float(execution.usage.graph_calls),
@@ -122,6 +125,8 @@ async def compute_score(
                         "program_operators": float(execution.usage.operators),
                     }
             validate_proposal(proposal)
+            if proposal_answers is None:
+                proposal_answers = backend.execute_program(proposal.program)
             question = verbalize(proposal.program, backend)
             result = verify_task(question, proposal.program, backend)
             if result.passed:
@@ -156,14 +161,25 @@ async def compute_score(
                 pass_rate = float(evaluation["pass_rate"])
             else:
                 pass_rate = 0.0
+            alignment_components: dict[str, float] = {}
+            source_stratum = str(info.get("source_stratum") or "")
+            if source_stratum:
+                alignment_components = target_structure_alignment(
+                    source_stratum,
+                    program=proposal.program,
+                    root_count=len(proposal.topic_entities),
+                    answers=proposal_answers,
+                )
             reward = challenger_reward(
                 result,
                 pass_rate=pass_rate,
                 cost=program_cost(proposal.program),
+                target_alignment=alignment_components.get("target_alignment"),
             )
             return {
                 "score": reward.total * role_weight,
                 "opponent_success_rate": pass_rate,
+                **alignment_components,
                 **reward.components,
                 **graph_usage,
             }

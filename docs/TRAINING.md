@@ -56,7 +56,8 @@ Parquet 或旧 Questioner seed。主路径统一使用一键脚本；先修改�
 export TRAIN_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
 export VAL_TASKS=$PWD/data/processed/kqapro/kqapro-v1/val/tasks.parquet
 export WORK_DIR=$PWD/outputs/sft-data
-export SOLVER_RATIO=9
+export GRAPH_DB_PATH=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+export SOLVER_RATIO=1
 export QUESTIONER_RATIO=1
 export MODEL_PATH=/path/to/local/model
 
@@ -64,13 +65,29 @@ bash scripts/prepare_mixed_sft_data.sh
 source "$WORK_DIR/sft_data.env"
 ```
 
-比例按最终训练行数定义：`9:1` 约等于 90% Solver + 10% Questioner。脚本保留全部 Solver 行，
-根据其实际行数确定性计算 Questioner 数量；设置正整数 `QUESTIONER_COUNT_OVERRIDE` 可改为固定数量。
+比例按最终训练行数定义：默认 `1:1` 让 Solver 与 Questioner 获得相同训练曝光。脚本先导出全部
+Solver 候选行，再根据实际可用数量无放回下采样较多的角色；设置正整数
+`QUESTIONER_COUNT_OVERRIDE` 可改为固定的 Questioner 目标数量。
 脚本会将角色隔离的原始文件、拒绝原因、summary 和最终 accepted 文件全部保存在 `WORK_DIR`，并以
 `--require-all` 预检保证比例不会因静默过滤而漂移。底层 `data export-sft`、
 `data export-questioner-sft` 和 `data combine-sft` 仍可用于单步排障。
 
-该接口不依赖 KQAPro 名称：任意后端只要实现 `GraphBackend`、提供 certified single-seed tasks 与
+Questioner SFT 不限定单 seed，但只对真实 explicit-root tasks 做固定 seed 的随机无放回抽样。
+无显式实体根的任务仍被拒绝，因为 Questioner 禁止无界 `all_entities` 起步。若目标数超过
+唯一容量，导出器使用全部合格 Questioner 并记录 `shortfall`；混合器同步下采样 Solver，
+使最终行数严格满足 `SOLVER_RATIO:QUESTIONER_RATIO`。整个 SFT 不重复任何行。
+
+脚本还生成 `questioner-seeds.parquet`；self-play seed 才按 root 数、operator set、程序节点数、
+terminal operator 和答案类型做比例分层。它只保留 root metadata，不泄漏 source program 或
+gold answer，默认不裁剪多 entity root 数。真实模板和 32K GRPO context 负责长度质量门。
+
+sampling metrics 直接统计精确 entity 数、root bucket、terminal、路径长度、答案类型与
+operator 覆盖率；同时为每个联合 stratum 写入 `source_fraction` 与 `final_fraction`，并用
+`distribution_total_variation` 汇总整体偏差。Self-play seed 的 `source_stratum` 只进入 reward metadata，
+不会拼进 prompt；认证后的生成程序得到 `target_alignment`，该分量参与 Questioner reward，并由
+self-play report 单独绘图。这样保留 novelty/frontier 探索，同时避免合成路径长期漂离真实 train。
+
+该接口不依赖 KQAPro 名称：任意后端只要实现 `GraphBackend`、提供 certified explicit-root tasks 与
 relation catalog，即可复用同一个 Questioner 导出器。运行时 prompt 只描述通用 GraphScript 合约；
 数据集/快照名称留在数据配置中。Questioner seed metadata 只包含 ID、label、type 和有界 relation
 IDs，不包含邻居实体或答案。

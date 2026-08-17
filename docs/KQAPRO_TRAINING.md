@@ -180,28 +180,39 @@ Solver 与 Questioner 使用独立导出入口和独立 Parquet。由于两种�
 export TRAIN_TASKS="$KQAPRO_DIR/train/tasks.parquet"
 export VAL_TASKS="$KQAPRO_DIR/val/tasks.parquet"
 export WORK_DIR=$PWD/outputs/sft-data
+export GRAPH_DB_PATH="$KQAPRO_DIR/graph.sqlite"
 export MODEL_PATH=/path/to/local/model
-export SOLVER_RATIO=9
+export SOLVER_RATIO=1
 export QUESTIONER_RATIO=1
 
 bash scripts/prepare_mixed_sft_data.sh
 source "$WORK_DIR/sft_data.env"
 ```
 
-`9:1` 按最终 SFT 行数解释为约 90% Solver + 10% Questioner。脚本保留全部 Solver 行，再根据实际
-行数计算 Questioner 数量；例如 Solver 为 19,941 条时，Questioner 会取约 2,216 条。若实验要求
-固定数量而不是固定比例，可在开头设置：
+默认 `1:1` 让 Solver 与 Questioner 获得相同训练曝光。脚本先导出全部 Solver 候选行，
+混合时再从较多的角色无放回下采样。若实验要求固定 Questioner 目标数量，可在开头设置：
 
 ```bash
 export QUESTIONER_COUNT_OVERRIDE=2048
 ```
 
-脚本内部的 Questioner 入口只选择恰好一个显式 entity root 的任务，使 SFT 与 self-play 的单 seed
-Questioner 分布一致。
-Questioner prompt 会包含 seed 的 ID、label、type 和有界 incoming/outgoing relation IDs，但不包含
-相邻实体或 gold answer；required root 固定为
-`resolve_entity(query=<entity_id>, match="id", limit=1)`。自然语言 prompt 不再使用“v0.3”作为说明性
-术语，只在机器可解析 JSON 的 `"version":"0.3"` 字段中保留版本。
+Questioner SFT 不再只选单 seed，而是对所有具有显式 entity roots 的认证任务做固定 seed
+的随机无放回抽样。单根、双根和更高阶多根任务都可进入；只有 0-root、依赖 `all_entities`
+起步的任务暂不进入 Questioner。若 1:1 目标超过唯一 explicit-root 容量，脚本使用全部
+合格 Questioner，再无放回下采样 Solver 到相同数量；不重复数据，且最终角色比例仍为 1:1。
+
+脚本同时生成 `questioner-seeds.parquet` 供 self-play 使用。它保留真实多 entity 分布，不设置默认
+root 数硬上限；每个 root 只暴露 ID、label、type 和有界 incoming/outgoing relation IDs，不包含
+source program、相邻实体或 gold answer。每个 root 都必须使用
+`resolve_entity(query=<entity_id>, match="id", limit=1)`，SSA 输出 handle 可按实际程序依赖自由分配。
+自然语言 prompt 不再使用“v0.3”作为说明性术语，只在机器可解析 JSON 的 `"version":"0.3"` 字段中
+保留版本。32K 模板预检和 GRPO context 负责拦截真正过长的样本。
+
+导出 metrics 会统计真实 train 与最终 Questioner 行的精确 entity 数、terminal、路径长度、
+答案类型、operator 覆盖率、strata 占比和
+`distribution_total_variation`。Self-play reward 使用 seed metadata 中隐藏的 `source_stratum`，按
+root bucket、terminal、程序长度、operator Jaccard 和答案类型计算 `target_alignment`；它不向模型
+暴露 source program，但会把合成路径拉回真实分布，并作为 Questioner 曲线写入每轮 report。
 
 训练集混合后一次预检，rejected Parquet 仍保留每行角色，便于区分 Solver/Questioner 问题；
 `--require-all` 会在任何一行失败时停止，避免比例静默漂移。val 始终保持 Solver-only，用于选择 QA
@@ -256,23 +267,23 @@ micro 大于 1 时 launcher 会线性放大最终 `LR`。显式环境变量 `LR`
 
 ## 5. Questioner/Solver self-play
 
-Questioner seeds 直接从完整 KQAPro 图按 degree 约束确定性采样。必须用当前代码重新生成旧 seed
-Parquet，因为新格式额外记录 answer-free 的 label、type、局部 relation IDs 和 required root。这里
-不传 `--exclude`：seed
-选择既不打开 val 文件，也不读取 val question/program/answer。命令显式固定 v0.3，导出行也会
-记录 `graphscript_version`、`operator_set` 和 `program_profile`。
+Questioner seeds 从 certified train tasks 的显式 roots 导出，与 SFT 共用真实结构分布采样器。
+必须用当前代码重新生成旧 seed Parquet，因为新格式保留多 roots，还额外记录
+answer-free 的 label、type、局部 relation IDs 与隐藏 `source_stratum`。该命令只读 train，不打开
+val 文件，也不把 source program 或 gold answer 写入 prompt。
 
 ```bash
-python -m graphtask_r1.cli data sample-seeds \
-  --snapshot kqapro-v1 \
+python -m graphtask_r1.cli data export-questioner-seeds \
+  --input "$KQAPRO_DIR/train/training_tasks.parquet" \
   --output "$KQAPRO_TRAINING/kqapro_questioner_seeds.parquet" \
-  --count 4096 --pool-limit 100000 --seed 42 \
+  --count 4096 --seed 42 \
   --max-seed-neighbor-facts 200 --max-seed-relations 64 \
   --interaction-mode graphscript --graphscript-version 0.3 \
   --relation-catalog "$KQAPRO_DIR/relation_catalog.json"
 ```
 
-4096 是可复用的 seed pool，不代表每轮全部进入训练。裸 `Q...` ID 对图后端有意义，但对模型缺少
+4096 是可复用的 seed pool，不代表每轮全部进入训练。若请求数超过 unique explicit-root
+容量，导出器直接按唯一容量截断并记录 `shortfall`。裸 `Q...` ID 对图后端有意义，但对模型缺少
 语义，因此 prompt 同时提供实体 label/type 和最多 64 个有界局部 relation IDs，不暴露邻居实体或
 答案。默认 4×H100/24 小时预算配置每轮只按显式 seed 和 round index 确定性抽取 256 条
 Questioner rows；完整 pool 用于跨轮保持覆盖度。

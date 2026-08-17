@@ -578,7 +578,9 @@ PY
    `all_entities` 绕过 seed。
 4. 设置 `SOLVER_RATIO`、`QUESTIONER_RATIO` 后运行 `scripts/prepare_mixed_sft_data.sh`，从认证
    program 重新生成双角色数据并训练共享 LoRA；需要固定数量时用
-   `QUESTIONER_COUNT_OVERRIDE=N`，不要继续使用旧 Solver-only adapter。
+   `QUESTIONER_COUNT_OVERRIDE=N`。确认多 entity root 分布与真实 train 一致，并检查 Questioner
+   metrics 中的 `unique_selected`、`shortfall`、`repeated_rows=0` 和 `strata`；不要继续
+   使用旧 Solver-only adapter。
 5. 将 reward 改为可区分的阶段信号：非 JSON、额外字段、schema、shape/handle、可执行、认证/F1。
    保留最终严格认证目标，不把无效程序当作成功。
 6. 重新运行小规模 smoke；只有同一 prompt group 出现 `unique_rewards>1`，且 generation step 出现

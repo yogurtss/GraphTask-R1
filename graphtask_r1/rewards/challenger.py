@@ -4,7 +4,15 @@ from graphtask_r1.rewards.frontier import frontier_reward
 from graphtask_r1.schema import RewardBreakdown, VerifierResult
 
 
-def challenger_reward(result: VerifierResult, *, pass_rate: float, cost: float) -> RewardBreakdown:
+def challenger_reward(
+    result: VerifierResult,
+    *,
+    pass_rate: float,
+    cost: float,
+    target_alignment: float | None = None,
+) -> RewardBreakdown:
+    if target_alignment is not None and not 0.0 <= target_alignment <= 1.0:
+        raise ValueError("target_alignment must be between 0 and 1")
     validity = float(result.passed)
     components = {
         "validity": validity,
@@ -15,14 +23,24 @@ def challenger_reward(result: VerifierResult, *, pass_rate: float, cost: float) 
         "answer_leak_penalty": -float(result.answer_leak),
         "cost_penalty": -0.02 * cost,
     }
-    total = (
-        validity
-        * (
+    if target_alignment is None:
+        quality = (
             0.30 * components["frontier"]
             + 0.30 * components["necessity"]
             + 0.20 * components["novelty"]
             + 0.20
         )
+    else:
+        components["target_alignment"] = target_alignment if validity else 0.0
+        quality = (
+            0.25 * components["frontier"]
+            + 0.25 * components["necessity"]
+            + 0.15 * components["novelty"]
+            + 0.15 * components["target_alignment"]
+            + 0.20
+        )
+    total = (
+        validity * quality
         + components["shortcut_penalty"]
         + components["answer_leak_penalty"]
         + components["cost_penalty"]

@@ -52,11 +52,15 @@ def test_prepare_mixed_sft_script_computes_questioner_count_from_ratio(
     assert result.returncode == 0, result.stderr
     commands = capture.read_text()
     assert "data export-questioner-sft" in commands
+    assert "data export-questioner-seeds" in commands
     assert "--count 10" in commands
+    assert "--allow-oversample" not in commands
+    assert "--solver-weight 9 --questioner-weight 1" in commands
     assert "Solver=90 Questioner=10 Total=100" in result.stdout
     env_file = (work_dir / "sft_data.env").read_text()
     assert "SFT_TRAIN_DATA=" in env_file
     assert "SFT_VAL_DATA=" in env_file
+    assert "QUESTIONER_SEEDS=" in env_file
 
 
 def test_prepare_mixed_sft_script_exact_count_overrides_ratio(tmp_path: Path) -> None:

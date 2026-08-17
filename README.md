@@ -83,7 +83,8 @@ make test
 export TRAIN_TASKS=/path/to/train/tasks.parquet
 export VAL_TASKS=/path/to/val/tasks.parquet
 export WORK_DIR=$PWD/outputs/sft-data
-export SOLVER_RATIO=9
+export GRAPH_DB_PATH=/path/to/graph.sqlite
+export SOLVER_RATIO=1
 export QUESTIONER_RATIO=1
 export MODEL_PATH=/path/to/model
 ```
@@ -94,9 +95,17 @@ source outputs/sft-data/sft_data.env
 ```
 
 该脚本依次完成 deep audit、training view、relation catalog、双角色导出、按比例混合及真实训练模板
-预检。`9:1` 表示最终约 90% Solver、10% Questioner；若需要固定 Questioner 数量，设置
-`QUESTIONER_COUNT_OVERRIDE`。预检默认要求所有行通过，以免过滤后静默改变比例。确认数据后再启动
-SFT；`--dry-run` 只打印实际训练脚本和环境变量：
+预检，并从 certified train tasks 生成 self-play seed pool。默认 `1:1` 表示 Solver 与 Questioner
+训练曝光相同；若需要固定 Questioner 数量，设置 `QUESTIONER_COUNT_OVERRIDE`。SFT 只从
+真实 explicit-root tasks 中按固定 seed 随机抽取唯一行，不重复；任一角色数据不足时，
+脚本同步下采样另一角色，保持最终 Solver:Questioner 比例。metrics 同时记录精确 entity
+数、terminal、路径长度、答案类型、operator
+覆盖率、真实/导出 strata 占比及
+`distribution_total_variation`。Self-play seed 则按真实结构分层，并将隐藏的
+`source_stratum` 交给 reward（不进入模型 prompt），生成程序按 root、terminal、长度、operator 和
+答案类型计算 `target_alignment`，使合成任务向真实 train 分布靠拢；该指标也会写入日志曲线。预检
+默认要求所有行通过，以免过滤后静默改变比例。确认数据后再启动 SFT；`--dry-run` 只打印实际训练
+脚本和环境变量：
 
 ```bash
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b

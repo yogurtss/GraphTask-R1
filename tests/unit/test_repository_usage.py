@@ -175,7 +175,7 @@ def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
     assert "scripts/prepare_mixed_sft_data.sh" in main_readme
     assert "scripts/prepare_mixed_sft_data.sh" in training_guide
     assert "scripts/prepare_mixed_sft_data.sh" in kqapro_guide
-    assert "SOLVER_RATIO=9" in kqapro_guide
+    assert "SOLVER_RATIO=1" in kqapro_guide
     assert "QUESTIONER_RATIO=1" in kqapro_guide
     assert "QUESTIONER_COUNT_OVERRIDE=2048" in kqapro_guide
 

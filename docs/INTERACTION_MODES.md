@@ -51,7 +51,7 @@ GraphScript 行加载后不附加 tool schema。`tool` 行则由
 ```bash
 export TRAIN_TASKS=/path/to/train/tasks.parquet
 export VAL_TASKS=/path/to/val/tasks.parquet
-export SOLVER_RATIO=9
+export SOLVER_RATIO=1
 export QUESTIONER_RATIO=1
 export MODEL_PATH=/path/to/model
 bash scripts/prepare_mixed_sft_data.sh

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -7,12 +8,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from graphtask_r1.data import select_graphscript_tasks
-from graphtask_r1.data.seeds import sample_questioner_seeds
+from graphtask_r1.data.seeds import export_questioner_task_seeds, sample_questioner_seeds
 from graphtask_r1.generation import certify_proposal
 from graphtask_r1.graph import InMemoryGraphBackend, toy_graph
 from graphtask_r1.schema import (
     Entity,
     Hop,
+    QueryRelation,
     RelationInfo,
     TaskCertificate,
     TaskProposal,
@@ -21,6 +23,7 @@ from graphtask_r1.schema import (
 )
 from graphtask_r1.training.ms_swift_data import convert_rl_row
 from graphtask_r1.training.opponent import FrozenSolverService
+from graphtask_r1.training.questioner_sampling import select_questioner_tasks
 from graphtask_r1.training.relations import build_relation_catalog, load_relation_catalog
 from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.selfplay import (
@@ -56,6 +59,20 @@ def _catalog() -> tuple[RelationInfo, ...]:
     return (
         RelationInfo(relation_id="located_in", label="located in"),
         RelationInfo(relation_id="works_at", label="works at"),
+    )
+
+
+def _multi_root_task() -> TaskCertificate:
+    return certify_proposal(
+        TaskProposal(
+            topic_entities=("acme", "alice"),
+            program=QueryRelation(
+                subject=Entity(entity_id="alice"),
+                object=Entity(entity_id="acme"),
+            ),
+        ),
+        toy_graph(),
+        graph_snapshot="toy-v1",
     )
 
 
@@ -787,7 +804,16 @@ def test_questioner_sft_has_independent_exact_count_and_combines_with_solver(
         graphscript_version="0.3",
         relation_catalog=_catalog(),
     )
-    assert metrics == {"scanned": 5, "eligible": 5, "selected": 2, "seed": 7}
+    assert metrics == {
+        "scanned": 5,
+        "requested": 2,
+        "eligible": 5,
+        "unique_selected": 2,
+        "repeated_rows": 0,
+        "shortfall": 0,
+        "selected": 2,
+        "seed": 7,
+    }
     questioner_rows = pq.read_table(questioner_path).to_pylist()
     assert len(questioner_rows) == 2
     assert {row["role"] for row in questioner_rows} == {"questioner"}
@@ -814,7 +840,221 @@ def test_questioner_sft_has_independent_exact_count_and_combines_with_solver(
         == 5
     )
     combined = combine_sft_datasets(solver_path, questioner_path, mixed_path, seed=11)
-    assert combined == {"solver": 5, "questioner": 2, "total": 7, "seed": 11}
+    assert combined == {
+        "solver": 5,
+        "questioner": 2,
+        "total": 7,
+        "seed": 11,
+        "solver_input_rows": 5,
+        "questioner_input_rows": 2,
+        "solver_dropped": 0,
+        "questioner_dropped": 0,
+    }
     roles = pq.read_table(mixed_path)["role"].to_pylist()
     assert roles.count("solver") == 5
     assert roles.count("questioner") == 2
+
+
+def test_questioner_sft_random_sample_is_deterministic_and_without_replacement(
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskTrainingRecord.model_validate(
+            _task().model_copy(update={"task_id": f"task-{index}"}).model_dump(mode="json")
+        )
+        for index in range(5)
+    ]
+    first_path = tmp_path / "questioner-first.parquet"
+    second_path = tmp_path / "questioner-second.parquet"
+
+    first = export_questioner_sft_dataset(
+        tasks,
+        first_path,
+        count=2,
+        seed=7,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+    )
+    second = export_questioner_sft_dataset(
+        tasks,
+        second_path,
+        count=2,
+        seed=7,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+    )
+
+    assert first == {
+        "scanned": 5,
+        "requested": 2,
+        "eligible": 5,
+        "unique_selected": 2,
+        "repeated_rows": 0,
+        "shortfall": 0,
+        "selected": 2,
+        "seed": 7,
+    }
+    assert second == first
+    first_ids = pq.read_table(first_path)["task_id"].to_pylist()
+    second_ids = pq.read_table(second_path)["task_id"].to_pylist()
+    assert first_ids == second_ids
+    assert len(first_ids) == len(set(first_ids)) == 2
+
+
+def test_questioner_sft_and_selfplay_seeds_preserve_multi_root_tasks(
+    tmp_path: Path,
+) -> None:
+    tasks = [_task(), _multi_root_task()]
+    sft_path = tmp_path / "questioner.parquet"
+    seeds_path = tmp_path / "questioner-seeds.parquet"
+
+    metrics = export_questioner_sft_dataset(
+        tasks,
+        sft_path,
+        count=2,
+        seed=7,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+    )
+    seed_metrics = export_questioner_task_seeds(
+        tasks,
+        seeds_path,
+        count=2,
+        seed=7,
+        relation_catalog=_catalog(),
+        graphscript_version="0.3",
+    )
+
+    assert metrics["eligible"] == 2
+    assert seed_metrics["eligible"] == 2
+    sft_rows = pq.read_table(sft_path).to_pylist()
+    multi_sft = next(row for row in sft_rows if row["task_id"] == tasks[1].task_id)
+    prompt = multi_sft["messages"][1]["content"]
+    completion = json.loads(multi_sft["messages"][-1]["content"])
+    resolve_ids = {
+        op["query"] for op in completion["ops"] if op["op"] == "resolve_entity"
+    }
+    assert "Seed 1:" in prompt and "Seed 2:" in prompt
+    assert '"out":"<fresh_handle>"' in prompt
+    assert resolve_ids == {"alice", "acme"}
+
+    seed_rows = pq.read_table(seeds_path).to_pylist()
+    multi_seed = next(row for row in seed_rows if len(row["extra_info"]["topic_entity_ids"]) == 2)
+    assert set(multi_seed["extra_info"]["topic_entity_ids"]) == {"alice", "acme"}
+    serialized = json.dumps(multi_seed, ensure_ascii=False)
+    assert '"program"' not in serialized
+    assert '"gold_answers"' not in serialized
+
+
+def test_questioner_sampling_preserves_source_root_proportions() -> None:
+    single = _task()
+    multi = _multi_root_task()
+    tasks = [
+        TaskTrainingRecord.model_validate(
+            single.model_copy(update={"task_id": f"single-{index}"}).model_dump(mode="json")
+        )
+        for index in range(8)
+    ] + [
+        TaskTrainingRecord.model_validate(
+            multi.model_copy(update={"task_id": f"multi-{index}"}).model_dump(mode="json")
+        )
+        for index in range(2)
+    ]
+
+    selected, metrics = select_questioner_tasks(tasks, count=5, seed=7)
+
+    assert Counter(len(task.topic_entities) for task in selected) == {1: 4, 2: 1}
+    assert metrics["eligible"] == 10
+    assert metrics["unique_selected"] == 5
+    assert metrics["distribution_total_variation"] == 0.0
+    assert metrics["marginals"]["root_count"] == {
+        "1": {
+            "source": 8,
+            "source_prevalence": 0.8,
+            "final_selected": 4,
+            "final_prevalence": 0.8,
+        },
+        "2": {
+            "source": 2,
+            "source_prevalence": 0.2,
+            "final_selected": 1,
+            "final_prevalence": 0.2,
+        },
+    }
+    assert metrics["marginals"]["operator_presence"]["entity"] == {
+        "source": 10,
+        "source_prevalence": 1.0,
+        "final_selected": 5,
+        "final_prevalence": 1.0,
+    }
+
+
+def test_questioner_sft_caps_at_unique_tasks_without_repeating_by_default(
+    tmp_path: Path,
+) -> None:
+    task = TaskTrainingRecord.model_validate(_task().model_dump(mode="json"))
+
+    metrics = export_questioner_sft_dataset(
+        [task],
+        tmp_path / "questioner.parquet",
+        count=2,
+        seed=7,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+    )
+
+    assert metrics["requested"] == 2
+    assert metrics["selected"] == 1
+    assert metrics["repeated_rows"] == 0
+    assert metrics["shortfall"] == 1
+    assert pq.ParquetFile(tmp_path / "questioner.parquet").metadata.num_rows == 1
+
+
+def test_combine_sft_downsamples_without_replacement_to_exact_role_ratio(
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskTrainingRecord.model_validate(
+            _task().model_copy(update={"task_id": f"task-{index}"}).model_dump(mode="json")
+        )
+        for index in range(5)
+    ]
+    solver_path = tmp_path / "solver.parquet"
+    questioner_path = tmp_path / "questioner.parquet"
+    output_path = tmp_path / "mixed.parquet"
+    export_sft_dataset(
+        tasks,
+        solver_path,
+        include_questioner=False,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+    )
+    export_questioner_sft_dataset(
+        tasks[:2],
+        questioner_path,
+        count=2,
+        seed=7,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+    )
+
+    metrics = combine_sft_datasets(
+        solver_path,
+        questioner_path,
+        output_path,
+        seed=11,
+        solver_weight=1,
+        questioner_weight=1,
+    )
+
+    assert metrics["solver"] == 2
+    assert metrics["questioner"] == 2
+    assert metrics["solver_dropped"] == 3
+    rows = pq.read_table(output_path).to_pylist()
+    assert len({row["task_id"] for row in rows if row["role"] == "solver"}) == 2

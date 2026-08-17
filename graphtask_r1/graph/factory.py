@@ -14,15 +14,16 @@ def backend_from_snapshot(snapshot: str) -> GraphBackend:
         return toy_graph()
     if snapshot == "kqapro-v1":
         path = Path(
-            os.environ.get("GRAPHTASK_KQAPRO_DB", "data/processed/kqapro/kqapro-v1/graph.sqlite")
+            os.environ.get("GRAPHTASK_KQAPRO_DB")
+            or os.environ.get("GRAPHTASK_GRAPH_DB")
+            or "data/processed/kqapro/kqapro-v1/graph.sqlite"
         )
         return SQLiteGraphBackend(path, snapshot_id=snapshot)
     if snapshot == "kilt-2019-08-01-v1":
         path = Path(
-            os.environ.get(
-                "GRAPHTASK_KILT_DB",
-                "data/processed/kilt/kilt-2019-08-01-v1/graph.sqlite",
-            )
+            os.environ.get("GRAPHTASK_KILT_DB")
+            or os.environ.get("GRAPHTASK_GRAPH_DB")
+            or "data/processed/kilt/kilt-2019-08-01-v1/graph.sqlite"
         )
         return SQLiteGraphBackend(path, snapshot_id=snapshot)
     if snapshot == "freebase-v1":

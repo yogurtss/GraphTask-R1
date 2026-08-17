@@ -140,7 +140,7 @@ def test_sft_export_accepts_graphscript_v02() -> None:
     assert args.graphscript_version == "0.2"
 
 
-def test_questioner_sft_export_is_independent_and_requires_exact_count() -> None:
+def test_questioner_sft_export_and_balanced_combine_options() -> None:
     args = build_parser().parse_args(
         [
             "data",
@@ -170,10 +170,34 @@ def test_questioner_sft_export_is_independent_and_requires_exact_count() -> None
             "questioner.parquet",
             "--output",
             "mixed.parquet",
+            "--solver-weight",
+            "1",
+            "--questioner-weight",
+            "1",
         ]
     )
     assert combined.solver_input == Path("solver.parquet")
     assert combined.questioner_input == Path("questioner.parquet")
+    assert combined.solver_weight == 1
+    assert combined.questioner_weight == 1
+
+    seeds = build_parser().parse_args(
+        [
+            "data",
+            "export-questioner-seeds",
+            "--input",
+            "tasks.parquet",
+            "--output",
+            "seeds.parquet",
+            "--count",
+            "4096",
+            "--relation-catalog",
+            "relations.json",
+        ]
+    )
+    assert seeds.count == 4096
+    assert seeds.max_topic_entities is None
+    assert seeds.graphscript_version == "0.3"
 
 
 def test_questioner_sft_cli_exports_requested_rows(tmp_path: Path) -> None:

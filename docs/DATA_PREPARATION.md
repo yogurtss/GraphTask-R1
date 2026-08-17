@@ -140,24 +140,33 @@ version。val 不抽样。默认 `--verification-mode source --trace-mode none` 
 export TRAIN_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
 export VAL_TASKS=$PWD/data/processed/kqapro/kqapro-v1/val/tasks.parquet
 export WORK_DIR=$PWD/outputs/sft-data
-export SOLVER_RATIO=9
+export GRAPH_DB_PATH=$PWD/data/processed/kqapro/kqapro-v1/graph.sqlite
+export SOLVER_RATIO=1
 export QUESTIONER_RATIO=1
 export MODEL_PATH=/path/to/local/model
 bash scripts/prepare_mixed_sft_data.sh
 ```
 
-这里的 `9:1` 表示最终训练集约 90% Solver + 10% Questioner。脚本保留全部 Solver 行并自动计算
-Questioner 数量；需要精确指定数量时设置 `QUESTIONER_COUNT_OVERRIDE=N`。完成后执行
+默认 `1:1` 表示 Solver 与 Questioner 训练曝光相同。脚本先导出全部 Solver 候选行并自动
+计算 Questioner 目标数量；需要精确指定数量时设置 `QUESTIONER_COUNT_OVERRIDE=N`。混合时
+才根据实际可用量对较多的角色下采样。完成后执行
 `source "$WORK_DIR/sft_data.env"` 即可获得训练需要的 `SFT_TRAIN_DATA` 和 `SFT_VAL_DATA`。
+Questioner SFT 只从真实 explicit-root tasks 中随机抽取唯一行。若 Questioner 不足，导出器
+按实际容量截断，混合器再无放回下采样 Solver，保持设定的最终角色比例，不重复任何 SFT
+行。Self-play pool 另外按真实结构分层并且不含 source program 或 gold。
+同一文件还保存精确 entity 数、terminal、路径长度、答案类型、operator 覆盖率，以及
+真实/导出 strata 占比与 `distribution_total_variation`，用于判断合成数据是否偏离
+真实 root、operator、路径长度、terminal 和答案类型分布。
 
 脚本内部的 `audit --deep` 检查完整 `TaskCertificate` 并生成不含 witness 的 training view；它不重复
 执行 program，因为 gold 和 source answer 对账已由 `data prepare` 完成。`--scope graph` 从
 `graph.sqlite` 生成固定的完整 relation allowlist，不依赖小样本覆盖率。
 
 `export-questioner-sft` 是 snapshot-neutral 的独立入口：它只要求 certified task、对应
-`GraphBackend` 和 relation catalog。它用实例级 RNG 对单 seed tasks 做确定性 reservoir sampling，
-输出行数必须等于 `--count`，不足时直接失败。Questioner prompt 仅加入实体 label、type 和有界局部
-relation IDs，不写入邻居实体或答案；根操作固定按 ID 解析。预检后使用 `data combine-sft` 将角色
+`GraphBackend` 和 relation catalog。它对全部 explicit-root tasks 做可回放的随机无放回抽样；不足
+`--count` 时输出所有合格唯一行，并在 metrics 记录 `shortfall`。Questioner prompt 仅加入实体 label、
+type 和有界局部 relation IDs，不写入邻居实体、source program 或答案；根操作固定按 ID 解析。
+预检后使用 `data combine-sft` 将角色
 隔离的 accepted 文件确定性混合，详见 [训练手册](TRAINING.md#2-sft-长度预检)。
 
 必须检查 `metrics.json` 中的接受率和各 reason code。`SOURCE_ANSWER_MISMATCH`、

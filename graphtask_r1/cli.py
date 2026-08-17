@@ -20,6 +20,7 @@ from graphtask_r1.archive import TaskArchive
 from graphtask_r1.data import (
     audit_records,
     bootstrap_kilt_grpo,
+    export_questioner_task_seeds,
     merge_denylists,
     prepare_benchmark,
     prepare_kilt,
@@ -292,7 +293,32 @@ def build_parser() -> argparse.ArgumentParser:
     combine_sft.add_argument("--questioner-input", type=Path, required=True)
     combine_sft.add_argument("--output", type=Path, required=True)
     combine_sft.add_argument("--seed", type=int, default=42)
+    combine_sft.add_argument("--solver-weight", type=_positive_int)
+    combine_sft.add_argument("--questioner-weight", type=_positive_int)
     combine_sft.add_argument("--dry-run", action="store_true")
+
+    task_seeds = data_actions.add_parser("export-questioner-seeds")
+    task_seeds.add_argument("--input", type=Path, required=True)
+    task_seeds.add_argument("--output", type=Path, required=True)
+    task_seeds.add_argument("--count", type=_positive_int, required=True)
+    task_seeds.add_argument("--relation-catalog", type=Path, required=True)
+    task_seeds.add_argument("--opponent-url")
+    task_seeds.add_argument("--opponent-samples", type=_positive_int, default=8)
+    task_seeds.add_argument("--max-seed-neighbor-facts", type=_positive_int, default=200)
+    task_seeds.add_argument("--max-seed-relations", type=_positive_int, default=64)
+    task_seeds.add_argument("--max-topic-entities", type=_positive_int)
+    task_seeds.add_argument("--max-follow-limit", type=_positive_int, default=100)
+    task_seeds.add_argument("--max-edge-visits", type=_positive_int, default=200)
+    task_seeds.add_argument("--max-returned-entities", type=_positive_int, default=1_000)
+    task_seeds.add_argument(
+        "--interaction-mode", choices=["tool", "graphscript"], default="graphscript"
+    )
+    task_seeds.add_argument(
+        "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.3"
+    )
+    task_seeds.add_argument("--seed", type=int, default=42)
+    task_seeds.add_argument("--allow-oversample", action="store_true")
+    task_seeds.add_argument("--dry-run", action="store_true")
 
     seeds = data_actions.add_parser("sample-seeds")
     seeds.add_argument("--snapshot", default="kqapro-v1")
@@ -764,6 +790,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = {
                 "solver_rows": pq.ParquetFile(args.solver_input).metadata.num_rows,
                 "questioner_rows": pq.ParquetFile(args.questioner_input).metadata.num_rows,
+                "solver_weight": args.solver_weight,
+                "questioner_weight": args.questioner_weight,
                 "seed": args.seed,
                 "output": str(args.output),
             }
@@ -773,8 +801,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.questioner_input,
                 args.output,
                 seed=args.seed,
+                solver_weight=args.solver_weight,
+                questioner_weight=args.questioner_weight,
             )
             result = {**metrics, "output": str(args.output)}
+    elif args.group == "data" and args.action == "export-questioner-seeds":
+        if args.dry_run:
+            result = {
+                "would_scan": record_count(args.input),
+                "would_select": args.count,
+                "allow_oversample": args.allow_oversample,
+                "output": str(args.output),
+            }
+        else:
+            seed_tasks, _ = _iter_training_tasks(args.input, None)
+            result = export_questioner_task_seeds(
+                seed_tasks,
+                args.output,
+                count=args.count,
+                seed=args.seed,
+                relation_catalog=load_relation_catalog(args.relation_catalog),
+                allow_oversample=args.allow_oversample,
+                opponent_url=args.opponent_url,
+                opponent_samples=args.opponent_samples,
+                interaction_mode=args.interaction_mode,
+                graphscript_version=args.graphscript_version,
+                max_follow_limit=args.max_follow_limit,
+                max_edge_visits=args.max_edge_visits,
+                max_returned_entities=args.max_returned_entities,
+                max_seed_neighbor_facts=args.max_seed_neighbor_facts,
+                max_seed_relations=args.max_seed_relations,
+                max_topic_entities=args.max_topic_entities,
+            )
     elif args.group == "data" and args.action == "sample-seeds":
         result = sample_questioner_seeds(
             args.snapshot,
