@@ -275,7 +275,7 @@ rg -n "Trainable|trainable|model_parameter_info" \
   "$SELFPLAY_ROUND_DIR/logs/ms_swift.log" | tail -n 10
 ```
 
-比较连续 checkpoint 的 adapter hash：
+先比较连续 checkpoint 的 adapter hash：
 
 ```bash
 find "$SELFPLAY_TRAINER_DIR" -path '*/checkpoint-*/adapter_model.safetensors' \
@@ -285,7 +285,7 @@ find "$SELFPLAY_TRAINER_DIR" -path '*/checkpoint-*/adapter_model.safetensors' \
 判定：
 
 - 连续 checkpoint hash 完全相同：参数没有变化，`grad_norm=0` 是真实 no-op。
-- hash 不同：参数发生变化；检查 `grad_norm` 是否只对应特定 accumulation/logging step。
+- hash 不同：只能说明文件字节不同，不能单独证明 tensor 已更新；继续执行第 14 节的逐 tensor 比较。
 - 没有 trainable parameter 或 adapter checkpoint：优先检查 LoRA 加载和 `target_modules`。
 
 ## 9. 最终决策表
@@ -316,3 +316,267 @@ completion 合法、reward 可复现且与 action 质量相关。
 
 路径、主机名和模型私有目录可以脱敏，但请保留 GraphScript version、数值指标、reject reason 和各组
 completion/reward 的唯一值数量。
+
+## 11. 补充诊断：奇数 step 有 reward、偶数 step 为 null
+
+如果日志呈现：
+
+```text
+step 1, 3, 5, ...: reward 有值
+step 2, 4, 6, ...: reward=null, reward_std=null
+```
+
+先检查实际参数：
+
+```bash
+jq '{
+  steps_per_generation,
+  gradient_accumulation_steps,
+  num_generations,
+  temperature,
+  scale_rewards
+}' "$SELFPLAY_TRAINER_DIR/args.json"
+```
+
+当 `steps_per_generation=2` 时，通常只有 1、3、5 等 step 生成新 rollout 并记录 reward；偶数 step
+复用上一批 rollout，Trainer 日志不重复写 generation/reward 指标。因此偶数 step 的 `null` 不是
+reward 为 0，也不是 Questioner/Solver 交替；它本身属于预期日志行为。
+
+真正需要处理的是 generation step 同时满足：
+
+```text
+reward_std=0, loss=0, grad_norm=0
+```
+
+这表示同一 prompt 的 `num_generations` 个 completion 得到相同 reward，组内 advantage 为 0。
+
+## 12. 必须按 prompt group 统计 completion 和 reward
+
+第 5 节的快速检查会汇总一整行 generation batch。在 mixed-role 或一个 batch 含多个 prompt 时，
+`unique_rewards=2` 可能只来自：
+
+```text
+Questioner reward = -0.35
+Solver reward = 0
+```
+
+两个角色或两个不同 prompt 之间的 reward 差异不能产生 GRPO advantage。使用下面的检查按完整 prompt
+精确分组：
+
+```bash
+python - <<'PY'
+import json
+import os
+from collections import defaultdict
+from pathlib import Path
+
+path = Path(os.environ["SELFPLAY_TRAINER_DIR"]) / "completions.jsonl"
+if not path.is_file():
+    raise SystemExit(f"missing {path}")
+
+for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    prompts = row.get("prompt", [])
+    completions = row.get("completion", [])
+    rewards = row.get("GraphTaskReward", [])
+    steps = row.get("step", [])
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    if not isinstance(steps, list):
+        steps = [steps] * len(completions)
+    if not (len(prompts) == len(completions) == len(rewards) == len(steps)):
+        raise ValueError(
+            f"unaligned completion row {line_number}: "
+            f"prompts={len(prompts)}, completions={len(completions)}, "
+            f"rewards={len(rewards)}, steps={len(steps)}"
+        )
+
+    groups = defaultdict(list)
+    for prompt, completion, reward, step in zip(
+        prompts, completions, rewards, steps, strict=True
+    ):
+        groups[str(prompt)].append((str(completion), float(reward), step))
+
+    for group_number, (prompt, values) in enumerate(groups.items(), start=1):
+        group_completions = [value[0] for value in values]
+        group_rewards = [value[1] for value in values]
+        role = "questioner" if "Questioner" in prompt else "solver"
+        print({
+            "line": line_number,
+            "step": values[0][2],
+            "group": group_number,
+            "role": role,
+            "samples": len(values),
+            "unique_completions": len(set(group_completions)),
+            "unique_rewards": len(set(group_rewards)),
+            "rewards": sorted(set(group_rewards)),
+        })
+PY
+```
+
+如果结果主要是：
+
+```text
+questioner: unique_completions > 1, unique_rewards = 1, rewards = [-0.35]
+solver:     unique_completions > 1, unique_rewards = 1, rewards = [0.0]
+```
+
+则不同 action 全部落入同一失败档位。此时 `reward_std=0` 与 Trainer 行为一致，问题是输出契约失败
+和 reward 过粗，不是增加 `rollout_n` 就能解决的采样数量问题。
+
+## 13. 定位 EXTRA_FIELD 的准确字段路径
+
+Questioner 的 `score=-0.35` 表示 GraphScript 解析、schema、shape 或执行阶段被拒绝。若
+`EXTRA_FIELD` 占主导，不要直接把 parser 改成忽略额外字段；先确认模型究竟添加了什么：
+
+```bash
+PYTHONPATH=. python - <<'PY'
+import json
+import os
+from collections import Counter
+from pathlib import Path
+
+from pydantic import ValidationError
+from graphtask_r1.graphscript.schema import GraphScript
+
+path = Path(os.environ["SELFPLAY_TRAINER_DIR"]) / "completions.jsonl"
+counts = Counter()
+examples = {}
+
+for line in path.read_text().splitlines():
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    prompts = row.get("prompt", [])
+    completions = row.get("completion", [])
+    for prompt, completion in zip(prompts, completions, strict=True):
+        role = "questioner" if "Questioner" in str(prompt) else "solver"
+        try:
+            raw = json.loads(str(completion))
+            GraphScript.model_validate(raw)
+        except json.JSONDecodeError:
+            continue
+        except ValidationError as exc:
+            for error in exc.errors():
+                if error["type"] != "extra_forbidden":
+                    continue
+                location = ".".join(map(str, error["loc"]))
+                key = (role, location)
+                counts[key] += 1
+                examples.setdefault(key, error.get("input"))
+
+for (role, location), count in counts.most_common():
+    print({
+        "role": role,
+        "field_location": location,
+        "count": count,
+        "example_value": examples[(role, location)],
+    })
+PY
+```
+
+常见结果的解释：
+
+| 路径 | 含义 | 优先处理 |
+|---|---|---|
+| 顶层 `question`、`answer`、`explanation` | 模型不知道顶层只能有 `version`、`ops` | 强化 prompt，并加入 Questioner SFT |
+| `ops.*.input`、`ops.*.output` | 模型未使用 GraphScript 字段别名 `in`、`out` | prompt 给出严格 JSON 示例 |
+| `ops.*` 下其他未知参数 | operation signature 不匹配 | 对照 v0.3 grammar 和 SFT target |
+| 标准 SFT target 本身包含该字段 | parser、版本或数据不一致 | 核对数据和运行时 GraphScript 版本 |
+
+当前 KQAPro 主线 SFT 只训练 Solver。若 Questioner 的额外字段远多于 Solver，这更符合
+Questioner 未经 SFT 的冷启动，而不是 SFT adapter 没有加载。
+
+## 14. 区分 Solver 格式失败与可执行但答案错误
+
+Solver 的 reward 为 0 有两种不同含义：GraphScript 被拒绝，或者程序成功执行但答案 F1 为 0。
+按 rank 查看 component：
+
+```bash
+for file in "$SELFPLAY_METRICS_DIR"/reward_components.rank-*.jsonl; do
+  echo "$file"
+  jq -c '
+    .roles.solver
+    | select(. != null)
+    | {
+        samples,
+        f1: .means.f1,
+        exact_match: .means.exact_match,
+        format: .means.format,
+        graph_calls: .means.graph_calls,
+        rejects: (.means | with_entries(select(.key | startswith("reject_"))))
+      }
+  ' "$file"
+done
+```
+
+- 有 `reject_*`：优先修 GraphScript 输出契约。
+- 无 `reject_*`、`graph_calls>0`、`f1=0`：程序合法可执行，但语义错误。
+- `f1` 偶尔大于 0，但 Trainer 仍报告 `reward_std=0`：回到第 12 节，确认成功和失败是否发生在同一
+  prompt group；跨 prompt 的差异不产生 advantage。
+
+## 15. SHA 不同后逐 tensor 比较 LoRA
+
+不要仅比较初始 SFT adapter 与第一个 GRPO checkpoint：保存格式、key 或 dtype 变化也可能改变文件
+SHA。优先选择两个连续 GRPO checkpoint：
+
+```bash
+export CKPT_A="$SELFPLAY_TRAINER_DIR/checkpoint-1/adapter_model.safetensors"
+export CKPT_B="$SELFPLAY_TRAINER_DIR/checkpoint-2/adapter_model.safetensors"
+
+python - <<'PY'
+import os
+
+import torch
+from safetensors.torch import load_file
+
+a = load_file(os.environ["CKPT_A"], device="cpu")
+b = load_file(os.environ["CKPT_B"], device="cpu")
+
+print("same_keys:", set(a) == set(b))
+print("tensor_count:", len(a))
+
+changed = 0
+max_abs_delta = 0.0
+sum_sq = 0.0
+for name in sorted(set(a) & set(b)):
+    left = a[name].float()
+    right = b[name].float()
+    delta = left - right
+    if not torch.equal(left, right):
+        changed += 1
+        max_abs_delta = max(max_abs_delta, delta.abs().max().item())
+        sum_sq += delta.square().sum().item()
+
+print({
+    "changed_tensors": changed,
+    "max_abs_delta": max_abs_delta,
+    "global_l2_delta": sum_sq ** 0.5,
+})
+PY
+```
+
+判定：
+
+- `changed_tensors=0`：SHA 差异来自文件层，模型参数实际未改变。
+- tensor 改变量极小：同时检查未四舍五入的 `grad_norm`、`kl` 和当步 learning rate。
+- tensor 明显变化：查找是否有少数 prompt group 存在非零 reward variance；如果所有组都同分，则需
+  继续检查 Trainer 指标采集位置或其他 loss（例如 KL）。
+
+## 16. 当前已观测模式的处理顺序
+
+若观测到 Questioner 的 `EXTRA_FIELD` 数百条，另有少量 `INVALID_SCHEMA`、`INVALID_SHAPE`、
+`NON_JSON`，Solver 错误更少，应按以下顺序处理：
+
+1. 暂停完整规模 self-play，保留当前 bounded run 作为诊断样本。
+2. 用第 13 节确定额外字段路径，不要直接放宽 parser。
+3. 在 Questioner v0.3 prompt 中明确顶层只能是 `{"version":"0.3","ops":[...]}`，并提供最小合法
+   JSON 示例。
+4. 从 KQAPro train 的认证 program 导出 Questioner SFT 行，对共享 LoRA 做 Questioner/Solver
+   混合或分阶段 warm-up；当前 Solver-only SFT 无法保证 Questioner 冷启动成功。
+5. 将 reward 改为可区分的阶段信号：非 JSON、额外字段、schema、shape/handle、可执行、认证/F1。
+   保留最终严格认证目标，不把无效程序当作成功。
+6. 重新运行小规模 smoke；只有同一 prompt group 出现 `unique_rewards>1`，且 generation step 出现
+   `reward_std>0`、`grad_norm>0` 后，再恢复完整训练。
