@@ -326,6 +326,17 @@ GPU 0–2 同时承担共享 actor 的训练和 colocate rollout；GPU 3 只运�
 GPU 3 会先完成本轮 LoRA 合并，合并进程退出后再启动 SGLang；合并日志位于
 `round_NNN/logs/merge.log`，SGLang 日志位于 `round_NNN/logs/sglang.log`。每轮保留一份完整合并
 模型，因此三轮运行需额外预留约三份 4B 模型权重的磁盘空间。
+
+Self-play 的 ms-swift 训练输出会同时实时打印到当前终端并完整写入
+`round_NNN/logs/ms_swift.log`；merge、SGLang 和 frozen opponent 仍只写各自日志，避免多进程输出
+相互干扰。每次训练 attempt 的逐 batch reward 分量按 rank 保存在
+`round_NNN/logs/metrics_attempt_NNN/reward_components.rank-*.jsonl`，不会在重试时覆盖旧记录。
+每轮完成后会更新根目录下的 `logs/selfplay_metrics.json`、`logs/round_metrics.jsonl`、
+`logs/training_history.jsonl` 和 `logs/selfplay_curves.png`。图中包含 Questioner/Solver 未加权
+score、两者较小值定义的 cooperation bottleneck、Questioner validity/frontier/novelty、Solver
+F1/EM、frozen Solver 在新任务上的 success rate，以及 loss、gradient norm、KL、train/eval
+reward 和 completion clipped ratio；聚合 JSON 还记录每轮 archive 增量。原始 JSONL 是审计依据，
+PNG 只用于快速观察趋势。
 两组 GPU 必须非空、无重复且互不重叠，配置加载时会提前校验。每个 prompt 生成 4 条
 completion。每轮最多包含 512 prompts、2048 条 actor
 completions；只有通过 Questioner 基础认证的 completion 才会触发 opponent，理论上限为 4096 条

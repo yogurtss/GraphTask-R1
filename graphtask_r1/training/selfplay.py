@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import random
 import re
 import subprocess
+import sys
 import time
 import urllib.request
 from collections.abc import Sequence
@@ -20,9 +22,15 @@ from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
 from graphtask_r1.training.prompts import GraphScriptVersion, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
 from graphtask_r1.training.rl_dataset import export_role_dataset
+from graphtask_r1.training.selfplay_metrics import (
+    find_trainer_log,
+    summarize_selfplay_round,
+    write_selfplay_report,
+)
 from graphtask_r1.utils import file_hash, read_json, read_records, write_json
 
 MS_SWIFT_VERSION = "3.6.4"
+LOGGER = logging.getLogger(__name__)
 SelfPlayTask = TaskCertificate | TaskTrainingRecord
 TaskT = TypeVar("TaskT")
 
@@ -336,6 +344,45 @@ def _stop(process: subprocess.Popen[Any]) -> None:
         process.wait(timeout=10)
 
 
+def _run_with_tee(command: Sequence[str], *, env: dict[str, str], log_path: Path) -> None:
+    """Stream a child process to the terminal while retaining the complete byte log."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen(
+        list(command),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if process.stdout is None:  # pragma: no cover - guaranteed by stdout=PIPE
+        raise RuntimeError("failed to capture training output")
+    with log_path.open("wb") as log_stream:
+        while True:
+            chunk = os.read(process.stdout.fileno(), 64 * 1024)
+            if not chunk:
+                break
+            log_stream.write(chunk)
+            log_stream.flush()
+            sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+            sys.stdout.flush()
+    return_code = process.wait()
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, list(command))
+
+
+def _next_metrics_attempt(logs_dir: Path) -> Path:
+    indices = []
+    for path in logs_dir.glob("metrics_attempt_*"):
+        match = re.fullmatch(r"metrics_attempt_(\d+)", path.name)
+        if match:
+            indices.append(int(match.group(1)))
+    return logs_dir / f"metrics_attempt_{max(indices, default=0) + 1:03d}"
+
+
+def _archive_size(path: Path) -> int:
+    with TaskArchive(path) as archive:
+        return len(archive.all())
+
+
 def _commands(
     config: SelfPlayConfig,
     *,
@@ -440,8 +487,11 @@ def run_self_play(
         if state["config_hash"] != file_hash(config_path):
             raise ValueError("cannot resume: self-play config changed")
     plans: list[dict[str, Any]] = []
+    report_artifacts: dict[str, str] | None = None
     for round_index in range(completed + 1, config.rounds + 1):
         round_dir = output_dir / f"round_{round_index:03d}"
+        logs = round_dir / "logs"
+        reward_metrics_dir = _next_metrics_attempt(logs)
         mixed_data = round_dir / "mixed.parquet"
         opponent_url = f"http://127.0.0.1:{config.opponent_port}"
         counts = (
@@ -455,6 +505,7 @@ def run_self_play(
                 opponent_url=opponent_url,
             )
         )
+        archive_size_before = 0 if dry_run else _archive_size(archive_path)
         commands = _commands(
             config,
             adapter=adapter,
@@ -487,12 +538,15 @@ def run_self_play(
             "GRAPHSCRIPT_VERSION": config.graphscript_version,
             "VLLM_MODE": "colocate",
             "SAVE_STEPS": "1",
+            "GRAPHTASK_REWARD_METRICS_DIR": str(reward_metrics_dir.resolve()),
+            "PYTHONUNBUFFERED": "1",
         }
         plan = {
             "round": round_index,
             "adapter_in": str(adapter),
             "dataset": str(mixed_data),
             "counts": counts,
+            "archive_size_before": archive_size_before,
             "commands": commands,
             "train_environment": train_overrides,
             "actor_gpus": config.actor_gpus,
@@ -508,6 +562,7 @@ def run_self_play(
             else None,
             "program_profile": config.program_profile,
             "max_completion_tokens": config.max_completion_tokens,
+            "reward_metrics_dir": str(reward_metrics_dir),
             "rollout_budget": {
                 "questioner_prompts": (
                     counts["questioner"] if not dry_run else config.questioner_episodes
@@ -532,17 +587,26 @@ def run_self_play(
         if dry_run:
             continue
         round_dir.mkdir(parents=True, exist_ok=True)
+        reward_metrics_dir.mkdir(parents=True, exist_ok=False)
+        LOGGER.info(
+            "selfplay_round_started round=%d/%d questioner_rows=%d solver_rows=%d logs=%s",
+            round_index,
+            config.rounds,
+            counts["questioner"],
+            counts["solver"],
+            logs,
+        )
         known_adapters = frozenset(
             path.resolve() for path in round_dir.rglob("adapter_model.safetensors")
         )
         write_json(round_dir / "plan.json", plan)
-        logs = round_dir / "logs"
         logs.mkdir(exist_ok=True)
         opponent_env = {**os.environ, "CUDA_VISIBLE_DEVICES": config.opponent_gpus}
         merged_model = (round_dir / "opponent_merged").resolve()
         merge_manifest_path = round_dir / "opponent_merge.json"
         merge_spec = _opponent_merge_spec(config, adapter)
         if merged_model.exists():
+            LOGGER.info("selfplay_merge_reused round=%d model=%s", round_index, merged_model)
             if not merge_manifest_path.is_file() or read_json(merge_manifest_path) != merge_spec:
                 raise RuntimeError(
                     f"refusing to reuse unverified merged opponent model at {merged_model}; "
@@ -551,6 +615,7 @@ def run_self_play(
             _validate_merged_model(merged_model)
         else:
             merge_log_path = logs / "merge.log"
+            LOGGER.info("selfplay_merge_started round=%d log=%s", round_index, merge_log_path)
             with merge_log_path.open("w") as merge_log:
                 try:
                     subprocess.run(
@@ -566,8 +631,10 @@ def run_self_play(
                     ) from exc
             _validate_merged_model(merged_model)
             write_json(merge_manifest_path, merge_spec)
+            LOGGER.info("selfplay_merge_completed round=%d", round_index)
         sglang_process: subprocess.Popen[Any] | None = None
         if commands["sglang"]:
+            LOGGER.info("selfplay_sglang_started round=%d log=%s", round_index, logs / "sglang.log")
             with (logs / "sglang.log").open("w") as sglang_log:
                 sglang_process = subprocess.Popen(
                     commands["sglang"],
@@ -582,6 +649,12 @@ def run_self_play(
                     timeout_s=config.sglang_start_timeout_s,
                 )
             with (logs / "opponent.log").open("w") as opponent_log:
+                LOGGER.info(
+                    "selfplay_opponent_started round=%d backend=%s log=%s",
+                    round_index,
+                    config.opponent_backend,
+                    logs / "opponent.log",
+                )
                 opponent_process = subprocess.Popen(
                     commands["opponent"],
                     env=opponent_env,
@@ -592,31 +665,45 @@ def run_self_play(
                 _wait_for(opponent_url + "/health", timeout_s=60)
                 train_env = {**os.environ, **train_overrides}
                 train_log_path = logs / "ms_swift.log"
-                with train_log_path.open("w") as train_log:
-                    try:
-                        subprocess.run(
-                            commands["train"],
-                            env=train_env,
-                            stdout=train_log,
-                            stderr=subprocess.STDOUT,
-                            check=True,
-                        )
-                    except (OSError, subprocess.CalledProcessError) as exc:
-                        raise RuntimeError(
-                            f"self-play GRPO training failed; see {train_log_path}"
-                        ) from exc
+                LOGGER.info(
+                    "selfplay_training_started round=%d log=%s terminal_output=true",
+                    round_index,
+                    train_log_path,
+                )
+                try:
+                    _run_with_tee(commands["train"], env=train_env, log_path=train_log_path)
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    raise RuntimeError(
+                        f"self-play GRPO training failed; see {train_log_path}"
+                    ) from exc
+                LOGGER.info("selfplay_training_completed round=%d", round_index)
             finally:
                 _stop(opponent_process)
         finally:
             if sglang_process is not None:
                 _stop(sglang_process)
         adapter = _adapter_from_checkpoint(round_dir, known_adapters=known_adapters)
+        archive_size_after = _archive_size(archive_path)
+        trainer_log = find_trainer_log(round_dir, adapter)
+        round_metrics = summarize_selfplay_round(
+            round_index,
+            counts,
+            trainer_log=trainer_log,
+            reward_metrics_dir=reward_metrics_dir,
+            archive_size_before=archive_size_before,
+            archive_size_after=archive_size_after,
+        )
+        metrics_summary_path = logs / "metrics_summary.json"
+        write_json(metrics_summary_path, round_metrics)
+        report_artifacts = write_selfplay_report(output_dir)
         write_json(
             round_dir / "manifest.json",
             {
                 "round": round_index,
                 "adapter": str(adapter),
                 "dataset_hash": file_hash(mixed_data),
+                "metrics_summary": str(metrics_summary_path),
+                "reward_metrics_dir": str(reward_metrics_dir),
                 "completed": True,
             },
         )
@@ -629,10 +716,19 @@ def run_self_play(
                 "ms_swift_version": MS_SWIFT_VERSION,
             },
         )
+        LOGGER.info(
+            "selfplay_round_completed round=%d adapter=%s curves=%s",
+            round_index,
+            adapter,
+            report_artifacts["plot"],
+        )
+    if not dry_run and report_artifacts is None:
+        report_artifacts = write_selfplay_report(output_dir)
     return {
         "dry_run": dry_run,
         "rounds_requested": config.rounds,
         "rounds_completed": completed if dry_run else config.rounds,
         "plans": plans,
         "ms_swift_version": MS_SWIFT_VERSION,
+        "report_artifacts": report_artifacts,
     }

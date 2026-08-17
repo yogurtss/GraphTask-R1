@@ -24,6 +24,7 @@ from graphtask_r1.schema import (
     Triple,
     parse_program,
 )
+from graphtask_r1.training import ms_swift_reward as reward_module
 from graphtask_r1.training.ms_swift_reward import compute_score
 
 
@@ -147,6 +148,41 @@ def test_graphscript_solver_reward_executes_program() -> None:
     )
     assert score["score"] == 1.0
     assert score["edge_visits"] == 2.0
+
+
+def test_questioner_reward_records_frozen_solver_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_opponent(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        return {
+            "pass_rate": 0.5,
+            "novelty_structural": 1.0,
+            "novelty_textual": 0.8,
+        }
+
+    monkeypatch.setattr(reward_module, "request_opponent", fake_opponent)
+
+    score = asyncio.run(
+        compute_score(
+            "graphtask/questioner",
+            _script(),
+            "{}",
+            {
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.1",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+                "allowed_relations": ["works_at", "located_in"],
+                "max_edge_visits": 10,
+                "opponent_url": "http://unused",
+                "opponent_samples": 2,
+                "round": 1,
+            },
+        )
+    )
+
+    assert score["opponent_success_rate"] == 0.5
 
 
 def test_program_converter_rejects_non_chain_program() -> None:

@@ -5,6 +5,7 @@ import json
 import sys
 import types
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -242,9 +243,15 @@ def test_solver_scheduler_executes_bounded_text_search(plugin: Any) -> None:
 
 
 def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
-    plugin: Any, caplog: pytest.LogCaptureFixture
+    plugin: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
+    metrics_dir = tmp_path / "reward_metrics"
+    monkeypatch.setenv("GRAPHTASK_REWARD_METRICS_DIR", str(metrics_dir))
+    monkeypatch.setenv("RANK", "2")
     reward = plugin.GraphTaskReward()
 
     values = reward(
@@ -265,3 +272,8 @@ def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
     assert event["event"] == "graphtask_reward_components"
     assert event["means"]["f1"] == 1.0
     assert event["means"]["exact_match"] == 1.0
+    assert event["roles"]["solver"]["means"]["unweighted_score"] == 1.0
+    persisted = json.loads(
+        (metrics_dir / "reward_components.rank-2.jsonl").read_text().strip()
+    )
+    assert persisted == event

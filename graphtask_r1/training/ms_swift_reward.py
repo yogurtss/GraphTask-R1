@@ -163,6 +163,7 @@ async def compute_score(
             )
             return {
                 "score": reward.total * role_weight,
+                "opponent_success_rate": pass_rate,
                 **reward.components,
                 **graph_usage,
             }

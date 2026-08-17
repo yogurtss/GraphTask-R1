@@ -87,6 +87,25 @@ def _batch(value: object, size: int, *, default: object) -> list[object]:
 class GraphTaskReward(ORM):  # type: ignore[misc]
     """Return the total reward and emit all auditable components as structured logs."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._metrics_sequence = 0
+        metrics_dir = os.environ.get("GRAPHTASK_REWARD_METRICS_DIR")
+        rank = os.environ.get("RANK", "0")
+        safe_rank = rank if rank.isdigit() else "unknown"
+        self._metrics_path = (
+            Path(metrics_dir) / f"reward_components.rank-{safe_rank}.jsonl"
+            if metrics_dir
+            else None
+        )
+
+    def _record_metrics(self, event: dict[str, object]) -> None:
+        if self._metrics_path is None:
+            return
+        self._metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._metrics_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+
     def __call__(
         self,
         completions: list[str],
@@ -101,15 +120,19 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
         truths = _batch(ground_truth, size, default="")
         infos = _batch(extra_info, size, default={})
 
-        async def score_one(index: int) -> dict[str, float]:
-            info = to_json_compatible(infos[index])
+        normalized_infos: list[dict[str, Any]] = []
+        for raw_info in infos:
+            info = to_json_compatible(raw_info)
             if not isinstance(info, dict):
                 raise ValueError("extra_info reward column must contain objects")
+            normalized_infos.append(info)
+
+        async def score_one(index: int) -> dict[str, float]:
             return await compute_score(
                 str(sources[index]),
                 completions[index],
                 str(truths[index]),
-                info,
+                normalized_infos[index],
             )
 
         async def score_all() -> list[dict[str, float]]:
@@ -118,23 +141,46 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
         results = asyncio.run(score_all())
         sums: dict[str, float] = defaultdict(float)
         counts: dict[str, int] = defaultdict(int)
-        for result in results:
-            for name, value in result.items():
+        role_sums: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        role_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        role_samples: dict[str, int] = defaultdict(int)
+        for index, result in enumerate(results):
+            metrics = dict(result)
+            role_weight = float(normalized_infos[index].get("role_weight", 1.0))
+            if role_weight:
+                metrics["unweighted_score"] = float(result["score"]) / role_weight
+            source = str(sources[index])
+            role = source.rsplit("/", maxsplit=1)[-1]
+            role_samples[role] += 1
+            for name, value in metrics.items():
                 sums[name] += float(value)
                 counts[name] += 1
+                role_sums[role][name] += float(value)
+                role_counts[role][name] += 1
         components = {name: sums[name] / counts[name] for name in sorted(sums) if counts[name]}
-        logger.info(
-            json.dumps(
-                {
-                    "event": "graphtask_reward_components",
-                    "rank": os.environ.get("RANK", "0"),
-                    "samples": size,
-                    "means": components,
+        roles = {
+            role: {
+                "samples": role_samples[role],
+                "means": {
+                    name: role_sums[role][name] / count
+                    for name, count in sorted(role_counts[role].items())
+                    if count
                 },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        )
+            }
+            for role in sorted(role_samples)
+        }
+        self._metrics_sequence += 1
+        event: dict[str, object] = {
+            "event": "graphtask_reward_components",
+            "sequence": self._metrics_sequence,
+            "rank": os.environ.get("RANK", "0"),
+            "world_size": os.environ.get("WORLD_SIZE", "1"),
+            "samples": size,
+            "means": components,
+            "roles": roles,
+        }
+        self._record_metrics(event)
+        logger.info(json.dumps(event, ensure_ascii=False, sort_keys=True))
         return [float(result["score"]) for result in results]
 
 

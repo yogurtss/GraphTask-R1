@@ -3,6 +3,7 @@
 # Install torch and ms-swift in the dedicated training environment. GPU packages
 # remain externally managed so this file cannot replace a working CUDA environment.
 aiohttp>=3.10,<4
+matplotlib>=3.8,<4
 pyarrow>=15,<22
 pydantic>=2.7,<3
 PyYAML>=6,<7
