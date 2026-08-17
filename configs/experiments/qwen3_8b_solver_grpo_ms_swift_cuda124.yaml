@@ -1,4 +1,4 @@
-# Qwen3-8B LoRA GRPO example. It expects the matching 8B SFT adapter.
+# Qwen3-8B LoRA GRPO example. It expects the matching mixed-role 8B SFT adapter.
 training_backend: ms_swift
 model_path: Qwen/Qwen3-8B
 model_type: qwen3

@@ -51,9 +51,21 @@ GraphScript 行加载后不附加 tool schema。`tool` 行则由
 ```bash
 python -m graphtask_r1.cli data export-sft \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/training/kqapro_graphscript_v03_sft_train.parquet \
+  --output data/training/kqapro_graphscript_v03_solver_sft_train.parquet \
   --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+
+python -m graphtask_r1.cli data export-questioner-sft \
+  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
+  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+
+# 两个角色分别完成真实模板 preflight 后再混合 accepted 文件
+python -m graphtask_r1.cli data combine-sft \
+  --solver-input outputs/preflight/solver-accepted.parquet \
+  --questioner-input outputs/preflight/questioner-accepted.parquet \
+  --output outputs/preflight/mixed-accepted.parquet --seed 42
 
 python -m graphtask_r1.cli data export-rl \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
@@ -61,6 +73,10 @@ python -m graphtask_r1.cli data export-rl \
   --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
+
+`export-questioner-sft` 是独立、定量且 snapshot-neutral 的入口。自然语言 prompt 不强调数据集名或
+内部版本名；`"version":"0.3"` 只作为机器解析字段保留。Questioner 的 fixed seed root 与 Solver
+问题编译仍是两个角色合约，预检前不要把两类原始行直接混在一起。
 
 若运行工具消融，将两条命令的 `--interaction-mode` 改为 `tool`，并在启动脚本中显式设置
 `INTERACTION_MODE=tool`。不要把两种模式混入同一个训练 split。

@@ -1,13 +1,14 @@
 # KQAPro 训练流程
 
-本流程只覆盖 KQAPro：先用官方 train 做 Solver SFT，随后直接做 Questioner/Solver self-play，
+本流程只覆盖 KQAPro：先用官方 train 分别导出 Solver 与定量 Questioner SFT，再混合训练共享
+adapter，随后直接做 Questioner/Solver self-play，
 最后只在官方 val 上选择 checkpoint。独立的 Solver-only GRPO 是可选 warm-up/消融，不是
 self-play 前置依赖。KILT/OpenQA 使用 GraphScript v0.2 与独立
 checkpoint，不进入本流程。
 
 ```text
-默认：Solver SFT → Questioner/Solver self-play → KQAPro val 选模
-可选：Solver SFT → Solver-only GRPO warm-up → self-play → KQAPro val 选模
+默认：Solver + Questioner SFT → Questioner/Solver self-play → KQAPro val 选模
+可选：Solver + Questioner SFT → Solver-only GRPO warm-up → self-play → KQAPro val 选模
 ```
 
 ## 1. 数据边界与已验证上界
@@ -29,8 +30,9 @@ agreement 为 11,768/11,797（99.7542%）；剩余 29 条均是 Count 表示语�
 推荐配置已经实际完整跑通：train 从 94,376 条分层选出 20,000 条，接受 19,941 条
 （99.705%）；val 全量接受 11,768/11,797（99.754%）。train/val 的 88 条 rejection 全部是
 `SOURCE_ANSWER_MISMATCH`，未出现转换、执行或 schema 错误。accepted train 与 val 均仍覆盖
-27/27 个 KoPL 函数；两份 task parquet 的 deep audit 均为 0 invalid、0 duplicate，SFT 导出行数
-分别为 19,941 和 11,768。
+27/27 个 KoPL 函数；两份 task parquet 的 deep audit 均为 0 invalid、0 duplicate。Solver SFT 导出
+行数分别为 19,941 和 11,768；按本手册另取 2,048 条 Questioner train 后，mixed train 应为
+21,989 条，实际仍以 preflight 与 `combine-sft` metrics 为准。
 
 GraphScript v0.3 覆盖实体解析、关系遍历、交并、类型/字面量/qualifier 过滤、attribute 与
 qualifier 查询、relation 与 qualifier 查询、verify、extrema、count 和 emit。canonical trace
@@ -168,40 +170,88 @@ python -m graphtask_r1.cli data build-relation-catalog \
 `sampling.json` 记录 source/selected rows、全部 strata 的配额、operator coverage、sampler version
 和 seed；确认没有未解释的 rejection，且 snapshot、source hash 和配置符合本次实验记录。
 
-## 4. Solver SFT
+## 4. Solver + Questioner SFT
 
-只导出 Solver，确保 train/val 使用完全相同的 GraphScript v0.3 prompt、operator set 和 catalog：
+Solver 与 Questioner 使用独立导出入口和独立 Parquet。由于两种角色的 prompt 合约已同步更新，
+不要复用旧 SFT Parquet；Solver train/val 也需要重新生成：
 
 ```bash
 for split in train val; do
   python -m graphtask_r1.cli data export-sft \
     --input "$KQAPRO_DIR/$split/training_tasks.parquet" \
-    --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_sft_$split.parquet" \
+    --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_sft_$split.parquet" \
     --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
     --relation-catalog "$KQAPRO_DIR/relation_catalog.json" --seed 42
 done
 ```
 
-用目标 tokenizer/template 分别预检 train 和 val；`--require-all` 可避免静默接受超长或编码失败
-样本：
+Questioner 只从 train 的认证 program 导出，入口不复用 `export-sft --roles both`。`--count` 是最终
+Questioner 行数，采样使用独立 RNG 和显式 seed；默认建议 2048 条，约为当前 19,941 条 Solver
+train 的 10%，可作为后续消融变量：
 
 ```bash
-for split in train val; do
-  python scripts/preflight_ms_swift_sft.py \
-    --input "$KQAPRO_TRAINING/kqapro_graphscript_v03_sft_$split.parquet" \
-    --accepted-output "outputs/preflight/kqapro-$split-accepted.parquet" \
-    --rejected-output "outputs/preflight/kqapro-$split-rejected.parquet" \
-    --summary-output "outputs/preflight/kqapro-$split-summary.json" \
-    --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 \
-    --max-length 32768 --require-all
-done
+export QUESTIONER_SFT_COUNT=2048
+
+python -m graphtask_r1.cli data export-questioner-sft \
+  --input "$KQAPRO_DIR/train/training_tasks.parquet" \
+  --output "$KQAPRO_TRAINING/kqapro_graphscript_v03_questioner_sft_train.parquet" \
+  --count "$QUESTIONER_SFT_COUNT" --seed 42 \
+  --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog "$KQAPRO_DIR/relation_catalog.json"
 ```
 
-先 dry-run 核对实际脚本和环境，再启动：
+该入口只选择恰好一个显式 entity root 的任务，使 SFT 与 self-play 的单 seed Questioner 分布一致。
+Questioner prompt 会包含 seed 的 ID、label、type 和有界 incoming/outgoing relation IDs，但不包含
+相邻实体或 gold answer；required root 固定为
+`resolve_entity(query=<entity_id>, match="id", limit=1)`。自然语言 prompt 不再使用“v0.3”作为说明性
+术语，只在机器可解析 JSON 的 `"version":"0.3"` 字段中保留版本。
+
+分别预检三份数据，以便独立观察角色 rejection；`--require-all` 保证 Questioner 最终仍为精确的
+2048 条：
 
 ```bash
-export SFT_TRAIN_DATA=$PWD/outputs/preflight/kqapro-train-accepted.parquet
-export SFT_VAL_DATA=$PWD/outputs/preflight/kqapro-val-accepted.parquet
+python scripts/preflight_ms_swift_sft.py \
+  --input "$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_sft_train.parquet" \
+  --accepted-output outputs/preflight/kqapro-solver-train-accepted.parquet \
+  --rejected-output outputs/preflight/kqapro-solver-train-rejected.parquet \
+  --summary-output outputs/preflight/kqapro-solver-train-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 \
+  --max-length 32768 --require-all
+
+python scripts/preflight_ms_swift_sft.py \
+  --input "$KQAPRO_TRAINING/kqapro_graphscript_v03_questioner_sft_train.parquet" \
+  --accepted-output outputs/preflight/kqapro-questioner-train-accepted.parquet \
+  --rejected-output outputs/preflight/kqapro-questioner-train-rejected.parquet \
+  --summary-output outputs/preflight/kqapro-questioner-train-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 \
+  --max-length 32768 --require-all
+
+python scripts/preflight_ms_swift_sft.py \
+  --input "$KQAPRO_TRAINING/kqapro_graphscript_v03_solver_sft_val.parquet" \
+  --accepted-output outputs/preflight/kqapro-solver-val-accepted.parquet \
+  --rejected-output outputs/preflight/kqapro-solver-val-rejected.parquet \
+  --summary-output outputs/preflight/kqapro-solver-val-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 \
+  --max-length 32768 --require-all
+```
+
+预检后确定性混合 train；该命令会拒绝角色污染，例如 Questioner 文件中出现 Solver 行：
+
+```bash
+python -m graphtask_r1.cli data combine-sft \
+  --solver-input outputs/preflight/kqapro-solver-train-accepted.parquet \
+  --questioner-input outputs/preflight/kqapro-questioner-train-accepted.parquet \
+  --output outputs/preflight/kqapro-mixed-train-accepted.parquet --seed 42
+
+jq . outputs/preflight/kqapro-mixed-train-accepted.metrics.json
+```
+
+val 保持 Solver-only，用于选择 QA checkpoint，不让验证指标随 Questioner 混合比例变化。先 dry-run
+核对实际脚本和环境，再启动：
+
+```bash
+export SFT_TRAIN_DATA=$PWD/outputs/preflight/kqapro-mixed-train-accepted.parquet
+export SFT_VAL_DATA=$PWD/outputs/preflight/kqapro-solver-val-accepted.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b-kqapro-v03
 export NUM_GPUS=4
 export MAX_LENGTH=32768
@@ -248,7 +298,9 @@ micro 大于 1 时 launcher 会线性放大最终 `LR`。显式环境变量 `LR`
 
 ## 5. Questioner/Solver self-play
 
-Questioner seeds 直接从完整 KQAPro 图按 degree 约束确定性采样。这里不传 `--exclude`：seed
+Questioner seeds 直接从完整 KQAPro 图按 degree 约束确定性采样。必须用当前代码重新生成旧 seed
+Parquet，因为新格式额外记录 answer-free 的 label、type、局部 relation IDs 和 required root。这里
+不传 `--exclude`：seed
 选择既不打开 val 文件，也不读取 val question/program/answer。命令显式固定 v0.3，导出行也会
 记录 `graphscript_version`、`operator_set` 和 `program_profile`。
 
@@ -257,14 +309,17 @@ python -m graphtask_r1.cli data sample-seeds \
   --snapshot kqapro-v1 \
   --output "$KQAPRO_TRAINING/kqapro_questioner_seeds.parquet" \
   --count 4096 --pool-limit 100000 --seed 42 \
+  --max-seed-neighbor-facts 200 --max-seed-relations 64 \
   --interaction-mode graphscript --graphscript-version 0.3 \
   --relation-catalog "$KQAPRO_DIR/relation_catalog.json"
 ```
 
-4096 是可复用的 seed pool，不代表每轮全部进入训练。默认 4×H100/24 小时预算配置每轮只按显式
-seed 和 round index 确定性抽取 256 条 Questioner rows；完整 pool 用于跨轮保持覆盖度。
+4096 是可复用的 seed pool，不代表每轮全部进入训练。裸 `Q...` ID 对图后端有意义，但对模型缺少
+语义，因此 prompt 同时提供实体 label/type 和最多 64 个有界局部 relation IDs，不暴露邻居实体或
+答案。默认 4×H100/24 小时预算配置每轮只按显式 seed 和 round index 确定性抽取 256 条
+Questioner rows；完整 pool 用于跨轮保持覆盖度。
 
-默认直接用 SFT adapter 初始化 self-play。Self-play val 必须使用 RL row schema，因此
+默认直接用 mixed-role SFT adapter 初始化 self-play。Self-play val 必须使用 RL row schema，因此
 需要先单独导出只读 Solver val。这只是数据格式转换，不会执行 Solver-only GRPO：
 
 ```bash

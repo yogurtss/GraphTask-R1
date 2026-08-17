@@ -44,10 +44,20 @@ python -m graphtask_r1.cli data prepare --dataset kqapro \
 
 python -m graphtask_r1.cli data export-sft \
   --input /mnt/g/datasets/GraphTaskDataset/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output /mnt/g/datasets/GraphTaskDataset/training/kqapro_graphscript_v03_sft.parquet \
+  --output /mnt/g/datasets/GraphTaskDataset/training/kqapro_graphscript_v03_solver_sft.parquet \
   --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
   --relation-catalog /mnt/g/datasets/GraphTaskDataset/processed/kqapro/kqapro-v1/relation_catalog.json
+
+python -m graphtask_r1.cli data export-questioner-sft \
+  --input /mnt/g/datasets/GraphTaskDataset/processed/kqapro/kqapro-v1/train/tasks.parquet \
+  --output /mnt/g/datasets/GraphTaskDataset/training/kqapro_graphscript_v03_questioner_sft.parquet \
+  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog /mnt/g/datasets/GraphTaskDataset/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
+
+Questioner 导出入口是通用的 role-isolated contract，不依赖数据集名称。Solver 与 Questioner prompt
+变更后必须同时重生成；两者通过真实模板预检后再用 `data combine-sft` 混合。Questioner 只接收
+answer-free seed metadata，并必须用 `match="id"` 的固定 root；不允许 `all_entities` 绕过 seed。
 
 KILT bootstrap 与 v0.2 代码仍保留，但不在当前默认训练链运行；启用前需要单独完成 KILT SFT 与
 reader/passage 算子设计。
@@ -59,7 +69,7 @@ ms-swift SFT 预检仍按训练时模板和 token policy 切分 valid/overlong/i
 
 ```bash
 conda run -n ms-swift-debug python scripts/preflight_ms_swift_sft.py \
-  --input /mnt/g/datasets/GraphTaskDataset/training/kqapro_graphscript_v03_sft.parquet \
+  --input /mnt/g/datasets/GraphTaskDataset/training/kqapro_graphscript_v03_solver_sft.parquet \
   --accepted-output outputs/preflight-kqapro-v03/accepted.parquet \
   --rejected-output outputs/preflight-kqapro-v03/rejected.parquet \
   --summary-output outputs/preflight-kqapro-v03/metrics.json \

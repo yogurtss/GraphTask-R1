@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from graphtask_r1.archive import TaskArchive
 from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
 from graphtask_r1.training.prompts import GraphScriptVersion, role_prompt
+from graphtask_r1.training.questioner_context import render_questioner_seed_payload
 from graphtask_r1.training.relations import load_relation_catalog
 from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.selfplay_metrics import (
@@ -238,10 +239,16 @@ def _assemble_dataset(
             }
         )
         row["extra_info"] = extra
+        raw_seed_context = extra.get("seed_context")
+        payload = (
+            render_questioner_seed_payload(raw_seed_context)
+            if isinstance(raw_seed_context, list) and raw_seed_context
+            else "Explore from these seed entities and construct one certified task: "
+            + ", ".join(topic_ids)
+        )
         row["prompt"] = role_prompt(
             "questioner",
-            "Explore from these seed entities and construct one certified task: "
-            + ", ".join(topic_ids),
+            payload,
             interaction_mode=config.interaction_mode,
             relation_catalog=relation_catalog,
             graphscript_version=config.graphscript_version,

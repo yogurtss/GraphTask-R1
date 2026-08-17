@@ -32,7 +32,11 @@ from graphtask_r1.training.selfplay import (
     load_selfplay_config,
     run_self_play,
 )
-from graphtask_r1.training.sft_dataset import export_sft_dataset
+from graphtask_r1.training.sft_dataset import (
+    combine_sft_datasets,
+    export_questioner_sft_dataset,
+    export_sft_dataset,
+)
 from graphtask_r1.utils import write_json, write_records
 
 
@@ -199,6 +203,23 @@ def test_tool_sft_serializes_query_arguments_as_json(tmp_path: Path) -> None:
     arguments = tool_call["function"]["arguments"]
     assert isinstance(arguments, str)
     assert json.loads(arguments)["query"]["steps"][0]["op"] == "hop"
+
+
+def test_questioner_only_tool_sft_remains_backend_neutral(tmp_path: Path) -> None:
+    task = _task().model_copy(update={"graph_snapshot": "unconfigured-snapshot"})
+    path = tmp_path / "questioner_tool_sft.parquet"
+
+    assert (
+        export_sft_dataset(
+            [task],
+            path,
+            include_questioner=True,
+            include_solver=False,
+            interaction_mode="tool",
+        )
+        == 1
+    )
+    assert pq.read_table(path)["role"].to_pylist() == ["questioner"]
 
 
 def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
@@ -729,7 +750,71 @@ def test_kqapro_questioner_seeds_default_to_graphscript_v03(tmp_path: Path) -> N
     )
 
     row = pq.read_table(output).to_pylist()[0]
-    assert "KQAPro graph self-play" in row["prompt"][0]["content"]
+    assert "structured graph self-play" in row["prompt"][0]["content"]
     assert row["extra_info"]["graphscript_version"] == "0.3"
     assert row["extra_info"]["program_profile"] == "graphscript_v0_3"
     assert "filter_qualifier" in row["extra_info"]["operator_set"]
+    assert row["extra_info"]["seed_context"]
+    system = row["prompt"][0]["content"]
+    user = row["prompt"][1]["content"]
+    assert '{"version":"0.3","ops":[...]}' in system
+    assert "never use all_entities" in system
+    assert "all_entities(max_results" not in system
+    assert "required_root_op" in user
+    assert '"match":"id"' in user
+    assert "observed_outgoing_relation_ids" in user
+
+
+def test_questioner_sft_has_independent_exact_count_and_combines_with_solver(
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskTrainingRecord.model_validate(
+            _task().model_copy(update={"task_id": f"task-{index}"}).model_dump(mode="json")
+        )
+        for index in range(5)
+    ]
+    questioner_path = tmp_path / "questioner.parquet"
+    solver_path = tmp_path / "solver.parquet"
+    mixed_path = tmp_path / "mixed.parquet"
+
+    metrics = export_questioner_sft_dataset(
+        tasks,
+        questioner_path,
+        count=2,
+        seed=7,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+    )
+    assert metrics == {"scanned": 5, "eligible": 5, "selected": 2, "seed": 7}
+    questioner_rows = pq.read_table(questioner_path).to_pylist()
+    assert len(questioner_rows) == 2
+    assert {row["role"] for row in questioner_rows} == {"questioner"}
+    assert all("required_root_op" in row["messages"][1]["content"] for row in questioner_rows)
+    for row in questioner_rows:
+        output = json.loads(row["messages"][-1]["content"])
+        assert output["ops"][0] == {
+            "op": "resolve_entity",
+            "query": "alice",
+            "match": "id",
+            "limit": 1,
+            "out": "h0",
+        }
+
+    assert (
+        export_sft_dataset(
+            tasks,
+            solver_path,
+            include_questioner=False,
+            interaction_mode="graphscript",
+            graphscript_version="0.3",
+            relation_catalog=_catalog(),
+        )
+        == 5
+    )
+    combined = combine_sft_datasets(solver_path, questioner_path, mixed_path, seed=11)
+    assert combined == {"solver": 5, "questioner": 2, "total": 7, "seed": 11}
+    roles = pq.read_table(mixed_path)["role"].to_pylist()
+    assert roles.count("solver") == 5
+    assert roles.count("questioner") == 2

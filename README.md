@@ -98,10 +98,16 @@ python -m graphtask_r1.cli data build-relation-catalog \
 for split in train val; do
   python -m graphtask_r1.cli data export-sft \
     --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v03_sft_$split.parquet \
+    --output data/training/kqapro_graphscript_v03_solver_sft_$split.parquet \
     --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
     --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 done
+
+python -m graphtask_r1.cli data export-questioner-sft \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
+  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
 
 `audit --deep` 同时完成完整证书检查和轻量 training view 生成；程序执行和 gold/source 对账已在
@@ -111,19 +117,38 @@ done
 用训练时的真实模板筛出 32K 内有效样本，不启动训练：
 
 ```bash
-python scripts/preflight_ms_swift_sft.py \
-  --input data/training/kqapro_graphscript_v03_sft_train.parquet \
-  --accepted-output outputs/preflight/accepted.parquet \
-  --rejected-output outputs/preflight/rejected.parquet \
-  --summary-output outputs/preflight/summary.json \
+python scripts/preflight_ms_swift_sft.py --require-all \
+  --input data/training/kqapro_graphscript_v03_solver_sft_train.parquet \
+  --accepted-output outputs/preflight/solver-accepted.parquet \
+  --rejected-output outputs/preflight/solver-rejected.parquet \
+  --summary-output outputs/preflight/solver-summary.json \
   --model Qwen/Qwen3-4B-Instruct-2507 --max-length 32768
+
+python scripts/preflight_ms_swift_sft.py --require-all \
+  --input data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
+  --accepted-output outputs/preflight/questioner-accepted.parquet \
+  --rejected-output outputs/preflight/questioner-rejected.parquet \
+  --summary-output outputs/preflight/questioner-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --max-length 32768
+
+python scripts/preflight_ms_swift_sft.py --require-all \
+  --input data/training/kqapro_graphscript_v03_solver_sft_val.parquet \
+  --accepted-output outputs/preflight/solver-val-accepted.parquet \
+  --rejected-output outputs/preflight/solver-val-rejected.parquet \
+  --summary-output outputs/preflight/solver-val-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --max-length 32768
+
+python -m graphtask_r1.cli data combine-sft \
+  --solver-input outputs/preflight/solver-accepted.parquet \
+  --questioner-input outputs/preflight/questioner-accepted.parquet \
+  --output outputs/preflight/mixed-accepted.parquet --seed 42
 ```
 
 确认数据后再启动 SFT；`--dry-run` 只打印实际脚本和环境变量：
 
 ```bash
-export SFT_TRAIN_DATA=$PWD/outputs/preflight/accepted.parquet
-export SFT_VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_sft_val.parquet
+export SFT_TRAIN_DATA=$PWD/outputs/preflight/mixed-accepted.parquet
+export SFT_VAL_DATA=$PWD/outputs/preflight/solver-val-accepted.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b
 
 python -m graphtask_r1.cli train sft \

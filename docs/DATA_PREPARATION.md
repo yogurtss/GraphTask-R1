@@ -5,8 +5,9 @@ Virtuoso 数据库或 token 提交到 Git。
 
 如果 `data/processed/kqapro/kqapro-v1/graph.sqlite` 以及 `train/val/tasks.parquet` 已经存在，说明
 KQA Pro 转换已经完成。此时不要再次运行 `data prepare`；直接跳到 2.3 节，用
-`data export-sft` 从现有 accepted tasks 生成缺少的 `data/training/kqapro_sft_*.parquet`。该导出过程
-不会修改 processed 数据。
+`data export-sft` 重新生成 Solver SFT，并用独立的 `data export-questioner-sft --count N` 生成
+精确 N 条 Questioner SFT。prompt 合约变化后两种角色都应重导出，不要混用旧 Parquet；这些导出
+过程不会修改 processed 数据。
 
 所有耗时数据命令默认向 stderr 输出 `INFO` 级进度日志，包含当前阶段、完成数、总数、百分比、
 耗时以及 accepted/rejected 等计数；最终 JSON 仍单独写到 stdout。需要安静运行时，将全局参数放在
@@ -152,16 +153,28 @@ python -m graphtask_r1.cli data build-relation-catalog \
 for split in train val; do
   python -m graphtask_r1.cli data export-sft \
     --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v03_sft_$split.parquet \
+    --output data/training/kqapro_graphscript_v03_solver_sft_$split.parquet \
     --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
     --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 done
+
+python -m graphtask_r1.cli data export-questioner-sft \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
+  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
 
 `audit --deep` 同时检查完整 `TaskCertificate` 并生成不含 witness 的 training view；它不重复执行
 program，因为 gold 和 source answer 对账已由 `data prepare` 完成。canonical trace 只在 bounded
 diagnostic 中 replay。`--scope graph` 从 `graph.sqlite` 生成固定的完整 relation allowlist，不依赖
 小样本覆盖率。
+
+`export-questioner-sft` 是 snapshot-neutral 的独立入口：它只要求 certified task、对应
+`GraphBackend` 和 relation catalog。它用实例级 RNG 对单 seed tasks 做确定性 reservoir sampling，
+输出行数必须等于 `--count`，不足时直接失败。Questioner prompt 仅加入实体 label、type 和有界局部
+relation IDs，不写入邻居实体或答案；根操作固定按 ID 解析。预检后使用 `data combine-sft` 将角色
+隔离的 accepted 文件确定性混合，详见 [训练手册](TRAINING.md#2-sft-长度预检)。
 
 必须检查 `metrics.json` 中的接受率和各 reason code。`SOURCE_ANSWER_MISMATCH`、
 `INCOMPLETE_SLICE` 或 `TRACE_REPLAY_MISMATCH` 大量出现时不要训练。

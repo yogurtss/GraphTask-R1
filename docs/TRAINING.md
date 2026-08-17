@@ -22,8 +22,9 @@ Solver-only GRPO 只是可选 warm-up/消融。SFT、GRPO 和 self-play 共享�
 
 ```text
 data/training/
-├── kqapro_graphscript_v03_sft_train.parquet
-├── kqapro_graphscript_v03_sft_val.parquet
+├── kqapro_graphscript_v03_solver_sft_train.parquet
+├── kqapro_graphscript_v03_solver_sft_val.parquet
+├── kqapro_graphscript_v03_questioner_sft_train.parquet
 ├── kqapro_graphscript_v03_solver_rl_val.parquet
 └── kqapro_graphscript_v03_grpo_train.parquet  # 仅可选 Solver GRPO 需要
 ```
@@ -47,15 +48,56 @@ Parquet。
 或整张 Arrow table。若长时间没有吞吐，优先检查模型/tokenizer 是否仍在下载，而不是继续增加
 内存。
 
+Solver 与 Questioner prompt 合约都已更新，必须从 certified tasks 重新导出，不能复用旧 Solver
+Parquet 或旧 Questioner seed。两种角色先独立导出、独立预检，再确定性混合。Questioner 的通用
+入口要求显式 `--count`，不会隐式按 Solver 数据量扩张：
+
 ```bash
-python scripts/preflight_ms_swift_sft.py \
-  --input data/training/kqapro_graphscript_v03_sft_train.parquet \
-  --accepted-output outputs/preflight/kqapro-train-accepted.parquet \
-  --rejected-output outputs/preflight/kqapro-train-rejected.parquet \
-  --summary-output outputs/preflight/kqapro-train-summary.json \
-  --model Qwen/Qwen3-4B-Instruct-2507 \
-  --model-type qwen3 --max-length 32768
+for split in train val; do
+  python -m graphtask_r1.cli data export-sft \
+    --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
+    --output data/training/kqapro_graphscript_v03_solver_sft_$split.parquet \
+    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
+    --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+done
+
+python -m graphtask_r1.cli data export-questioner-sft \
+  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
+  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
+  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
+  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+
+python scripts/preflight_ms_swift_sft.py --require-all \
+  --input data/training/kqapro_graphscript_v03_solver_sft_train.parquet \
+  --accepted-output outputs/preflight/kqapro-solver-train-accepted.parquet \
+  --rejected-output outputs/preflight/kqapro-solver-train-rejected.parquet \
+  --summary-output outputs/preflight/kqapro-solver-train-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 --max-length 32768
+
+python scripts/preflight_ms_swift_sft.py --require-all \
+  --input data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
+  --accepted-output outputs/preflight/kqapro-questioner-train-accepted.parquet \
+  --rejected-output outputs/preflight/kqapro-questioner-train-rejected.parquet \
+  --summary-output outputs/preflight/kqapro-questioner-train-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 --max-length 32768
+
+python scripts/preflight_ms_swift_sft.py --require-all \
+  --input data/training/kqapro_graphscript_v03_solver_sft_val.parquet \
+  --accepted-output outputs/preflight/kqapro-solver-val-accepted.parquet \
+  --rejected-output outputs/preflight/kqapro-solver-val-rejected.parquet \
+  --summary-output outputs/preflight/kqapro-solver-val-summary.json \
+  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 --max-length 32768
+
+python -m graphtask_r1.cli data combine-sft \
+  --solver-input outputs/preflight/kqapro-solver-train-accepted.parquet \
+  --questioner-input outputs/preflight/kqapro-questioner-train-accepted.parquet \
+  --output outputs/preflight/kqapro-mixed-train-accepted.parquet --seed 42
 ```
+
+该接口不依赖 KQAPro 名称：任意后端只要实现 `GraphBackend`、提供 certified single-seed tasks 与
+relation catalog，即可复用同一个 Questioner 导出器。运行时 prompt 只描述通用 GraphScript 合约；
+数据集/快照名称留在数据配置中。Questioner seed metadata 只包含 ID、label、type 和有界 relation
+IDs，不包含邻居实体或答案。
 
 `--max-length` 支持 1–40960。若从 32K 提高到 40K，应重新运行预检并记录新的 summary；不要仅
 修改训练参数后继续使用旧 accepted 文件。
@@ -63,8 +105,8 @@ python scripts/preflight_ms_swift_sft.py \
 ## 3. SFT
 
 ```bash
-export SFT_TRAIN_DATA=$PWD/outputs/preflight/kqapro-train-accepted.parquet
-export SFT_VAL_DATA=$PWD/data/training/kqapro_graphscript_v03_sft_val.parquet
+export SFT_TRAIN_DATA=$PWD/outputs/preflight/kqapro-mixed-train-accepted.parquet
+export SFT_VAL_DATA=$PWD/outputs/preflight/kqapro-solver-val-accepted.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b-kqapro-v03
 export NUM_GPUS=4
 export MAX_LENGTH=32768

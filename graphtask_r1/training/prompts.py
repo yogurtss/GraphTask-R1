@@ -59,21 +59,25 @@ mode=min|max, out); require_unique(in); emit(in). The first operation must be st
 all_entities, resolve_entity, or search_passage, and the last must be emit."""
 
 
-QUESTIONER_GRAPHSCRIPT_V03_PROMPT = """You are the Questioner in KQAPro graph self-play. Produce
-one bounded, typed GraphScript v0.3 JSON program. It may resolve entities, traverse allowed
-relations, combine or filter entity handles, use fact qualifiers, query attributes, relations or
-their qualifiers, verify values, select extrema, count, and emit an answer. Output exactly one JSON
-object with no prose or markdown. Never embed a guessed gold answer; execution supplies it."""
+QUESTIONER_GRAPHSCRIPT_V03_PROMPT = """You are the Questioner in structured graph self-play.
+Produce one bounded, typed GraphScript JSON program. Output exactly
+{"version":"0.3","ops":[...]} with no prose, markdown, or additional top-level fields. Root the
+program in every provided seed using the required resolve_entity operation with the exact entity ID
+and match="id"; never use all_entities or a different root. Traverse only observed/allowed relation
+IDs, include only fields listed in the operation signatures, and end with exactly one emit. Never
+embed a guessed gold answer; execution supplies it."""
 
 
-SOLVER_GRAPHSCRIPT_V03_PROMPT = """You are the Solver in KQAPro graph self-play. Compile the
-natural-language question into one bounded, typed GraphScript v0.3 JSON program. Use
-resolve_entity or all_entities and only relation/qualifier IDs in the KQAPro catalog. Output exactly
-one JSON object with no prose or markdown. Program execution must produce the answer."""
+SOLVER_GRAPHSCRIPT_V03_PROMPT = """You are the Solver in structured graph self-play. Compile the
+natural-language question into one bounded, typed GraphScript JSON program. Output exactly
+{"version":"0.3","ops":[...]} with no prose, markdown, or additional top-level fields. Start with
+resolve_entity or a bounded all_entities candidate set, use only allowed relation/qualifier IDs,
+include only fields listed in the operation signatures, and end with exactly one emit. Program
+execution, not a free-form answer, must produce the answer."""
 
 
 GRAPHSCRIPT_V03_GRAMMAR = """
-Use at most 64 operations and SSA handles h0..h63. Valid signatures are:
+Operator contract: use at most 64 operations and SSA handles h0..h63. Valid signatures are:
 all_entities(max_results, out) [immediately restrict before materialization];
 resolve_entity(query, match=id|exact|search, limit, out); follow(in, relation, direction=out|in,
 limit, out); intersect(inputs, out); union(inputs, out); filter_type(in, type_id, out);
@@ -85,6 +89,20 @@ query_relation(subject, object, out); query_relation_qualifier(subject, object, 
 out); verify(in, comparator, value={value,datatype,unit}, out); select_between(left, right,
 attribute, mode=min|max, out); select_among(in, attribute, mode=min|max, out); emit(in). The first
 operation must be all_entities or resolve_entity, and the last must be emit."""
+
+
+QUESTIONER_GRAPHSCRIPT_V03_GRAMMAR = """
+Questioner operator contract: use at most 64 operations and SSA handles h0..h63. Valid signatures
+are: resolve_entity(query, match=id, limit, out); follow(in, relation, direction=out|in, limit,
+out); intersect(inputs, out); union(inputs, out); filter_type(in, type_id, out);
+filter_literal(in, relation, comparator, value={value,datatype,unit}, out);
+filter_qualifier(in, qualifier, comparator, value={value,datatype,unit}, out); count(in, out);
+query_attribute(in, attribute, out); query_attribute_under_condition(in, attribute, qualifier,
+qualifier_value, out); query_attribute_qualifier(in, attribute, attribute_value, qualifier, out);
+query_relation(subject, object, out); query_relation_qualifier(subject, object, relation, qualifier,
+out); verify(in, comparator, value={value,datatype,unit}, out); select_between(left, right,
+attribute, mode=min|max, out); select_among(in, attribute, mode=min|max, out); emit(in). Every root
+must be a required seed resolve_entity operation, and the last operation must be emit."""
 
 
 def relation_catalog_text(relations: tuple[RelationInfo, ...]) -> str:
@@ -125,6 +143,10 @@ def role_prompt(
     if interaction_mode == "graphscript" and graphscript_version == "0.2":
         system += GRAPHSCRIPT_V02_GRAMMAR
     if interaction_mode == "graphscript" and graphscript_version == "0.3":
-        system += GRAPHSCRIPT_V03_GRAMMAR
+        system += (
+            QUESTIONER_GRAPHSCRIPT_V03_GRAMMAR
+            if role == "questioner"
+            else GRAPHSCRIPT_V03_GRAMMAR
+        )
     content = payload + relation_catalog_text(relation_catalog)
     return [{"role": "system", "content": system}, {"role": "user", "content": content}]

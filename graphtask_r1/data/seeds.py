@@ -11,6 +11,10 @@ from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.graphscript import graphscript_operators
 from graphtask_r1.schema import RelationInfo
 from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
+from graphtask_r1.training.questioner_context import (
+    build_questioner_seed_context,
+    render_questioner_seed_payload,
+)
 from graphtask_r1.utils import ProgressLogger, write_json
 
 
@@ -38,6 +42,8 @@ def sample_questioner_seeds(
     max_follow_limit: int = 100,
     max_edge_visits: int = 200,
     max_returned_entities: int = 1_000,
+    max_seed_neighbor_facts: int = 200,
+    max_seed_relations: int = 64,
 ) -> dict[str, int | str]:
     if interaction_mode == "graphscript" and not relation_catalog:
         raise ValueError("graphscript seed export requires a non-empty relation catalog")
@@ -63,7 +69,15 @@ def sample_questioner_seeds(
             break
     progress.finish(scanned, selected=len(selected), requested=count)
     rows = []
+    allowed_relations = frozenset(value.relation_id for value in relation_catalog)
     for index, entity_id in enumerate(selected):
+        seed_context = build_questioner_seed_context(
+            backend,
+            [entity_id],
+            allowed_relations=allowed_relations,
+            max_neighbor_facts=max_seed_neighbor_facts,
+            max_relation_ids=max_seed_relations,
+        )
         common = {
             "graph_snapshot": snapshot,
             "topic_entity_ids": [entity_id],
@@ -86,13 +100,19 @@ def sample_questioner_seeds(
                 else "full"
             ),
             "text_search_enabled": graphscript_version == "0.2",
+            "seed_context": seed_context,
         }
+        payload = (
+            render_questioner_seed_payload(seed_context)
+            if interaction_mode == "graphscript" and graphscript_version == "0.3"
+            else f"Explore from this seed entity and construct one certified task: {entity_id}"
+        )
         rows.append(
             {
                 "data_source": "graphtask/questioner",
                 "prompt": role_prompt(
                     "questioner",
-                    f"Explore from this seed entity and construct one certified task: {entity_id}",
+                    payload,
                     interaction_mode=interaction_mode,
                     relation_catalog=relation_catalog,
                     graphscript_version=graphscript_version,
@@ -114,6 +134,8 @@ def sample_questioner_seeds(
         "seed": seed,
         "interaction_mode": interaction_mode,
         "graphscript_version": graphscript_version,
+        "max_seed_neighbor_facts": max_seed_neighbor_facts,
+        "max_seed_relations": max_seed_relations,
     }
     write_json(output_path.with_suffix(".metrics.json"), metrics)
     return metrics

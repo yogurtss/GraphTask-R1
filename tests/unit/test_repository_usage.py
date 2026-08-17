@@ -171,7 +171,10 @@ def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
     assert kqapro_guide.index("## 5. Questioner/Solver self-play") < kqapro_guide.index(
         "## 附录 A：可选的 Solver-only GRPO warm-up"
     )
-    assert "默认直接用 SFT adapter 初始化 self-play" in kqapro_guide
+    assert "默认直接用 mixed-role SFT adapter 初始化 self-play" in kqapro_guide
+    assert "data export-questioner-sft" in kqapro_guide
+    assert "--count \"$QUESTIONER_SFT_COUNT\"" in kqapro_guide
+    assert "data combine-sft" in kqapro_guide
 
 
 def test_cli_logs_to_stderr_and_keeps_json_on_stdout() -> None:

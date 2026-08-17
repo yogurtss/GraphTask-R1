@@ -74,7 +74,7 @@ rg -n -- '--model |--adapters |--model_type |--num_generations ' \
 
 ```text
 MODEL_PATH            = 原始基础模型
-LORA_ADAPTER_PATH     = Solver SFT LoRA checkpoint
+LORA_ADAPTER_PATH     = 当前推荐的 Solver + Questioner mixed SFT LoRA checkpoint
 base_model_name_or_path ≈ MODEL_PATH
 ```
 
@@ -294,7 +294,7 @@ find "$SELFPLAY_TRAINER_DIR" -path '*/checkpoint-*/adapter_model.safetensors' \
 |---|---|---|
 | model/adapter 关系错误 | SFT 加载问题 | 使用 base model + 单独 SFT LoRA，避免重复应用 |
 | Solver 单独也大量解析失败 | SFT/checkpoint 问题 | 检查 SFT 数据、版本、catalog、checkpoint 选择 |
-| Solver 正常，Questioner 大量 `-0.35` | Solver-only SFT 导致 Questioner 冷启动 | Questioner warm-up/curriculum + 分阶段 reward |
+| Solver 正常，Questioner 大量 `-0.35` | 旧 Solver-only SFT 或 Questioner prompt/seed 不匹配 | 重生成双角色 SFT/seed + 分阶段 reward |
 | 相同 completion 得到不同 reward | stochastic reward 噪声 | opponent 显式 seed；按 task/signature 缓存同轮评估 |
 | 不同 completion 全部同分 | reward 过粗 | 增加 JSON/schema/执行/认证的稠密分阶段 reward |
 | `reward_std>0`、completion 不同、checkpoint 不变 | 梯度/训练器问题 | 单 GPU bounded smoke；检查 trainable LoRA、mask、DDP 切分 |
@@ -486,8 +486,9 @@ PY
 | `ops.*` 下其他未知参数 | operation signature 不匹配 | 对照 v0.3 grammar 和 SFT target |
 | 标准 SFT target 本身包含该字段 | parser、版本或数据不一致 | 核对数据和运行时 GraphScript 版本 |
 
-当前 KQAPro 主线 SFT 只训练 Solver。若 Questioner 的额外字段远多于 Solver，这更符合
-Questioner 未经 SFT 的冷启动，而不是 SFT adapter 没有加载。
+旧主线 SFT 只训练 Solver；当前主线已改为独立导出 Questioner 后与 Solver 混合 SFT。若 Questioner
+的额外字段仍远多于 Solver，先确认没有复用旧 SFT adapter、旧 Solver/Questioner Parquet 或旧 seed
+Parquet，再判断是否为 adapter 加载问题。
 
 ## 14. 区分 Solver 格式失败与可执行但答案错误
 
@@ -572,10 +573,11 @@ PY
 
 1. 暂停完整规模 self-play，保留当前 bounded run 作为诊断样本。
 2. 用第 13 节确定额外字段路径，不要直接放宽 parser。
-3. 在 Questioner v0.3 prompt 中明确顶层只能是 `{"version":"0.3","ops":[...]}`，并提供最小合法
-   JSON 示例。
-4. 从 KQAPro train 的认证 program 导出 Questioner SFT 行，对共享 LoRA 做 Questioner/Solver
-   混合或分阶段 warm-up；当前 Solver-only SFT 无法保证 Questioner 冷启动成功。
+3. 重新生成 seed，使 Questioner 同时看到 entity ID、label、type、有界局部 relation IDs 和固定
+   `match="id"` root；prompt 顶层只能是 `{"version":"0.3","ops":[...]}`，且禁止
+   `all_entities` 绕过 seed。
+4. 用 `data export-questioner-sft --count N` 从认证 program 独立导出 Questioner 行，和重新生成的
+   Solver 行分别预检，再用 `data combine-sft` 训练共享 LoRA；不要继续使用旧 Solver-only adapter。
 5. 将 reward 改为可区分的阶段信号：非 JSON、额外字段、schema、shape/handle、可执行、认证/F1。
    保留最终严格认证目标，不把无效程序当作成功。
 6. 重新运行小规模 smoke；只有同一 prompt group 出现 `unique_rewards>1`，且 generation step 出现

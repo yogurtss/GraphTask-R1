@@ -5,9 +5,9 @@ import pytest
 from graphtask_r1.cli import _launch_stage, build_parser, main
 from graphtask_r1.generation import certify_proposal
 from graphtask_r1.graph import toy_graph
-from graphtask_r1.schema import Entity, Hop, TaskProposal
+from graphtask_r1.schema import Entity, Hop, RelationInfo, TaskProposal
 from graphtask_r1.training.relations import load_relation_catalog
-from graphtask_r1.utils import write_records
+from graphtask_r1.utils import write_json, write_records
 
 
 def test_data_prepare_accepts_positive_worker_count() -> None:
@@ -140,6 +140,81 @@ def test_sft_export_accepts_graphscript_v02() -> None:
     assert args.graphscript_version == "0.2"
 
 
+def test_questioner_sft_export_is_independent_and_requires_exact_count() -> None:
+    args = build_parser().parse_args(
+        [
+            "data",
+            "export-questioner-sft",
+            "--input",
+            "tasks.parquet",
+            "--output",
+            "questioner.parquet",
+            "--count",
+            "2048",
+            "--seed",
+            "7",
+        ]
+    )
+    assert args.count == 2048
+    assert args.seed == 7
+    assert args.graphscript_version == "0.3"
+    assert args.interaction_mode == "graphscript"
+
+    combined = build_parser().parse_args(
+        [
+            "data",
+            "combine-sft",
+            "--solver-input",
+            "solver.parquet",
+            "--questioner-input",
+            "questioner.parquet",
+            "--output",
+            "mixed.parquet",
+        ]
+    )
+    assert combined.solver_input == Path("solver.parquet")
+    assert combined.questioner_input == Path("questioner.parquet")
+
+
+def test_questioner_sft_cli_exports_requested_rows(tmp_path: Path) -> None:
+    task = certify_proposal(
+        TaskProposal(
+            topic_entities=("alice",),
+            program=Hop(input=Entity(entity_id="alice"), relation="works_at"),
+        ),
+        toy_graph(),
+        graph_snapshot="toy-v1",
+    )
+    tasks = tmp_path / "tasks.parquet"
+    catalog = tmp_path / "relations.json"
+    output = tmp_path / "questioner.parquet"
+    write_records(tasks, [task.model_dump(mode="json")])
+    write_json(
+        catalog,
+        [RelationInfo(relation_id="works_at", label="works at").model_dump(mode="json")],
+    )
+
+    assert (
+        main(
+            [
+                "data",
+                "export-questioner-sft",
+                "--input",
+                str(tasks),
+                "--output",
+                str(output),
+                "--count",
+                "1",
+                "--relation-catalog",
+                str(catalog),
+            ]
+        )
+        == 0
+    )
+    assert output.is_file()
+    assert output.with_suffix(".metrics.json").is_file()
+
+
 def test_relation_catalog_unions_multiple_task_inputs(tmp_path: Path) -> None:
     train_task = certify_proposal(
         TaskProposal(
@@ -213,6 +288,8 @@ def test_sample_seeds_defaults_to_kqapro_snapshot() -> None:
     assert args.snapshot == "kqapro-v1"
     assert args.count == 256
     assert args.graphscript_version == "0.3"
+    assert args.max_seed_neighbor_facts == 200
+    assert args.max_seed_relations == 64
 
 
 def test_kqapro_eval_and_visualization_cli_are_separate() -> None:

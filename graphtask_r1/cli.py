@@ -13,6 +13,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import pyarrow.parquet as pq
 import yaml
 
 from graphtask_r1.archive import TaskArchive
@@ -41,7 +42,11 @@ from graphtask_r1.training.relations import build_relation_catalog, load_relatio
 from graphtask_r1.training.rl_dataset import export_role_dataset
 from graphtask_r1.training.scripted import run_scripted_selfplay
 from graphtask_r1.training.selfplay import run_self_play
-from graphtask_r1.training.sft_dataset import export_sft_dataset
+from graphtask_r1.training.sft_dataset import (
+    combine_sft_datasets,
+    export_questioner_sft_dataset,
+    export_sft_dataset,
+)
 from graphtask_r1.utils import (
     ProgressLogger,
     iter_record_json,
@@ -268,6 +273,27 @@ def build_parser() -> argparse.ArgumentParser:
     export_sft.add_argument("--relation-catalog", type=Path)
     _add_common(export_sft)
 
+    export_questioner_sft = data_actions.add_parser("export-questioner-sft")
+    export_questioner_sft.add_argument("--input", type=Path, required=True)
+    export_questioner_sft.add_argument("--output", type=Path, required=True)
+    export_questioner_sft.add_argument("--count", type=_positive_int, required=True)
+    export_questioner_sft.add_argument(
+        "--interaction-mode", choices=["tool", "graphscript"], default="graphscript"
+    )
+    export_questioner_sft.add_argument(
+        "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.3"
+    )
+    export_questioner_sft.add_argument("--relation-catalog", type=Path)
+    export_questioner_sft.add_argument("--seed", type=int, default=42)
+    export_questioner_sft.add_argument("--dry-run", action="store_true")
+
+    combine_sft = data_actions.add_parser("combine-sft")
+    combine_sft.add_argument("--solver-input", type=Path, required=True)
+    combine_sft.add_argument("--questioner-input", type=Path, required=True)
+    combine_sft.add_argument("--output", type=Path, required=True)
+    combine_sft.add_argument("--seed", type=int, default=42)
+    combine_sft.add_argument("--dry-run", action="store_true")
+
     seeds = data_actions.add_parser("sample-seeds")
     seeds.add_argument("--snapshot", default="kqapro-v1")
     seeds.add_argument("--output", type=Path, required=True)
@@ -276,6 +302,8 @@ def build_parser() -> argparse.ArgumentParser:
     seeds.add_argument("--pool-limit", type=int, default=100_000)
     seeds.add_argument("--opponent-url")
     seeds.add_argument("--opponent-samples", type=int, default=8)
+    seeds.add_argument("--max-seed-neighbor-facts", type=_positive_int, default=200)
+    seeds.add_argument("--max-seed-relations", type=_positive_int, default=64)
     seeds.add_argument("--seed", type=int, default=42)
     seeds.add_argument("--interaction-mode", choices=["tool", "graphscript"], default="tool")
     seeds.add_argument(
@@ -710,6 +738,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                 relation_catalog=load_relation_catalog(args.relation_catalog),
             )
             result = {"rows": rows, "output": str(args.output)}
+    elif args.group == "data" and args.action == "export-questioner-sft":
+        if args.dry_run:
+            result = {
+                "would_scan": record_count(args.input),
+                "would_select": args.count,
+                "role": "questioner",
+                "seed": args.seed,
+                "output": str(args.output),
+            }
+        else:
+            questioner_tasks, _ = _iter_training_tasks(args.input, None)
+            metrics = export_questioner_sft_dataset(
+                questioner_tasks,
+                args.output,
+                count=args.count,
+                seed=args.seed,
+                interaction_mode=args.interaction_mode,
+                graphscript_version=args.graphscript_version,
+                relation_catalog=load_relation_catalog(args.relation_catalog),
+            )
+            result = {**metrics, "output": str(args.output)}
+    elif args.group == "data" and args.action == "combine-sft":
+        if args.dry_run:
+            result = {
+                "solver_rows": pq.ParquetFile(args.solver_input).metadata.num_rows,
+                "questioner_rows": pq.ParquetFile(args.questioner_input).metadata.num_rows,
+                "seed": args.seed,
+                "output": str(args.output),
+            }
+        else:
+            metrics = combine_sft_datasets(
+                args.solver_input,
+                args.questioner_input,
+                args.output,
+                seed=args.seed,
+            )
+            result = {**metrics, "output": str(args.output)}
     elif args.group == "data" and args.action == "sample-seeds":
         result = sample_questioner_seeds(
             args.snapshot,
@@ -723,6 +788,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             interaction_mode=args.interaction_mode,
             graphscript_version=args.graphscript_version,
             relation_catalog=load_relation_catalog(args.relation_catalog),
+            max_seed_neighbor_facts=args.max_seed_neighbor_facts,
+            max_seed_relations=args.max_seed_relations,
         )
     elif args.group == "data" and args.action == "select-interaction-tasks":
         selected_tasks = _load_tasks(args.input, args.limit)
