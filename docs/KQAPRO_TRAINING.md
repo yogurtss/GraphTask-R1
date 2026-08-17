@@ -337,6 +337,9 @@ score、两者较小值定义的 cooperation bottleneck、Questioner validity/fr
 F1/EM、frozen Solver 在新任务上的 success rate，以及 loss、gradient norm、KL、train/eval
 reward 和 completion clipped ratio；聚合 JSON 还记录每轮 archive 增量。原始 JSONL 是审计依据，
 PNG 只用于快速观察趋势。
+若出现 `loss=0`、`reward_std>0`、`grad_norm=0` 或角色 reward 长期固定，按
+[Self-play reward / zero-gradient 服务器排查手册](SELFPLAY_REWARD_DEBUG_README.md)逐项检查，尤其要
+区分真实 action variance 与 frozen-opponent 随机噪声。
 两组 GPU 必须非空、无重复且互不重叠，配置加载时会提前校验。每个 prompt 生成 4 条
 completion。每轮最多包含 512 prompts、2048 条 actor
 completions；只有通过 Questioner 基础认证的 completion 才会触发 opponent，理论上限为 4096 条
