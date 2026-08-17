@@ -46,27 +46,21 @@ GraphScript 行加载后不附加 tool schema。`tool` 行则由
 `graphtask_r1/training/ms_swift_data.py` 动态生成 ms-swift `tools` 字段，源 Parquet 不保存某个
 训练框架的 agent/session 私有字段。
 
-## 导出示例
+## SFT 一键导出
 
 ```bash
-python -m graphtask_r1.cli data export-sft \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/training/kqapro_graphscript_v03_solver_sft_train.parquet \
-  --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+export TRAIN_TASKS=/path/to/train/tasks.parquet
+export VAL_TASKS=/path/to/val/tasks.parquet
+export SOLVER_RATIO=9
+export QUESTIONER_RATIO=1
+export MODEL_PATH=/path/to/model
+bash scripts/prepare_mixed_sft_data.sh
+```
 
-python -m graphtask_r1.cli data export-questioner-sft \
-  --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
-  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
-  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
-  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+脚本固定生成 GraphScript SFT，并一次完成角色隔离导出、按实际 Solver 行数配比、确定性混合和模板
+预检。底层独立导出仍可用于排障。RL 导出继续使用对应 CLI：
 
-# 两个角色分别完成真实模板 preflight 后再混合 accepted 文件
-python -m graphtask_r1.cli data combine-sft \
-  --solver-input outputs/preflight/solver-accepted.parquet \
-  --questioner-input outputs/preflight/questioner-accepted.parquet \
-  --output outputs/preflight/mixed-accepted.parquet --seed 42
-
+```bash
 python -m graphtask_r1.cli data export-rl \
   --input data/processed/kqapro/kqapro-v1/train/tasks.parquet \
   --output data/training/kqapro_graphscript_v03_rl.parquet \
@@ -74,9 +68,9 @@ python -m graphtask_r1.cli data export-rl \
   --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
 ```
 
-`export-questioner-sft` 是独立、定量且 snapshot-neutral 的入口。自然语言 prompt 不强调数据集名或
-内部版本名；`"version":"0.3"` 只作为机器解析字段保留。Questioner 的 fixed seed root 与 Solver
-问题编译仍是两个角色合约，预检前不要把两类原始行直接混在一起。
+脚本调用的 `export-questioner-sft` 是独立、定量且 snapshot-neutral 的入口。自然语言 prompt
+不强调数据集名或内部版本名；`"version":"0.3"` 只作为机器解析字段保留。Questioner 的 fixed
+seed root 与 Solver 问题编译仍是两个角色合约，预检前不要把两类原始行直接混在一起。
 
-若运行工具消融，将两条命令的 `--interaction-mode` 改为 `tool`，并在启动脚本中显式设置
+若运行工具消融，应使用底层命令将 `--interaction-mode` 改为 `tool`，并在启动脚本中显式设置
 `INTERACTION_MODE=tool`。不要把两种模式混入同一个训练 split。

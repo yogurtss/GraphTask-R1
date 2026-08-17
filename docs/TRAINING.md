@@ -49,50 +49,26 @@ Parquet。
 内存。
 
 Solver 与 Questioner prompt 合约都已更新，必须从 certified tasks 重新导出，不能复用旧 Solver
-Parquet 或旧 Questioner seed。两种角色先独立导出、独立预检，再确定性混合。Questioner 的通用
-入口要求显式 `--count`，不会隐式按 Solver 数据量扩张：
+Parquet 或旧 Questioner seed。主路径统一使用一键脚本；先修改脚本开头配置区，或用同名环境变量
+覆盖：
 
 ```bash
-for split in train val; do
-  python -m graphtask_r1.cli data export-sft \
-    --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v03_solver_sft_$split.parquet \
-    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-    --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
-done
+export TRAIN_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
+export VAL_TASKS=$PWD/data/processed/kqapro/kqapro-v1/val/tasks.parquet
+export WORK_DIR=$PWD/outputs/sft-data
+export SOLVER_RATIO=9
+export QUESTIONER_RATIO=1
+export MODEL_PATH=/path/to/local/model
 
-python -m graphtask_r1.cli data export-questioner-sft \
-  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
-  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
-  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
-
-python scripts/preflight_ms_swift_sft.py --require-all \
-  --input data/training/kqapro_graphscript_v03_solver_sft_train.parquet \
-  --accepted-output outputs/preflight/kqapro-solver-train-accepted.parquet \
-  --rejected-output outputs/preflight/kqapro-solver-train-rejected.parquet \
-  --summary-output outputs/preflight/kqapro-solver-train-summary.json \
-  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 --max-length 32768
-
-python scripts/preflight_ms_swift_sft.py --require-all \
-  --input data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
-  --accepted-output outputs/preflight/kqapro-questioner-train-accepted.parquet \
-  --rejected-output outputs/preflight/kqapro-questioner-train-rejected.parquet \
-  --summary-output outputs/preflight/kqapro-questioner-train-summary.json \
-  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 --max-length 32768
-
-python scripts/preflight_ms_swift_sft.py --require-all \
-  --input data/training/kqapro_graphscript_v03_solver_sft_val.parquet \
-  --accepted-output outputs/preflight/kqapro-solver-val-accepted.parquet \
-  --rejected-output outputs/preflight/kqapro-solver-val-rejected.parquet \
-  --summary-output outputs/preflight/kqapro-solver-val-summary.json \
-  --model Qwen/Qwen3-4B-Instruct-2507 --model-type qwen3 --max-length 32768
-
-python -m graphtask_r1.cli data combine-sft \
-  --solver-input outputs/preflight/kqapro-solver-train-accepted.parquet \
-  --questioner-input outputs/preflight/kqapro-questioner-train-accepted.parquet \
-  --output outputs/preflight/kqapro-mixed-train-accepted.parquet --seed 42
+bash scripts/prepare_mixed_sft_data.sh
+source "$WORK_DIR/sft_data.env"
 ```
+
+比例按最终训练行数定义：`9:1` 约等于 90% Solver + 10% Questioner。脚本保留全部 Solver 行，
+根据其实际行数确定性计算 Questioner 数量；设置正整数 `QUESTIONER_COUNT_OVERRIDE` 可改为固定数量。
+脚本会将角色隔离的原始文件、拒绝原因、summary 和最终 accepted 文件全部保存在 `WORK_DIR`，并以
+`--require-all` 预检保证比例不会因静默过滤而漂移。底层 `data export-sft`、
+`data export-questioner-sft` 和 `data combine-sft` 仍可用于单步排障。
 
 该接口不依赖 KQAPro 名称：任意后端只要实现 `GraphBackend`、提供 certified single-seed tasks 与
 relation catalog，即可复用同一个 Questioner 导出器。运行时 prompt 只描述通用 GraphScript 合约；
@@ -105,8 +81,7 @@ IDs，不包含邻居实体或答案。
 ## 3. SFT
 
 ```bash
-export SFT_TRAIN_DATA=$PWD/outputs/preflight/kqapro-mixed-train-accepted.parquet
-export SFT_VAL_DATA=$PWD/outputs/preflight/kqapro-solver-val-accepted.parquet
+source "${WORK_DIR:-$PWD/outputs/sft-data}/sft_data.env"
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b-kqapro-v03
 export NUM_GPUS=4
 export MAX_LENGTH=32768

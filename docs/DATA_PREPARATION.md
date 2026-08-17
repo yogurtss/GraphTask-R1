@@ -131,44 +131,28 @@ KQAPro 官方 27 个 KoPL 函数均有确定性映射；qualifier 依附于稳�
 version。val 不抽样。默认 `--verification-mode source --trace-mode none` 是 SFT 推荐路径；小规模
 诊断才使用 `--verification-mode full --trace-mode canonical`。
 
-### 2.3 产物审计
+### 2.3 一键审计、导出、配比与预检
 
-只执行下面这组必要步骤：
+原始数据转换为 certified task 后，不再逐条执行 audit、catalog、角色导出、combine 和 preflight。
+修改 `scripts/prepare_mixed_sft_data.sh` 开头配置区后运行一次：
 
 ```bash
-for split in train val; do
-  python -m graphtask_r1.cli data audit \
-    --input data/processed/kqapro/kqapro-v1/$split/tasks.parquet \
-    --kind task --deep \
-    --training-view-output \
-      data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet
-done
-
-python -m graphtask_r1.cli data build-relation-catalog \
-  --input \
-    data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-  --scope graph \
-  --output data/processed/kqapro/kqapro-v1/relation_catalog.json
-
-for split in train val; do
-  python -m graphtask_r1.cli data export-sft \
-    --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v03_solver_sft_$split.parquet \
-    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-    --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
-done
-
-python -m graphtask_r1.cli data export-questioner-sft \
-  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
-  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
-  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+export TRAIN_TASKS=$PWD/data/processed/kqapro/kqapro-v1/train/tasks.parquet
+export VAL_TASKS=$PWD/data/processed/kqapro/kqapro-v1/val/tasks.parquet
+export WORK_DIR=$PWD/outputs/sft-data
+export SOLVER_RATIO=9
+export QUESTIONER_RATIO=1
+export MODEL_PATH=/path/to/local/model
+bash scripts/prepare_mixed_sft_data.sh
 ```
 
-`audit --deep` 同时检查完整 `TaskCertificate` 并生成不含 witness 的 training view；它不重复执行
-program，因为 gold 和 source answer 对账已由 `data prepare` 完成。canonical trace 只在 bounded
-diagnostic 中 replay。`--scope graph` 从 `graph.sqlite` 生成固定的完整 relation allowlist，不依赖
-小样本覆盖率。
+这里的 `9:1` 表示最终训练集约 90% Solver + 10% Questioner。脚本保留全部 Solver 行并自动计算
+Questioner 数量；需要精确指定数量时设置 `QUESTIONER_COUNT_OVERRIDE=N`。完成后执行
+`source "$WORK_DIR/sft_data.env"` 即可获得训练需要的 `SFT_TRAIN_DATA` 和 `SFT_VAL_DATA`。
+
+脚本内部的 `audit --deep` 检查完整 `TaskCertificate` 并生成不含 witness 的 training view；它不重复
+执行 program，因为 gold 和 source answer 对账已由 `data prepare` 完成。`--scope graph` 从
+`graph.sqlite` 生成固定的完整 relation allowlist，不依赖小样本覆盖率。
 
 `export-questioner-sft` 是 snapshot-neutral 的独立入口：它只要求 certified task、对应
 `GraphBackend` 和 relation catalog。它用实例级 RNG 对单 seed tasks 做确定性 reservoir sampling，

@@ -576,8 +576,9 @@ PY
 3. 重新生成 seed，使 Questioner 同时看到 entity ID、label、type、有界局部 relation IDs 和固定
    `match="id"` root；prompt 顶层只能是 `{"version":"0.3","ops":[...]}`，且禁止
    `all_entities` 绕过 seed。
-4. 用 `data export-questioner-sft --count N` 从认证 program 独立导出 Questioner 行，和重新生成的
-   Solver 行分别预检，再用 `data combine-sft` 训练共享 LoRA；不要继续使用旧 Solver-only adapter。
+4. 设置 `SOLVER_RATIO`、`QUESTIONER_RATIO` 后运行 `scripts/prepare_mixed_sft_data.sh`，从认证
+   program 重新生成双角色数据并训练共享 LoRA；需要固定数量时用
+   `QUESTIONER_COUNT_OVERRIDE=N`，不要继续使用旧 Solver-only adapter。
 5. 将 reward 改为可区分的阶段信号：非 JSON、额外字段、schema、shape/handle、可执行、认证/F1。
    保留最终严格认证目标，不把无效程序当作成功。
 6. 重新运行小规模 smoke；只有同一 prompt group 出现 `unique_rewards>1`，且 generation step 出现

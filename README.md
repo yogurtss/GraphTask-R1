@@ -76,79 +76,29 @@ make test
 
 ## 最短可执行路径
 
-从已生成的 KQAPro task 导出 train/val SFT：
+从已认证的 train/val task 一键生成混合角色 SFT。第一次使用时只需打开
+`scripts/prepare_mixed_sft_data.sh`，修改开头的路径、模型和比例配置：
 
 ```bash
-mkdir -p data/training
-
-for split in train val; do
-  python -m graphtask_r1.cli data audit \
-    --input data/processed/kqapro/kqapro-v1/$split/tasks.parquet \
-    --kind task --deep \
-    --training-view-output \
-      data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet
-done
-
-python -m graphtask_r1.cli data build-relation-catalog \
-  --input \
-    data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-  --scope graph \
-  --output data/processed/kqapro/kqapro-v1/relation_catalog.json
-
-for split in train val; do
-  python -m graphtask_r1.cli data export-sft \
-    --input data/processed/kqapro/kqapro-v1/$split/training_tasks.parquet \
-    --output data/training/kqapro_graphscript_v03_solver_sft_$split.parquet \
-    --roles solver --interaction-mode graphscript --graphscript-version 0.3 \
-    --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
-done
-
-python -m graphtask_r1.cli data export-questioner-sft \
-  --input data/processed/kqapro/kqapro-v1/train/training_tasks.parquet \
-  --output data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
-  --count 2048 --seed 42 --interaction-mode graphscript --graphscript-version 0.3 \
-  --relation-catalog data/processed/kqapro/kqapro-v1/relation_catalog.json
+export TRAIN_TASKS=/path/to/train/tasks.parquet
+export VAL_TASKS=/path/to/val/tasks.parquet
+export WORK_DIR=$PWD/outputs/sft-data
+export SOLVER_RATIO=9
+export QUESTIONER_RATIO=1
+export MODEL_PATH=/path/to/model
 ```
 
-`audit --deep` 同时完成完整证书检查和轻量 training view 生成；程序执行和 gold/source 对账已在
-`data prepare` 中完成。canonical trace 只在 bounded diagnostic 中 replay。graph-scope catalog
-固定覆盖该快照的全部 relation。
-
-用训练时的真实模板筛出 32K 内有效样本，不启动训练：
-
 ```bash
-python scripts/preflight_ms_swift_sft.py --require-all \
-  --input data/training/kqapro_graphscript_v03_solver_sft_train.parquet \
-  --accepted-output outputs/preflight/solver-accepted.parquet \
-  --rejected-output outputs/preflight/solver-rejected.parquet \
-  --summary-output outputs/preflight/solver-summary.json \
-  --model Qwen/Qwen3-4B-Instruct-2507 --max-length 32768
-
-python scripts/preflight_ms_swift_sft.py --require-all \
-  --input data/training/kqapro_graphscript_v03_questioner_sft_train.parquet \
-  --accepted-output outputs/preflight/questioner-accepted.parquet \
-  --rejected-output outputs/preflight/questioner-rejected.parquet \
-  --summary-output outputs/preflight/questioner-summary.json \
-  --model Qwen/Qwen3-4B-Instruct-2507 --max-length 32768
-
-python scripts/preflight_ms_swift_sft.py --require-all \
-  --input data/training/kqapro_graphscript_v03_solver_sft_val.parquet \
-  --accepted-output outputs/preflight/solver-val-accepted.parquet \
-  --rejected-output outputs/preflight/solver-val-rejected.parquet \
-  --summary-output outputs/preflight/solver-val-summary.json \
-  --model Qwen/Qwen3-4B-Instruct-2507 --max-length 32768
-
-python -m graphtask_r1.cli data combine-sft \
-  --solver-input outputs/preflight/solver-accepted.parquet \
-  --questioner-input outputs/preflight/questioner-accepted.parquet \
-  --output outputs/preflight/mixed-accepted.parquet --seed 42
+bash scripts/prepare_mixed_sft_data.sh
+source outputs/sft-data/sft_data.env
 ```
 
-确认数据后再启动 SFT；`--dry-run` 只打印实际脚本和环境变量：
+该脚本依次完成 deep audit、training view、relation catalog、双角色导出、按比例混合及真实训练模板
+预检。`9:1` 表示最终约 90% Solver、10% Questioner；若需要固定 Questioner 数量，设置
+`QUESTIONER_COUNT_OVERRIDE`。预检默认要求所有行通过，以免过滤后静默改变比例。确认数据后再启动
+SFT；`--dry-run` 只打印实际训练脚本和环境变量：
 
 ```bash
-export SFT_TRAIN_DATA=$PWD/outputs/preflight/mixed-accepted.parquet
-export SFT_VAL_DATA=$PWD/outputs/preflight/solver-val-accepted.parquet
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b
 
 python -m graphtask_r1.cli train sft \
