@@ -82,11 +82,19 @@ class OpenAICompletionClient:
         timeout_s: float,
         retries: int,
         cache_path: Path,
+        temperature: float = 0.0,
+        top_p: float | None = None,
     ) -> None:
+        if not 0.0 <= temperature <= 2.0:
+            raise ValueError("temperature must be between 0 and 2")
+        if top_p is not None and not 0.0 < top_p <= 1.0:
+            raise ValueError("top_p must be in (0, 1]")
         self.config = config
         self.timeout_s = timeout_s
         self.retries = retries
         self.cache_path = cache_path
+        self.temperature = temperature
+        self.top_p = top_p
         self._cache: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         if cache_path.exists():
@@ -111,10 +119,12 @@ class OpenAICompletionClient:
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": [dict(message) for message in messages],
-            "temperature": 0.0,
+            "temperature": self.temperature,
             "seed": seed,
             "max_tokens": self.config.max_completion_tokens,
         }
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
         cache_key = stable_hash(payload)
         async with self._lock:
             cached = self._cache.get(cache_key)

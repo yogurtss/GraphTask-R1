@@ -36,6 +36,10 @@ from graphtask_r1.evaluation import (
     inspect_kqapro_val,
     visualize_kqapro_val,
 )
+from graphtask_r1.evaluation.sft_capability import (
+    load_sft_capability_config,
+    visualize_sft_capability,
+)
 from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.pipeline import run_mini_pipeline
 from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
@@ -442,6 +446,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     kqapro_visualize.add_argument(
         "--inspect-only", action="store_true", help="print selected dataset rows without inference"
+    )
+    sft_visualize = visualize_actions.add_parser("sft-capability")
+    sft_visualize.add_argument("--config", type=Path, required=True)
+    sft_visualize.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("outputs/visualization/sft-capability"),
+    )
+    sft_visualize.add_argument(
+        "--groups",
+        type=_positive_int,
+        help="override the number of sequential Questioner/Solver prompt groups",
     )
     return parser
 
@@ -948,6 +964,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 val_config,
                 model_stage=args.model_stage,
                 limit=args.limit,
+            )
+        )
+    elif args.group == "visualize" and args.action == "sft-capability":
+        result = asyncio.run(
+            visualize_sft_capability(
+                load_sft_capability_config(args.config),
+                args.output_dir,
+                groups=args.groups,
             )
         )
     else:

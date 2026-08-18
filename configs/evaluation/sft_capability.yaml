@@ -1,0 +1,24 @@
+# Serve the merged SFT checkpoint (or an endpoint with the SFT LoRA enabled) through an
+# OpenAI-compatible /v1/chat/completions API before running the probe.
+model:
+  model_url: ${SFT_PROBE_MODEL_URL}
+  model: ${SFT_PROBE_MODEL}
+  max_completion_tokens: 4096
+
+# Both inputs use the RL row schema so the probe executes the exact training prompt and reward.
+questioner_input: ${QUESTIONER_SEEDS}
+solver_input: ${SFT_PROBE_SOLVER_INPUT}
+
+# Run graphtask_r1.training.opponent against the same SFT checkpoint with a dedicated probe
+# archive, then point this URL at its /evaluate service.
+opponent_url: ${SFT_PROBE_OPPONENT_URL}
+
+groups: 3
+candidates_per_role: 4
+opponent_samples: 4
+seed: 42
+round_index: 0
+temperature: 0.7
+top_p: 0.8
+request_timeout_s: 600
+request_retries: 1

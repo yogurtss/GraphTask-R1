@@ -350,6 +350,19 @@ def test_kqapro_eval_and_visualization_cli_are_separate() -> None:
     assert visualization.limit == 3
     assert visualization.inspect_only is True
 
+    sft_capability = build_parser().parse_args(
+        [
+            "visualize",
+            "sft-capability",
+            "--config",
+            "configs/evaluation/sft_capability.yaml",
+            "--groups",
+            "5",
+        ]
+    )
+    assert sft_capability.output_dir == Path("outputs/visualization/sft-capability")
+    assert sft_capability.groups == 5
+
     comparison = build_parser().parse_args(
         [
             "evaluate",
