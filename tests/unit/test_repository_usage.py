@@ -99,8 +99,8 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     val_data.touch()
     script = PROJECT_ROOT / "scripts/train_ms_swift_grpo.sh"
 
-    def launch(mode: str) -> list[str]:
-        capture = tmp_path / f"{mode}.args"
+    def launch(mode: str, *, deepspeed: str = "none") -> list[str]:
+        capture = tmp_path / f"{mode}-{deepspeed}.args"
         environment = {
             **os.environ,
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
@@ -110,6 +110,7 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
             "VAL_DATA": str(val_data),
             "OUTPUT_DIR": str(tmp_path / f"output-{mode}"),
             "VLLM_MODE": mode,
+            "DEEPSPEED": deepspeed,
         }
         subprocess.run(["bash", str(script)], cwd=PROJECT_ROOT, env=environment, check=True)
         return capture.read_text().splitlines()
@@ -118,6 +119,10 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     assert "--vllm_gpu_memory_utilization" in colocate
     assert "--vllm_server_host" not in colocate
     assert "--vllm_server_port" not in colocate
+    assert "--deepspeed" not in colocate
+
+    zero3 = launch("colocate", deepspeed="zero3")
+    assert zero3[zero3.index("--deepspeed") + 1] == "zero3"
 
     server = launch("server")
     assert server[server.index("--vllm_server_host") + 1] == "127.0.0.1"

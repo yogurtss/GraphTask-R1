@@ -304,7 +304,9 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert plan["train_environment"]["VLLM_MAX_MODEL_LEN"] == "16384"
     assert plan["train_environment"]["VLLM_GPU_MEMORY_UTILIZATION"] == "0.6"
     assert plan["train_environment"]["VLLM_SLEEP_LEVEL"] == "1"
+    assert plan["train_environment"]["DEEPSPEED"] == "none"
     assert plan["train_environment"]["VLLM_MODE"] == "colocate"
+    assert plan["deepspeed"] == "none"
     assert plan["rollout_budget"] == {
         "questioner_prompts": 256,
         "solver_prompts": 256,
@@ -392,6 +394,7 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     assert config.vllm_max_model_len == 16_384
     assert config.vllm_gpu_memory_utilization == 0.6
     assert config.vllm_sleep_level == 1
+    assert config.deepspeed == "none"
     assert config.micro_batch_size == 4
     assert config.eval_batch_size == 8
     assert config.gradient_accumulation_steps == 2
@@ -521,7 +524,40 @@ def test_selfplay_retry_selects_only_new_highest_checkpoint(tmp_path: Path) -> N
 
 def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
     config_path = Path(__file__).parents[2] / "configs/training/selfplay.yaml"
-    assert load_selfplay_config(config_path).graph_snapshot == "kqapro-v1"
+    config = load_selfplay_config(config_path)
+    assert config.graph_snapshot == "kqapro-v1"
+    assert config.deepspeed == "zero2"
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["none", "zero0", "zero1", "zero2", "zero3", "zero2_offload", "zero3_offload"],
+)
+def test_selfplay_accepts_supported_deepspeed_stages(stage: str) -> None:
+    config = SelfPlayConfig.model_validate(
+        {
+            "initial_adapter": "adapter",
+            "base_tasks": "tasks.parquet",
+            "val_data": "val.parquet",
+            "questioner_seeds": "seeds.parquet",
+            "deepspeed": stage,
+        }
+    )
+
+    assert config.deepspeed == stage
+
+
+def test_selfplay_rejects_unknown_deepspeed_stage() -> None:
+    with pytest.raises(ValueError, match="deepspeed"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "deepspeed": "zero4",
+            }
+        )
 
 
 def test_comparison_profile_requires_relation_catalog() -> None:

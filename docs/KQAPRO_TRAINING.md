@@ -336,9 +336,10 @@ opponent_samples: 4
 actor_gpus: "0,1,2"
 opponent_gpus: "3"
 max_completion_tokens: 4096
-vllm_max_model_len: 16384
+vllm_max_model_len: 32768
 vllm_gpu_memory_utilization: 0.6
 vllm_sleep_level: 1
+deepspeed: zero2
 micro_batch_size: 4
 eval_batch_size: 8
 gradient_accumulation_steps: 2
@@ -346,7 +347,7 @@ steps_per_generation: 4
 rollout_n: 4
 ```
 
-GPU 0–2 同时承担共享 actor 的训练和 colocate rollout；GPU 3 只运行冻结 Solver opponent。
+GPU 0–2 同时承担共享 actor 的 LoRA 训练和 colocate rollout；GPU 3 只运行冻结 Solver opponent。
 GPU 3 会先完成本轮 LoRA 合并，合并进程退出后再启动 SGLang；合并日志位于
 `round_NNN/logs/merge.log`，SGLang 日志位于 `round_NNN/logs/sglang.log`。每轮保留一份完整合并
 模型，因此三轮运行需额外预留约三份 4B 模型权重的磁盘空间。
@@ -374,10 +375,29 @@ opponent completions。三轮上限分别为 6144 和 12288。`--dry-run` 的 `r
 `3 × 4 × 4 = 48 completions`，即每次采样包含 12 个 prompt；评测 batch 为
 `3 × 8 = 24 completions`。相比 micro batch 2 的配置，训练有效 batch 保持 24 不变，但每卡
 micro batch、单次采样和评测吞吐均扩大。4B 模型在 80GB H100 上默认使用 micro batch 4。
-colocate vLLM 使用 60% 显存上限、16384 总上下文，并在反向阶段启用 `sleep_level=1` 释放 vLLM
+colocate vLLM 使用 60% 显存上限、32768 总上下文，并在反向阶段启用 `sleep_level=1` 释放 vLLM
 cache。colocate 模式不传 `vllm_server_host/port`，因此不会尝试连接 `127.0.0.1:8000`；8000 只属于
 显式 `VLLM_MODE=server` 的独立 rollout 服务。该档位面向 80GB H100 的较高利用率，不建议未经
 实测直接提高到 0.8–0.9。
+
+`deepspeed` 只控制 actor 训练状态的分布式管理，不改变 `train_type=lora`，也不作用于 GPU 3 的
+SGLang opponent。正式配置默认使用 `zero2`。训练环境需要安装与当前 PyTorch/CUDA 兼容的
+DeepSpeed；设为 `none` 时 launcher 不传 `--deepspeed`。支持的档位为：
+
+| 配置 | 行为 | 建议用途 |
+|---|---|---|
+| `none` | 普通 DDP | 基线或排查 DeepSpeed 兼容性 |
+| `zero0` | DeepSpeed engine，不做 ZeRO 分片 | 验证 DeepSpeed 链路 |
+| `zero1` | 分片 optimizer state | 轻量节省 |
+| `zero2` | 再分片 gradient | LoRA self-play 默认档位 |
+| `zero3` | 再分片 model parameters | actor 参数显存仍不足时试验，通信更重 |
+| `zero2_offload` | ZeRO-2 并向 CPU offload | GPU 紧张且 CPU 内存充足 |
+| `zero3_offload` | ZeRO-3 并向 CPU offload | 最低 GPU 参数状态占用，速度最慢 |
+
+LoRA 的 optimizer/gradient 本来就较小，因此 ZeRO-2 的节省通常不如 full fine-tuning 明显；长
+prompt 的 activation、colocate vLLM KV cache 和 opponent 并发显存不会被 DeepSpeed 消除。生成阶段
+OOM 仍应优先降低 `vllm_gpu_memory_utilization`/completion 上限；GPU 3 OOM 仍应降低
+`opponent_samples` 或限制 opponent 并发。
 
 24 小时是这组 4B/4×H100 参数的目标预算，不是跨驱动、模型和数据环境的硬保证。先完成第 1 轮并
 读取 `round_001/logs/ms_swift.log` 的实际耗时；若超过 7 小时，不要原样启动后两轮，应优先将
@@ -389,7 +409,9 @@ cache。colocate 模式不传 `vllm_server_host/port`，因此不会尝试连接
 `micro_batch_size: 2`、`gradient_accumulation_steps: 4`，保持训练有效 batch 仍为 24。若训练和
 生成阶段都长期有较多余量，可试验 `micro_batch_size: 6`，但这会把训练有效 batch 提到 36，需将其
 作为单独实验重新核对学习率和收敛曲线。不要通过缩短 16384 总上下文来掩盖正常样本超长，除非
-重新做过真实模板长度审计。
+重新做过真实模板长度审计。若 ZeRO-2 后仍在 actor 反向阶段 OOM，可以按 `zero3`、
+`zero2_offload`、`zero3_offload` 的顺序分别测试；每个档位都应单独记录吞吐和峰值显存，不要把
+offload 带来的速度下降误判为数据或 reward 变慢。
 
 ## 6. val 选模与提升判定
 

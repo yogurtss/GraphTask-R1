@@ -33,6 +33,9 @@ max_completion_tokens: 4096
 vllm_max_model_len: 32768
 vllm_gpu_memory_utilization: 0.6
 vllm_sleep_level: 1
+# Actor training remains LoRA. DeepSpeed only controls distributed state sharding.
+# Choices: none, zero0, zero1, zero2, zero3, zero2_offload, zero3_offload.
+deepspeed: zero2
 micro_batch_size: 4
 eval_batch_size: 8
 gradient_accumulation_steps: 2

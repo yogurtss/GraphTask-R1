@@ -28,6 +28,19 @@ if [[ "$USE_VLLM" != "true" && "$USE_VLLM" != "false" ]]; then
   echo "USE_VLLM must be true or false" >&2
   exit 2
 fi
+DEEPSPEED="${DEEPSPEED:-none}"
+DEEPSPEED_ARGS=()
+case "$DEEPSPEED" in
+  none)
+    ;;
+  zero0|zero1|zero2|zero3|zero2_offload|zero3_offload)
+    DEEPSPEED_ARGS=(--deepspeed "$DEEPSPEED")
+    ;;
+  *)
+    echo "DEEPSPEED must be one of: none, zero0, zero1, zero2, zero3, zero2_offload, zero3_offload" >&2
+    exit 2
+    ;;
+esac
 VLLM_COLOCATE_ARGS=()
 VLLM_SERVER_ARGS=()
 VLLM_MODE_ARGS=()
@@ -58,6 +71,10 @@ if ! command -v swift >/dev/null 2>&1; then
 fi
 if ! python -c 'import math_verify' >/dev/null 2>&1; then
   echo "math_verify is required by ms-swift GRPO; install it in the training environment" >&2
+  exit 2
+fi
+if [[ "$DEEPSPEED" != "none" ]] && ! python -c 'import deepspeed' >/dev/null 2>&1; then
+  echo "deepspeed is required when DEEPSPEED=$DEEPSPEED" >&2
   exit 2
 fi
 if [[ ! -d "$LORA_ADAPTER_PATH" ]]; then
@@ -92,6 +109,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --reward_funcs graphtask_score \
   --agent_template hermes \
   --loss_scale default \
+  "${DEEPSPEED_ARGS[@]}" \
   --use_vllm "$USE_VLLM" \
   "${VLLM_MODE_ARGS[@]}" \
   "${VLLM_COLOCATE_ARGS[@]}" \

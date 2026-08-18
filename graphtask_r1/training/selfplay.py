@@ -34,6 +34,15 @@ MS_SWIFT_VERSION = "3.6.4"
 LOGGER = logging.getLogger(__name__)
 SelfPlayTask = TaskCertificate | TaskTrainingRecord
 TaskT = TypeVar("TaskT")
+DeepSpeedStage = Literal[
+    "none",
+    "zero0",
+    "zero1",
+    "zero2",
+    "zero3",
+    "zero2_offload",
+    "zero3_offload",
+]
 
 
 def _gpu_ids(value: str) -> tuple[str, ...]:
@@ -79,6 +88,7 @@ class SelfPlayConfig(BaseModel):
     vllm_max_model_len: int = Field(default=16_384, gt=0, le=40_960)
     vllm_gpu_memory_utilization: float = Field(default=0.6, gt=0.0, lt=1.0)
     vllm_sleep_level: Literal[0, 1, 2] = 1
+    deepspeed: DeepSpeedStage = "none"
     micro_batch_size: int = Field(default=4, gt=0)
     eval_batch_size: int = Field(default=8, gt=0)
     gradient_accumulation_steps: int = Field(default=2, gt=0)
@@ -538,6 +548,7 @@ def run_self_play(
             "VLLM_MAX_MODEL_LEN": str(config.vllm_max_model_len),
             "VLLM_GPU_MEMORY_UTILIZATION": str(config.vllm_gpu_memory_utilization),
             "VLLM_SLEEP_LEVEL": str(config.vllm_sleep_level),
+            "DEEPSPEED": config.deepspeed,
             "USE_VLLM": str(config.use_vllm).lower(),
             "OUTPUT_DIR": str(round_dir.resolve()),
             "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
@@ -560,6 +571,7 @@ def run_self_play(
             "opponent_gpus": config.opponent_gpus,
             "allow_gpu_overlap": config.allow_gpu_overlap,
             "use_vllm": config.use_vllm,
+            "deepspeed": config.deepspeed,
             "opponent_backend": config.opponent_backend,
             "merged_opponent_model": str((round_dir / "opponent_merged").resolve()),
             "interaction_mode": config.interaction_mode,
