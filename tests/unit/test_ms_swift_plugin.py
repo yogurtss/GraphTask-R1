@@ -279,15 +279,23 @@ def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
             "role": "solver",
             "task_id": "",
             "reason_codes": [],
-            "components": {
-                "exact_match": 1.0,
-                "f1": 1.0,
-                "precision": 1.0,
-                "raw_score": 1.0,
-                "recall": 1.0,
-                "score": 1.0,
-                "unweighted_score": 1.0,
-            },
+                "components": {
+                    "answer_f1": 1.0,
+                    "exact_match": 1.0,
+                    "exact_output": 1.0,
+                    "executable": 1.0,
+                    "f1": 1.0,
+                    "format": 1.0,
+                    "json_valid": 1.0,
+                    "precision": 1.0,
+                    "raw_score": 1.0,
+                    "recall": 1.0,
+                    "reward_stage": 6.0,
+                    "schema_valid": 1.0,
+                    "score": 1.0,
+                    "structure_valid": 1.0,
+                    "unweighted_score": 1.0,
+                },
         }
     ]
     persisted = json.loads(

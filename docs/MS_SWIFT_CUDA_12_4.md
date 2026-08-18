@@ -1,6 +1,6 @@
 # ms-swift：Python 3.10 + CUDA 12.4 环境
 
-推荐固定 Python 3.10、PyTorch 2.6.0+cu124 和 `ms-swift==3.6.4`。SFT 使用 PyTorch SDPA；
+推荐固定 Python 3.10、PyTorch 2.6.0+cu124 和 `ms-swift==3.10.3`。SFT 使用 PyTorch SDPA；
 GRPO 额外安装 vLLM。为避免 Transformers、PEFT、TRL 和 CUDA wheel 被其他项目改写，请创建
 独立 Conda 环境。
 
@@ -17,7 +17,7 @@ python -m pip install \
   torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
   --index-url https://download.pytorch.org/whl/cu124
 
-python -m pip install "ms-swift==3.6.4"
+python -m pip install "ms-swift==3.10.3"
 python -m pip install -r requirements.txt
 ```
 
@@ -27,7 +27,7 @@ python -m pip install -r requirements.txt
 python -m pip install "vllm==0.8.5.post1" math_verify
 ```
 
-ms-swift 3.6.4 的 GRPO trainer 会导入它的多轮 scheduler 注册表，即使 GraphScript 主线未启用
+ms-swift 3.10.3 的 GRPO trainer 会导入它的多轮 scheduler 注册表，即使 GraphScript 主线未启用
 多轮模式，因此 GRPO 环境仍需补装 `math_verify`；SFT 和数据预检不需要它。
 
 Self-play 的 frozen opponent 使用 SGLang，建议在独立服务环境中部署，并与 ms-swift actor GPU
@@ -53,7 +53,7 @@ print("peft:", peft.__version__)
 assert torch.__version__.startswith("2.6.0")
 assert torch.version.cuda == "12.4"
 assert torch.cuda.is_available()
-assert swift.__version__ == "3.6.4"
+assert swift.__version__ == "3.10.3"
 PY
 
 swift sft --help >/dev/null
@@ -106,10 +106,10 @@ accumulation。正式 GRPO 前用 `NUM_GPUS=1`、`ROLLOUT_N=2`、短 completion 
 
 ## 官方参考
 
-- [ms-swift v3.6.4 release](https://github.com/modelscope/ms-swift/releases/tag/v3.6.4)
-- [ms-swift 安装](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/GetStarted/SWIFT-installation.md)
-- [自定义数据集](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Customization/Custom-dataset.md)
-- [Agent 数据格式](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/Agent-support.md)
-- [GRPO reward](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/GRPO/DeveloperGuide/reward_function.md)
-- [多轮 GRPO](https://github.com/modelscope/ms-swift/blob/v3.6.4/docs/source_en/Instruction/GRPO/DeveloperGuide/multi_turn.md)
+- [ms-swift v3.10.3 release](https://github.com/modelscope/ms-swift/releases/tag/v3.10.3)
+- [ms-swift 安装](https://github.com/modelscope/ms-swift/blob/v3.10.3/docs/source_en/GetStarted/SWIFT-installation.md)
+- [自定义数据集](https://github.com/modelscope/ms-swift/blob/v3.10.3/docs/source_en/Customization/Custom-dataset.md)
+- [Agent 数据格式](https://github.com/modelscope/ms-swift/blob/v3.10.3/docs/source_en/Instruction/Agent-support.md)
+- [GRPO reward](https://github.com/modelscope/ms-swift/blob/v3.10.3/docs/source_en/Instruction/GRPO/DeveloperGuide/reward_function.md)
+- [多轮 GRPO](https://github.com/modelscope/ms-swift/blob/v3.10.3/docs/source_en/Instruction/GRPO/DeveloperGuide/multi_turn.md)
 - [PyTorch 2.6.0 cu124](https://pytorch.org/get-started/previous-versions/)

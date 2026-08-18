@@ -212,15 +212,17 @@ retry、cache 和 trace ID。
 无需修改 `args.json`，也不需要为旧项目目录建立软链接。
 
 默认 4×H100 布局为 actor GPU `0,1,2`、frozen opponent GPU `3`；actor rollout 使用 colocate，
-不另占 GPU。每轮确定性抽取 256 条 Questioner rows 和 256 条 Solver rows，使用
+不另占 GPU。每轮确定性抽取 192 条 Questioner rows 和 320 条 Solver rows，使用
 `rollout_n=4`、`opponent_samples=4`、4096 completion 上限。三轮理论上限为 6144 条 actor
-completions 和 12288 条 opponent completions。详细的一天预算、首轮外推和降级顺序见
+completions 和 9216 条 opponent completions。详细的一天预算、首轮外推和降级顺序见
 [KQAPro 训练流程：Questioner/Solver self-play](KQAPRO_TRAINING.md#5-questionersolver-self-play)。
 
-4B/80GB 默认采用 `micro_batch_size=4`、`eval_batch_size=8`、
+4B/80GB 默认采用 `micro_batch_size=4`、`eval_batch_size=4`、
 `gradient_accumulation_steps=2`、`vllm_gpu_memory_utilization=0.6`、
-`vllm_max_model_len=16384` 和 `vllm_sleep_level=1`。三张 actor GPU 的训练有效 batch 为 24，
-采样 batch 为 48；首轮显存监控以及生成/反向传播 OOM 的分别退档方式见上面的 KQAPro 小节。
+`vllm_max_model_len=32768` 和 `vllm_sleep_level=1`。三张 actor GPU 的训练有效 batch 为 24，
+采样 batch 为 48。训练期 val 固定抽样 256 条且每题只生成一次；REINFORCE++ 为默认 advantage
+estimator，也可切回 GRPO。首轮显存监控以及生成/反向传播 OOM 的分别退档方式见上面的 KQAPro
+小节。
 
 ### 单卡 Qwen3-0.6B smoke
 
@@ -237,7 +239,7 @@ completions 和 12288 条 opponent completions。详细的一天预算、首轮�
 
 训练脚本使用 LoRA，因此 `checkpoint-last` 默认只包含增量 adapter；它不是可以脱离基础模型单独
 加载的完整权重。需要生成可独立部署、复制或归档的 Hugging Face 模型目录时，使用当前固定版本
-`ms-swift==3.6.4` 的 `swift export --merge_lora true`。v3.x 使用 `--adapters`，不要使用已移除的
+`ms-swift==3.10.3` 的 `swift export --merge_lora true`。v3.x 使用 `--adapters`，不要使用已移除的
 v2.x `--ckpt_dir` 参数。
 
 ### 6.1 合并 SFT checkpoint
@@ -304,7 +306,7 @@ find "$GRPO_MERGED" -maxdepth 1 \
 indices 上跑 bounded evaluation。合并后的目录部署时作为完整模型传给 `--model-path`，不再传
 `--enable-lora` 或 `--lora-paths`。
 
-合并命令依据 ms-swift 3.6.4 的
+合并命令依据 ms-swift 3.10.3 的
 [命令行参数说明](https://swift.readthedocs.io/en/v3.6/Instruction/Command-line-parameters.html)和
 [v3 迁移说明](https://swift.readthedocs.io/en/v3.6/Instruction/ReleaseNote3.0.html)。当前项目是普通
 Transformers Qwen3-4B LoRA；若以后切换到 Megatron/MCore、MoE 或混合全参训练，不应直接套用本节，

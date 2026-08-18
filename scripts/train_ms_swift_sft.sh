@@ -18,7 +18,7 @@ cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if ! command -v swift >/dev/null 2>&1; then
-  echo "ms-swift CLI not found; install ms-swift==3.6.4 in the CUDA 12.4 environment" >&2
+  echo "ms-swift CLI not found; install ms-swift==3.10.3 in the CUDA 12.4 environment" >&2
   exit 2
 fi
 if [[ ! -f "$TRAIN_DATA" || ! -f "$VAL_DATA" ]]; then

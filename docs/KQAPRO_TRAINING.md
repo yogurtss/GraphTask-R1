@@ -52,7 +52,7 @@ mkdir -p "$KQAPRO_TRAINING" outputs/preflight
 ```
 
 `KQAPRO_RAW` 应包含 `kb.json`、`train.json` 和 `val.json`。CUDA 12.4、PyTorch 与
-ms-swift 3.6.4 的安装见 [ms-swift 环境说明](MS_SWIFT_CUDA_12_4.md)。
+ms-swift 3.10.3 的安装见 [ms-swift 环境说明](MS_SWIFT_CUDA_12_4.md)。
 
 ### 2.1 Qwen3-8B 配置示例
 
@@ -330,8 +330,10 @@ Self-play 的正式预算字段位于 `configs/training/selfplay.yaml`：
 
 ```yaml
 rounds: 3
-questioner_episodes: 256
-solver_episodes: 256
+questioner_episodes: 192
+solver_episodes: 320
+questioner_reward_weight: 1.0
+solver_reward_weight: 1.0
 opponent_samples: 4
 actor_gpus: "0,1,2"
 opponent_gpus: "3"
@@ -340,11 +342,14 @@ vllm_max_model_len: 32768
 vllm_gpu_memory_utilization: 0.6
 vllm_sleep_level: 1
 deepspeed: zero2
+rl_algorithm: reinforce_plus_plus
 micro_batch_size: 4
-eval_batch_size: 8
+eval_batch_size: 4
+validation_samples: 256
 gradient_accumulation_steps: 2
 steps_per_generation: 4
 rollout_n: 4
+eval_rollout_n: 1
 ```
 
 GPU 0–2 同时承担共享 actor 的 LoRA 训练和 colocate rollout；GPU 3 只运行冻结 Solver opponent。
@@ -365,15 +370,15 @@ PNG 只用于快速观察趋势。
 若出现 `loss=0`、`reward_std>0`、`grad_norm=0` 或角色 reward 长期固定，按
 [Self-play reward / zero-gradient 服务器排查手册](SELFPLAY_REWARD_DEBUG_README.md)逐项检查，尤其要
 区分真实 action variance 与 frozen-opponent 随机噪声。
-两组 GPU 必须非空、无重复且互不重叠，配置加载时会提前校验。每个 prompt 生成 4 条
+两组 GPU 必须非空、无重复且互不重叠，配置加载时会提前校验。每个训练 prompt 生成 4 条
 completion。每轮最多包含 512 prompts、2048 条 actor
-completions；只有通过 Questioner 基础认证的 completion 才会触发 opponent，理论上限为 4096 条
-opponent completions。三轮上限分别为 6144 和 12288。`--dry-run` 的 `rollout_budget` 会打印这些
+completions；只有通过 Questioner 基础认证的 completion 才会触发 opponent，理论上限为 3072 条
+opponent completions。三轮上限分别为 6144 和 9216。`--dry-run` 的 `rollout_budget` 会打印这些
 上限，便于在启动 GPU 作业前复核。
 
 训练全局 batch 为 `3 × 4 × 2 = 24 completions`；采样全局 batch 为
 `3 × 4 × 4 = 48 completions`，即每次采样包含 12 个 prompt；评测 batch 为
-`3 × 8 = 24 completions`。相比 micro batch 2 的配置，训练有效 batch 保持 24 不变，但每卡
+`3 × 4 = 12 completions`。相比 micro batch 2 的配置，训练有效 batch 保持 24 不变，但每卡
 micro batch、单次采样和评测吞吐均扩大。4B 模型在 80GB H100 上默认使用 micro batch 4。
 colocate vLLM 使用 60% 显存上限、32768 总上下文，并在反向阶段启用 `sleep_level=1` 释放 vLLM
 cache。colocate 模式不传 `vllm_server_host/port`，因此不会尝试连接 `127.0.0.1:8000`；8000 只属于
@@ -412,6 +417,20 @@ OOM 仍应优先降低 `vllm_gpu_memory_utilization`/completion 上限；GPU 3 O
 重新做过真实模板长度审计。若 ZeRO-2 后仍在 actor 反向阶段 OOM，可以按 `zero3`、
 `zero2_offload`、`zero3_offload` 的顺序分别测试；每个档位都应单独记录吞吐和峰值显存，不要把
 offload 带来的速度下降误判为数据或 reward 变慢。
+
+`rl_algorithm` 可设为 `grpo` 或 `reinforce_plus_plus`。launcher 始终使用同一个 GRPO trainer，分别
+传入 `advantage_estimator=grpo`（组内归一化）或
+`advantage_estimator=reinforce_plus_plus`（batch 归一化并把 KL 纳入 reward）。主线默认后者。
+REINFORCE++ 不能凭空修复完全相同的 Solver reward，因此 Solver reward 同时改为分阶段信号：非法
+JSON、schema/结构错误、执行失败、可执行但答错、部分正确和完全正确严格递增。两个角色默认使用
+相同的 1.0 reward 尺度，再通过 192:320 的 prompt 预算让已经开始收敛的 Questioner 减少曝光，给
+Solver 更多起步样本；如果切回 GRPO，其他数据和 reward contract 不变。
+
+正式 val 不再逐轮跑完整的数千条集合。`validation_samples: 256` 使用固定 seed 从源 Parquet
+确定性抽样一次，所有 round 共用同一子集；`validation_sample.json` 保存源文件哈希、抽样下标和
+行数以便复现。`eval_rollout_n: 1` 只让每个 val prompt 生成一条 completion，不改变训练的
+`rollout_n: 4`。要恢复完整验证可设 `validation_samples: null`；最终候选 checkpoint 的正式比较仍
+应离线跑完整 val，而不是把频繁训练期 val 当最终结果。
 
 ## 6. val 选模与提升判定
 

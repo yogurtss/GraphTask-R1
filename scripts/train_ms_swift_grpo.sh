@@ -41,6 +41,28 @@ case "$DEEPSPEED" in
     exit 2
     ;;
 esac
+RL_ALGORITHM="${RL_ALGORITHM:-grpo}"
+RL_ALGORITHM_ARGS=()
+case "$RL_ALGORITHM" in
+  grpo)
+    RL_ALGORITHM_ARGS=(
+      --advantage_estimator grpo
+      --scale_rewards group
+      --kl_in_reward false
+    )
+    ;;
+  reinforce_plus_plus)
+    RL_ALGORITHM_ARGS=(
+      --advantage_estimator reinforce_plus_plus
+      --scale_rewards batch
+      --kl_in_reward true
+    )
+    ;;
+  *)
+    echo "RL_ALGORITHM must be one of: grpo, reinforce_plus_plus" >&2
+    exit 2
+    ;;
+esac
 VLLM_COLOCATE_ARGS=()
 VLLM_SERVER_ARGS=()
 VLLM_MODE_ARGS=()
@@ -99,6 +121,7 @@ fi
 
 NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --rlhf_type grpo \
+  "${RL_ALGORITHM_ARGS[@]}" \
   --model "$MODEL_PATH" \
   --model_type "$MODEL_TYPE" \
   --adapters "$LORA_ADAPTER_PATH" \
@@ -128,6 +151,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --target_modules all-linear \
   --max_completion_length "$MAX_COMPLETION_LENGTH" \
   --num_generations "${ROLLOUT_N:-4}" \
+  --num_generations_eval "${EVAL_ROLLOUT_N:-1}" \
   --temperature "${TEMPERATURE:-1.0}" \
   --gradient_checkpointing true \
   --gradient_checkpointing_kwargs '{"use_reentrant":false}' \

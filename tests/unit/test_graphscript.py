@@ -505,6 +505,50 @@ def test_graphscript_v03_solver_reward_uses_kqapro_profile() -> None:
     assert score["edge_visits"] == 1.0
 
 
+def test_solver_reward_separates_invalid_executable_and_correct_outputs() -> None:
+    program = Hop(input=Entity(entity_id="alice"), relation="works_at")
+    solution = program_to_graphscript(program, version="0.3").model_dump_json(by_alias=True)
+    info = {
+        "interaction_mode": "graphscript",
+        "graphscript_version": "0.3",
+        "graph_snapshot": "toy-v1",
+        "topic_entity_ids": [],
+        "allowed_relations": ["works_at"],
+        "max_edge_visits": 10,
+    }
+
+    invalid = asyncio.run(
+        compute_score(
+            "graphtask/solver",
+            "not-json",
+            AnswerSet.entities(["acme"]).model_dump_json(),
+            info,
+        )
+    )
+    wrong = asyncio.run(
+        compute_score(
+            "graphtask/solver",
+            solution,
+            AnswerSet.entities(["bob"]).model_dump_json(),
+            info,
+        )
+    )
+    correct = asyncio.run(
+        compute_score(
+            "graphtask/solver",
+            solution,
+            AnswerSet.entities(["acme"]).model_dump_json(),
+            info,
+        )
+    )
+
+    assert invalid["raw_score"] < wrong["raw_score"] < correct["raw_score"]
+    assert wrong["raw_score"] == pytest.approx(0.1)
+    assert wrong["reward_stage"] == 5.0
+    assert correct["raw_score"] == 1.0
+    assert correct["reward_stage"] == 6.0
+
+
 def test_tool_comparison_questioner_cannot_change_episode_seed() -> None:
     solution = (
         '<task>{"topic_entities":["bob"],"program":'

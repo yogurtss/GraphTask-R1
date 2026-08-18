@@ -1,4 +1,4 @@
-"""ms-swift v3.6.4 runtime plugin for existing GraphTask Parquet files.
+"""ms-swift v3.10.3 runtime plugin for existing GraphTask Parquet files.
 
 This module is imported by ``swift`` through ``--external_plugins``. Importing the rest of
 GraphTask does not require ms-swift to be installed.

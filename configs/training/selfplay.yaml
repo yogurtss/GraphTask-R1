@@ -8,8 +8,10 @@ val_data: ${VAL_DATA}
 questioner_seeds: ${QUESTIONER_SEEDS}
 graph_snapshot: kqapro-v1
 rounds: 3
-questioner_episodes: 256
-solver_episodes: 256
+questioner_episodes: 192
+solver_episodes: 320
+questioner_reward_weight: 1.0
+solver_reward_weight: 1.0
 opponent_samples: 4
 base_ratio: 0.35
 archive_ratio: 0.35
@@ -36,9 +38,12 @@ vllm_sleep_level: 1
 # Actor training remains LoRA. DeepSpeed only controls distributed state sharding.
 # Choices: none, zero0, zero1, zero2, zero3, zero2_offload, zero3_offload.
 deepspeed: zero2
+rl_algorithm: reinforce_plus_plus
 micro_batch_size: 4
-eval_batch_size: 8
+eval_batch_size: 4
+validation_samples: 256
 gradient_accumulation_steps: 2
 steps_per_generation: 4
 rollout_n: 4
+eval_rollout_n: 1
 program_profile: graphscript_v0_3

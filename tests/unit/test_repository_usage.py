@@ -99,8 +99,10 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     val_data.touch()
     script = PROJECT_ROOT / "scripts/train_ms_swift_grpo.sh"
 
-    def launch(mode: str, *, deepspeed: str = "none") -> list[str]:
-        capture = tmp_path / f"{mode}-{deepspeed}.args"
+    def launch(
+        mode: str, *, deepspeed: str = "none", algorithm: str = "grpo"
+    ) -> list[str]:
+        capture = tmp_path / f"{mode}-{deepspeed}-{algorithm}.args"
         environment = {
             **os.environ,
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
@@ -111,6 +113,7 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
             "OUTPUT_DIR": str(tmp_path / f"output-{mode}"),
             "VLLM_MODE": mode,
             "DEEPSPEED": deepspeed,
+            "RL_ALGORITHM": algorithm,
         }
         subprocess.run(["bash", str(script)], cwd=PROJECT_ROOT, env=environment, check=True)
         return capture.read_text().splitlines()
@@ -120,6 +123,17 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     assert "--vllm_server_host" not in colocate
     assert "--vllm_server_port" not in colocate
     assert "--deepspeed" not in colocate
+    assert colocate[colocate.index("--advantage_estimator") + 1] == "grpo"
+    assert colocate[colocate.index("--scale_rewards") + 1] == "group"
+    assert colocate[colocate.index("--kl_in_reward") + 1] == "false"
+
+    reinforce = launch("colocate", algorithm="reinforce_plus_plus")
+    assert reinforce[reinforce.index("--advantage_estimator") + 1] == (
+        "reinforce_plus_plus"
+    )
+    assert reinforce[reinforce.index("--scale_rewards") + 1] == "batch"
+    assert reinforce[reinforce.index("--kl_in_reward") + 1] == "true"
+    assert reinforce[reinforce.index("--num_generations_eval") + 1] == "1"
 
     zero3 = launch("colocate", deepspeed="zero3")
     assert zero3[zero3.index("--deepspeed") + 1] == "zero3"

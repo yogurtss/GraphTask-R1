@@ -4,6 +4,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -31,6 +32,7 @@ from graphtask_r1.training.selfplay import (
     _adapter_from_checkpoint,
     _assemble_dataset,
     _commands,
+    _prepare_validation_dataset,
     _validate_merged_model,
     load_selfplay_config,
     run_self_play,
@@ -305,8 +307,11 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert plan["train_environment"]["VLLM_GPU_MEMORY_UTILIZATION"] == "0.6"
     assert plan["train_environment"]["VLLM_SLEEP_LEVEL"] == "1"
     assert plan["train_environment"]["DEEPSPEED"] == "none"
+    assert plan["train_environment"]["RL_ALGORITHM"] == "grpo"
+    assert plan["train_environment"]["EVAL_ROLLOUT_N"] == "1"
     assert plan["train_environment"]["VLLM_MODE"] == "colocate"
     assert plan["deepspeed"] == "none"
+    assert plan["rl_algorithm"] == "grpo"
     assert plan["rollout_budget"] == {
         "questioner_prompts": 256,
         "solver_prompts": 256,
@@ -395,11 +400,14 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     assert config.vllm_gpu_memory_utilization == 0.6
     assert config.vllm_sleep_level == 1
     assert config.deepspeed == "none"
+    assert config.rl_algorithm == "grpo"
     assert config.micro_batch_size == 4
     assert config.eval_batch_size == 8
     assert config.gradient_accumulation_steps == 2
     assert config.steps_per_generation == 4
     assert config.rollout_n == 4
+    assert config.eval_rollout_n == 1
+    assert config.validation_samples == 256
 
 
 def test_selfplay_rejects_overlapping_actor_and_opponent_gpus() -> None:
@@ -527,6 +535,29 @@ def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
     config = load_selfplay_config(config_path)
     assert config.graph_snapshot == "kqapro-v1"
     assert config.deepspeed == "zero2"
+    assert config.rl_algorithm == "reinforce_plus_plus"
+    assert config.questioner_episodes == 192
+    assert config.solver_episodes == 320
+    assert config.eval_batch_size == 4
+    assert config.validation_samples == 256
+    assert config.eval_rollout_n == 1
+
+
+def test_validation_subset_is_bounded_deterministic_and_replayable(tmp_path: Path) -> None:
+    source = tmp_path / "val.parquet"
+    pq.write_table(pa.table({"row_id": list(range(20))}), source)
+
+    first = _prepare_validation_dataset(source, tmp_path / "run-a", max_samples=5, seed=42)
+    second = _prepare_validation_dataset(source, tmp_path / "run-b", max_samples=5, seed=42)
+
+    assert first["total_rows"] == 20
+    assert first["selected_rows"] == 5
+    assert first["selected_indices"] == second["selected_indices"]
+    assert pq.read_table(first["output"])["row_id"].to_pylist() == pq.read_table(
+        second["output"]
+    )["row_id"].to_pylist()
+    manifest = json.loads((tmp_path / "run-a" / "validation_sample.json").read_text())
+    assert manifest == first
 
 
 @pytest.mark.parametrize(
@@ -556,6 +587,49 @@ def test_selfplay_rejects_unknown_deepspeed_stage() -> None:
                 "val_data": "val.parquet",
                 "questioner_seeds": "seeds.parquet",
                 "deepspeed": "zero4",
+            }
+        )
+
+
+@pytest.mark.parametrize("algorithm", ["grpo", "reinforce_plus_plus"])
+def test_selfplay_accepts_supported_rl_algorithms(algorithm: str) -> None:
+    config = SelfPlayConfig.model_validate(
+        {
+            "initial_adapter": "adapter",
+            "base_tasks": "tasks.parquet",
+            "val_data": "val.parquet",
+            "questioner_seeds": "seeds.parquet",
+            "rl_algorithm": algorithm,
+        }
+    )
+
+    assert config.rl_algorithm == algorithm
+
+
+def test_selfplay_rejects_unknown_rl_algorithm() -> None:
+    with pytest.raises(ValueError, match="rl_algorithm"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "rl_algorithm": "reinforce",
+            }
+        )
+
+
+def test_selfplay_validates_eval_rollout_divisibility() -> None:
+    with pytest.raises(ValueError, match="divisible by eval_rollout_n"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "actor_gpus": "0,1,2",
+                "eval_batch_size": 2,
+                "eval_rollout_n": 4,
             }
         )
 

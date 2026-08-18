@@ -30,7 +30,7 @@ from graphtask_r1.training.selfplay_metrics import (
 )
 from graphtask_r1.utils import file_hash, read_json, read_records, write_json
 
-MS_SWIFT_VERSION = "3.6.4"
+MS_SWIFT_VERSION = "3.10.3"
 LOGGER = logging.getLogger(__name__)
 SelfPlayTask = TaskCertificate | TaskTrainingRecord
 TaskT = TypeVar("TaskT")
@@ -43,6 +43,7 @@ DeepSpeedStage = Literal[
     "zero2_offload",
     "zero3_offload",
 ]
+RLAlgorithm = Literal["grpo", "reinforce_plus_plus"]
 
 
 def _gpu_ids(value: str) -> tuple[str, ...]:
@@ -62,6 +63,8 @@ class SelfPlayConfig(BaseModel):
     rounds: int = Field(default=3, gt=0)
     questioner_episodes: int = Field(default=256, gt=0, le=4_096)
     solver_episodes: int = Field(default=256, gt=0)
+    questioner_reward_weight: float = Field(default=1.0, gt=0.0)
+    solver_reward_weight: float = Field(default=1.0, gt=0.0)
     opponent_samples: int = Field(default=4, gt=0, le=64)
     base_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     archive_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
@@ -89,11 +92,14 @@ class SelfPlayConfig(BaseModel):
     vllm_gpu_memory_utilization: float = Field(default=0.6, gt=0.0, lt=1.0)
     vllm_sleep_level: Literal[0, 1, 2] = 1
     deepspeed: DeepSpeedStage = "none"
+    rl_algorithm: RLAlgorithm = "grpo"
     micro_batch_size: int = Field(default=4, gt=0)
     eval_batch_size: int = Field(default=8, gt=0)
+    validation_samples: int | None = Field(default=256, gt=0)
     gradient_accumulation_steps: int = Field(default=2, gt=0)
     steps_per_generation: int = Field(default=4, gt=0)
     rollout_n: int = Field(default=4, gt=0)
+    eval_rollout_n: int = Field(default=1, gt=0)
     program_profile: Literal[
         "full", "graphscript_v0_1", "graphscript_v0_2", "graphscript_v0_3"
     ] = "graphscript_v0_3"
@@ -150,8 +156,10 @@ class SelfPlayConfig(BaseModel):
             )
         if generation_batch % self.rollout_n:
             raise ValueError("self-play generation batch must be divisible by rollout_n")
-        if evaluation_batch % self.rollout_n:
-            raise ValueError("self-play evaluation batch must be divisible by rollout_n")
+        if evaluation_batch % self.eval_rollout_n:
+            raise ValueError(
+                "self-play evaluation batch must be divisible by eval_rollout_n"
+            )
         return self
 
 
@@ -224,6 +232,8 @@ def _assemble_dataset(
         max_edge_visits=config.max_edge_visits,
         max_returned_entities=config.max_returned_entities,
         program_profile=config.program_profile,
+        questioner_weight=config.questioner_reward_weight,
+        solver_weight=config.solver_reward_weight,
     )
     seed_table = pq.read_table(config.questioner_seeds)
     seed_rows = seed_table.to_pylist()
@@ -246,6 +256,7 @@ def _assemble_dataset(
                 "max_edge_visits": config.max_edge_visits,
                 "max_returned_entities": config.max_returned_entities,
                 "program_profile": config.program_profile,
+                "role_weight": config.questioner_reward_weight,
             }
         )
         row["extra_info"] = extra
@@ -400,6 +411,41 @@ def _archive_size(path: Path) -> int:
         return len(archive.all())
 
 
+def _prepare_validation_dataset(
+    source_path: Path,
+    output_dir: Path,
+    *,
+    max_samples: int | None,
+    seed: int,
+) -> dict[str, Any]:
+    """Create one replayable validation subset shared by every self-play round."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source = source_path.resolve()
+    parquet = pq.ParquetFile(source)
+    total_rows = parquet.metadata.num_rows
+    selected_indices: list[int] | None = None
+    output = source
+    if max_samples is not None and total_rows > max_samples:
+        rng = random.Random(seed)
+        selected_indices = sorted(rng.sample(range(total_rows), max_samples))
+        table = pq.read_table(source)
+        sampled = table.take(pa.array(selected_indices, type=pa.int64()))
+        output = (output_dir / "validation.parquet").resolve()
+        pq.write_table(sampled, output)
+    summary = {
+        "source": str(source),
+        "source_sha256": file_hash(source),
+        "output": str(output),
+        "total_rows": total_rows,
+        "selected_rows": total_rows if selected_indices is None else len(selected_indices),
+        "max_samples": max_samples,
+        "seed": seed,
+        "selected_indices": selected_indices,
+    }
+    write_json(output_dir / "validation_sample.json", summary)
+    return summary
+
+
 def _commands(
     config: SelfPlayConfig,
     *,
@@ -493,6 +539,32 @@ def run_self_play(
 ) -> dict[str, Any]:
     config = load_selfplay_config(config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
+    validation_seed = config.seed + 20_000
+    validation = (
+        {
+            "source": str(config.val_data.resolve()),
+            "output": str(
+                (
+                    output_dir / "validation.parquet"
+                    if config.validation_samples is not None
+                    else config.val_data
+                ).resolve()
+            ),
+            "total_rows": None,
+            "selected_rows": config.validation_samples,
+            "max_samples": config.validation_samples,
+            "seed": validation_seed,
+            "selected_indices": None,
+        }
+        if dry_run
+        else _prepare_validation_dataset(
+            config.val_data,
+            output_dir,
+            max_samples=config.validation_samples,
+            seed=validation_seed,
+        )
+    )
+    validation_path = Path(str(validation["output"]))
     archive_path = output_dir / "archive.sqlite"
     manifest_path = output_dir / "manifest.json"
     completed = 0
@@ -537,18 +609,20 @@ def run_self_play(
             "MODEL_TYPE": config.model_type,
             "LORA_ADAPTER_PATH": str(adapter),
             "TRAIN_DATA": str(mixed_data.resolve()),
-            "VAL_DATA": str(config.val_data.resolve()),
+            "VAL_DATA": str(validation_path),
             "NUM_GPUS": str(len(_gpu_ids(config.actor_gpus))),
             "MICRO_BATCH_SIZE": str(config.micro_batch_size),
             "EVAL_BATCH_SIZE": str(config.eval_batch_size),
             "GRADIENT_ACCUMULATION_STEPS": str(config.gradient_accumulation_steps),
             "STEPS_PER_GENERATION": str(config.steps_per_generation),
             "ROLLOUT_N": str(config.rollout_n),
+            "EVAL_ROLLOUT_N": str(config.eval_rollout_n),
             "MAX_COMPLETION_LENGTH": str(config.max_completion_tokens),
             "VLLM_MAX_MODEL_LEN": str(config.vllm_max_model_len),
             "VLLM_GPU_MEMORY_UTILIZATION": str(config.vllm_gpu_memory_utilization),
             "VLLM_SLEEP_LEVEL": str(config.vllm_sleep_level),
             "DEEPSPEED": config.deepspeed,
+            "RL_ALGORITHM": config.rl_algorithm,
             "USE_VLLM": str(config.use_vllm).lower(),
             "OUTPUT_DIR": str(round_dir.resolve()),
             "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
@@ -564,6 +638,7 @@ def run_self_play(
             "adapter_in": str(adapter),
             "dataset": str(mixed_data),
             "counts": counts,
+            "validation": validation,
             "archive_size_before": archive_size_before,
             "commands": commands,
             "train_environment": train_overrides,
@@ -572,6 +647,7 @@ def run_self_play(
             "allow_gpu_overlap": config.allow_gpu_overlap,
             "use_vllm": config.use_vllm,
             "deepspeed": config.deepspeed,
+            "rl_algorithm": config.rl_algorithm,
             "opponent_backend": config.opponent_backend,
             "merged_opponent_model": str((round_dir / "opponent_merged").resolve()),
             "interaction_mode": config.interaction_mode,

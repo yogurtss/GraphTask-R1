@@ -1,7 +1,7 @@
 # GraphTask-R1
 
 GraphTask-R1 训练模型把自然语言问题编译为可执行程序，再由受限执行器产生
-答案。主线训练运行时统一为 **ms-swift 3.6.4**；仓库不再维护第二套训练后端、数据字段或启动
+答案。主线训练运行时统一为 **ms-swift 3.10.3**；仓库不再维护第二套训练后端、数据字段或启动
 脚本。
 
 ## 实验主线
@@ -22,6 +22,22 @@ KQAPro 的 SFT、GRPO、relation catalog 或 checkpoint。
 GraphScript parse/execution/F1 尚不稳定，可把它作为可选 warm-up。完整命令见
 [KQAPro 训练流程](docs/KQAPRO_TRAINING.md)。完整数据边界和算子表见
 [Code-first 数据契约](docs/CODE_SELF_PLAY_DATA_CONTRACT.md)。
+
+Self-play 使用同一个 ms-swift GRPO trainer，并通过
+`configs/training/selfplay.yaml` 的 `rl_algorithm` 选择 advantage estimator：
+
+```yaml
+# 默认：batch 归一化，并把 KL 纳入 reward
+rl_algorithm: reinforce_plus_plus
+
+# 消融或兼容旧实验：组内归一化
+# rl_algorithm: grpo
+```
+
+允许值只有 `reinforce_plus_plus` 和 `grpo`。切换算法不会改变 Questioner/Solver 数据或 reward
+契约；默认推荐 REINFORCE++，需要复现实验或做对照时再切回 GRPO。该选项要求
+`ms-swift==3.10.3`，完整参数、batch 整除关系和验证集设置见
+[Self-play 训练配置](docs/KQAPRO_TRAINING.md#5-questionersolver-self-play)。
 
 base direct、base tool、SFT、GRPO 的单模式部署/评测、任意多模式结果汇总和静态 HTML 路径
 可视化见
@@ -60,7 +76,7 @@ ls /mnt/g/datasets/GraphTaskDataset
 
 ## 环境
 
-CUDA 12.4 推荐 Python 3.10、PyTorch 2.6.0+cu124 和 ms-swift 3.6.4。安装与验证命令见
+CUDA 12.4 推荐 Python 3.10、PyTorch 2.6.0+cu124 和 ms-swift 3.10.3。安装与验证命令见
 [ms-swift CUDA 12.4 环境](docs/MS_SWIFT_CUDA_12_4.md)。
 
 只做 CPU 开发检查时：

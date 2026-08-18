@@ -52,7 +52,7 @@ def main() -> int:
     try:
         from swift.llm import MaxLengthError, get_model_tokenizer, get_template
     except ImportError as exc:
-        raise RuntimeError("install ms-swift==3.6.4 before running this preflight") from exc
+        raise RuntimeError("install ms-swift==3.10.3 before running this preflight") from exc
     # ms-swift installs an ERROR-level root handler during import. Keep the caller's handler,
     # but restore INFO visibility for template loading and row progress.
     for handler in logging.getLogger().handlers:

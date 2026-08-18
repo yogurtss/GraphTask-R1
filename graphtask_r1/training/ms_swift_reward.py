@@ -13,7 +13,12 @@ from graphtask_r1.graphscript import (
     parse_graphscript,
     program_to_graphscript,
 )
-from graphtask_r1.rewards import challenger_reward, questioner_rejection_reward
+from graphtask_r1.rewards import (
+    challenger_reward,
+    questioner_rejection_reward,
+    solver_outcome_reward,
+    solver_rejection_reward,
+)
 from graphtask_r1.schema import AnswerSet, TaskProposal
 from graphtask_r1.training.opponent import request_opponent
 from graphtask_r1.training.parsing import parse_solver_output, parse_task_proposal
@@ -261,19 +266,30 @@ async def compute_score(
                 count = bool(gold.answers and gold.answers[0].kind == "count")
                 predicted = parse_solver_output(solution_str, count=count)
             metrics = answer_metrics(predicted, gold)
+            reward = solver_outcome_reward(
+                f1=float(metrics["f1"]), exact_match=float(metrics["exact_match"])
+            )
             return {
-                "score": metrics["f1"] * role_weight,
-                "raw_score": metrics["f1"],
+                "score": reward.total * role_weight,
+                "raw_score": reward.total,
                 **metrics,
+                **reward.components,
                 **graph_usage,
             }
         except GraphScriptError as exc:
+            reward = solver_rejection_reward(exc.reason_code)
             return {
-                "score": 0.0,
-                "raw_score": 0.0,
-                "format": 0.0,
+                "score": reward.total * role_weight,
+                "raw_score": reward.total,
                 f"reject_{exc.reason_code.lower()}": 1.0,
+                **reward.components,
             }
         except (TypeError, ValueError, json.JSONDecodeError):
-            return {"score": 0.0, "raw_score": 0.0, "format": 0.0}
+            reward = solver_rejection_reward("INVALID_OUTPUT")
+            return {
+                "score": reward.total * role_weight,
+                "raw_score": reward.total,
+                "reject_invalid_output": 1.0,
+                **reward.components,
+            }
     raise ValueError(f"unsupported data source: {data_source}")
