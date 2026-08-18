@@ -99,7 +99,6 @@ class SelfPlayConfig(BaseModel):
     gradient_accumulation_steps: int = Field(default=2, gt=0)
     steps_per_generation: int = Field(default=4, gt=0)
     rollout_n: int = Field(default=4, gt=0)
-    eval_rollout_n: int = Field(default=1, gt=0)
     program_profile: Literal[
         "full", "graphscript_v0_1", "graphscript_v0_2", "graphscript_v0_3"
     ] = "graphscript_v0_3"
@@ -156,10 +155,8 @@ class SelfPlayConfig(BaseModel):
             )
         if generation_batch % self.rollout_n:
             raise ValueError("self-play generation batch must be divisible by rollout_n")
-        if evaluation_batch % self.eval_rollout_n:
-            raise ValueError(
-                "self-play evaluation batch must be divisible by eval_rollout_n"
-            )
+        if evaluation_batch % self.rollout_n:
+            raise ValueError("self-play evaluation batch must be divisible by rollout_n")
         return self
 
 
@@ -616,7 +613,6 @@ def run_self_play(
             "GRADIENT_ACCUMULATION_STEPS": str(config.gradient_accumulation_steps),
             "STEPS_PER_GENERATION": str(config.steps_per_generation),
             "ROLLOUT_N": str(config.rollout_n),
-            "EVAL_ROLLOUT_N": str(config.eval_rollout_n),
             "MAX_COMPLETION_LENGTH": str(config.max_completion_tokens),
             "VLLM_MAX_MODEL_LEN": str(config.vllm_max_model_len),
             "VLLM_GPU_MEMORY_UTILIZATION": str(config.vllm_gpu_memory_utilization),

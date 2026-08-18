@@ -220,9 +220,9 @@ completions 和 9216 条 opponent completions。详细的一天预算、首轮�
 4B/80GB 默认采用 `micro_batch_size=4`、`eval_batch_size=4`、
 `gradient_accumulation_steps=2`、`vllm_gpu_memory_utilization=0.6`、
 `vllm_max_model_len=32768` 和 `vllm_sleep_level=1`。三张 actor GPU 的训练有效 batch 为 24，
-采样 batch 为 48。训练期 val 固定抽样 256 条且每题只生成一次；REINFORCE++ 为默认 advantage
-estimator，也可切回 GRPO。首轮显存监控以及生成/反向传播 OOM 的分别退档方式见上面的 KQAPro
-小节。
+采样 batch 为 48。训练期 val 固定抽样 256 条；`ms-swift==3.10.3` 的评测生成数沿用
+`rollout_n=4`，不支持单独的 `num_generations_eval`。REINFORCE++ 为默认 advantage estimator，
+也可切回 GRPO。首轮显存监控以及生成/反向传播 OOM 的分别退档方式见上面的 KQAPro 小节。
 
 ### 单卡 Qwen3-0.6B smoke
 

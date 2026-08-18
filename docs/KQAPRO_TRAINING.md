@@ -349,7 +349,6 @@ validation_samples: 256
 gradient_accumulation_steps: 2
 steps_per_generation: 4
 rollout_n: 4
-eval_rollout_n: 1
 ```
 
 GPU 0–2 同时承担共享 actor 的 LoRA 训练和 colocate rollout；GPU 3 只运行冻结 Solver opponent。
@@ -428,9 +427,10 @@ Solver 更多起步样本；如果切回 GRPO，其他数据和 reward contract 
 
 正式 val 不再逐轮跑完整的数千条集合。`validation_samples: 256` 使用固定 seed 从源 Parquet
 确定性抽样一次，所有 round 共用同一子集；`validation_sample.json` 保存源文件哈希、抽样下标和
-行数以便复现。`eval_rollout_n: 1` 只让每个 val prompt 生成一条 completion，不改变训练的
-`rollout_n: 4`。要恢复完整验证可设 `validation_samples: null`；最终候选 checkpoint 的正式比较仍
-应离线跑完整 val，而不是把频繁训练期 val 当最终结果。
+行数以便复现。`ms-swift==3.10.3` 的评测生成数沿用 `rollout_n: 4`；该版本尚不支持单独设置
+`num_generations_eval`，不要向 launcher 添加这个参数。要恢复完整验证可设
+`validation_samples: null`；最终候选 checkpoint 的正式比较仍应离线跑完整 val，而不是把频繁
+训练期 val 当最终结果。
 
 ## 6. val 选模与提升判定
 

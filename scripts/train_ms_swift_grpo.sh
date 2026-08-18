@@ -151,7 +151,6 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --target_modules all-linear \
   --max_completion_length "$MAX_COMPLETION_LENGTH" \
   --num_generations "${ROLLOUT_N:-4}" \
-  --num_generations_eval "${EVAL_ROLLOUT_N:-1}" \
   --temperature "${TEMPERATURE:-1.0}" \
   --gradient_checkpointing true \
   --gradient_checkpointing_kwargs '{"use_reentrant":false}' \

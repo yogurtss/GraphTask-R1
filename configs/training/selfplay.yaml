@@ -45,5 +45,4 @@ validation_samples: 256
 gradient_accumulation_steps: 2
 steps_per_generation: 4
 rollout_n: 4
-eval_rollout_n: 1
 program_profile: graphscript_v0_3

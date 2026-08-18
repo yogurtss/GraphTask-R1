@@ -308,7 +308,7 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert plan["train_environment"]["VLLM_SLEEP_LEVEL"] == "1"
     assert plan["train_environment"]["DEEPSPEED"] == "none"
     assert plan["train_environment"]["RL_ALGORITHM"] == "grpo"
-    assert plan["train_environment"]["EVAL_ROLLOUT_N"] == "1"
+    assert "EVAL_ROLLOUT_N" not in plan["train_environment"]
     assert plan["train_environment"]["VLLM_MODE"] == "colocate"
     assert plan["deepspeed"] == "none"
     assert plan["rl_algorithm"] == "grpo"
@@ -406,7 +406,6 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     assert config.gradient_accumulation_steps == 2
     assert config.steps_per_generation == 4
     assert config.rollout_n == 4
-    assert config.eval_rollout_n == 1
     assert config.validation_samples == 256
 
 
@@ -540,7 +539,6 @@ def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
     assert config.solver_episodes == 320
     assert config.eval_batch_size == 4
     assert config.validation_samples == 256
-    assert config.eval_rollout_n == 1
 
 
 def test_validation_subset_is_bounded_deterministic_and_replayable(tmp_path: Path) -> None:
@@ -619,8 +617,8 @@ def test_selfplay_rejects_unknown_rl_algorithm() -> None:
         )
 
 
-def test_selfplay_validates_eval_rollout_divisibility() -> None:
-    with pytest.raises(ValueError, match="divisible by eval_rollout_n"):
+def test_selfplay_validates_eval_batch_against_training_rollout_n() -> None:
+    with pytest.raises(ValueError, match="evaluation batch must be divisible by rollout_n"):
         SelfPlayConfig.model_validate(
             {
                 "initial_adapter": "adapter",
@@ -629,7 +627,7 @@ def test_selfplay_validates_eval_rollout_divisibility() -> None:
                 "questioner_seeds": "seeds.parquet",
                 "actor_gpus": "0,1,2",
                 "eval_batch_size": 2,
-                "eval_rollout_n": 4,
+                "rollout_n": 4,
             }
         )
 
