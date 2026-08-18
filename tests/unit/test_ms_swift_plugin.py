@@ -273,7 +273,58 @@ def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
     assert event["means"]["f1"] == 1.0
     assert event["means"]["exact_match"] == 1.0
     assert event["roles"]["solver"]["means"]["unweighted_score"] == 1.0
+    assert event["sample_components"] == [
+        {
+            "batch_index": 0,
+            "role": "solver",
+            "task_id": "",
+            "reason_codes": [],
+            "components": {
+                "exact_match": 1.0,
+                "f1": 1.0,
+                "precision": 1.0,
+                "raw_score": 1.0,
+                "recall": 1.0,
+                "score": 1.0,
+                "unweighted_score": 1.0,
+            },
+        }
+    ]
     persisted = json.loads(
         (metrics_dir / "reward_components.rank-2.jsonl").read_text().strip()
     )
     assert persisted == event
+
+
+def test_ms_swift_reward_logs_questioner_stage_and_reason_per_sample(
+    plugin: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
+    monkeypatch.setenv("GRAPHTASK_REWARD_METRICS_DIR", str(tmp_path / "reward_metrics"))
+    reward = plugin.GraphTaskReward()
+
+    values = reward(
+        ["not-json"],
+        data_source=["graphtask/questioner"],
+        ground_truth=["{}"],
+        extra_info=[
+            {
+                "graph_snapshot": "toy-v1",
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.3",
+                "role_weight": 0.35,
+                "task_id": "questioner-1",
+            }
+        ],
+    )
+
+    assert values == [-0.35]
+    event = json.loads(caplog.records[-1].message)
+    sample = event["sample_components"][0]
+    assert sample["task_id"] == "questioner-1"
+    assert sample["reason_codes"] == ["NON_JSON"]
+    assert sample["components"]["reward_stage"] == 0.0
+    assert sample["components"]["raw_score"] == -1.0

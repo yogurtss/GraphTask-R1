@@ -13,7 +13,7 @@ from graphtask_r1.graphscript import (
     parse_graphscript,
     program_to_graphscript,
 )
-from graphtask_r1.rewards import challenger_reward
+from graphtask_r1.rewards import challenger_reward, questioner_rejection_reward
 from graphtask_r1.schema import AnswerSet, TaskProposal
 from graphtask_r1.training.opponent import request_opponent
 from graphtask_r1.training.parsing import parse_solver_output, parse_task_proposal
@@ -124,7 +124,10 @@ async def compute_score(
                         "graph_calls": float(execution.usage.graph_calls),
                         "program_operators": float(execution.usage.operators),
                     }
-            validate_proposal(proposal)
+            try:
+                validate_proposal(proposal)
+            except ValueError as exc:
+                raise GraphScriptError("PROPOSAL_ROOT_MISMATCH", str(exc)) from exc
             if proposal_answers is None:
                 proposal_answers = backend.execute_program(proposal.program)
             question = verbalize(proposal.program, backend)
@@ -178,19 +181,40 @@ async def compute_score(
             )
             return {
                 "score": reward.total * role_weight,
+                "raw_score": reward.total,
                 "opponent_success_rate": pass_rate,
                 **alignment_components,
                 **reward.components,
+                **{
+                    f"reject_{reason.lower()}": 1.0
+                    for reason in result.rejection_reasons
+                },
                 **graph_usage,
             }
         except GraphScriptError as exc:
+            reward = questioner_rejection_reward(exc.reason_code)
             return {
-                "score": -1.0 * role_weight,
-                "format": -1.0,
+                "score": reward.total * role_weight,
+                "raw_score": reward.total,
                 f"reject_{exc.reason_code.lower()}": 1.0,
+                **reward.components,
             }
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return {"score": -1.0 * role_weight, "format": -1.0}
+        except json.JSONDecodeError:
+            reward = questioner_rejection_reward("NON_JSON")
+            return {
+                "score": reward.total * role_weight,
+                "raw_score": reward.total,
+                "reject_non_json": 1.0,
+                **reward.components,
+            }
+        except (KeyError, TypeError, ValueError):
+            reward = questioner_rejection_reward("INVALID_OUTPUT")
+            return {
+                "score": reward.total * role_weight,
+                "raw_score": reward.total,
+                "reject_invalid_output": 1.0,
+                **reward.components,
+            }
     if data_source == "graphtask/solver":
         gold = AnswerSet.model_validate_json(ground_truth)
         try:
@@ -237,13 +261,19 @@ async def compute_score(
                 count = bool(gold.answers and gold.answers[0].kind == "count")
                 predicted = parse_solver_output(solution_str, count=count)
             metrics = answer_metrics(predicted, gold)
-            return {"score": metrics["f1"] * role_weight, **metrics, **graph_usage}
+            return {
+                "score": metrics["f1"] * role_weight,
+                "raw_score": metrics["f1"],
+                **metrics,
+                **graph_usage,
+            }
         except GraphScriptError as exc:
             return {
                 "score": 0.0,
+                "raw_score": 0.0,
                 "format": 0.0,
                 f"reject_{exc.reason_code.lower()}": 1.0,
             }
         except (TypeError, ValueError, json.JSONDecodeError):
-            return {"score": 0.0, "format": 0.0}
+            return {"score": 0.0, "raw_score": 0.0, "format": 0.0}
     raise ValueError(f"unsupported data source: {data_source}")

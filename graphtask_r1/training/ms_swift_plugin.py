@@ -144,13 +144,29 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
         role_sums: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         role_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         role_samples: dict[str, int] = defaultdict(int)
+        sample_components: list[dict[str, object]] = []
         for index, result in enumerate(results):
             metrics = dict(result)
             role_weight = float(normalized_infos[index].get("role_weight", 1.0))
-            if role_weight:
+            if "raw_score" in result:
+                metrics["unweighted_score"] = float(result["raw_score"])
+            elif role_weight:
                 metrics["unweighted_score"] = float(result["score"]) / role_weight
             source = str(sources[index])
             role = source.rsplit("/", maxsplit=1)[-1]
+            sample_components.append(
+                {
+                    "batch_index": index,
+                    "role": role,
+                    "task_id": str(normalized_infos[index].get("task_id", "")),
+                    "reason_codes": sorted(
+                        name.removeprefix("reject_").upper()
+                        for name, value in metrics.items()
+                        if name.startswith("reject_") and float(value) > 0.0
+                    ),
+                    "components": {name: float(value) for name, value in sorted(metrics.items())},
+                }
+            )
             role_samples[role] += 1
             for name, value in metrics.items():
                 sums[name] += float(value)
@@ -178,6 +194,7 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
             "samples": size,
             "means": components,
             "roles": roles,
+            "sample_components": sample_components,
         }
         self._record_metrics(event)
         logger.info(json.dumps(event, ensure_ascii=False, sort_keys=True))

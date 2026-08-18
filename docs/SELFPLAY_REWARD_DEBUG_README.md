@@ -7,7 +7,7 @@ loss = 0
 reward_std > 0
 grad_norm = 0
 completions/clipped_ratio = 0
-Questioner score = -0.35 或 Solver score = 0
+Questioner 长期停留在同一失败阶段或 Solver score = 0
 ```
 
 所有命令均为只读检查。不要在正在训练的 run 上手工调用 Questioner reward 或 opponent
@@ -258,7 +258,37 @@ done
 
 解释：
 
-- Questioner `score=-0.35`：进入 GraphScript/格式拒绝路径，即 `-1 × 0.35`。
+- Questioner 使用严格有序的分阶段 reward；默认 `role_weight=0.35` 时，各阶段如下：
+
+| `reward_stage` | 状态 | raw score | 训练 score |
+|---:|---|---:|---:|
+| 0 | 非 JSON | `-1.00` | `-0.3500` |
+| 1 | JSON 后有额外文本 | `-0.90` | `-0.3150` |
+| 2 | schema、version 或字段错误 | `-0.75` | `-0.2625` |
+| 3 | handle、shape、seed、relation contract 错误 | `-0.60` | `-0.2100` |
+| 4 | 静态合法但执行失败、超预算或空结果 | `-0.40` | `-0.1400` |
+| 5 | 可执行但 verification 失败 | `-0.35` 至 `-0.10` | `-0.1225` 至 `-0.0350` |
+| 6 | 完整认证成功 | `0.20` 至 `1.00` | `0.0700` 至 `0.3500` |
+
+每条 reward event 的 `sample_components` 保留逐 completion 的 `task_id`、角色、阶段、raw score、
+训练 score 和结构化 `reason_codes`。例如：
+
+```bash
+jq -c '
+  .sample_components[]
+  | select(.role == "questioner")
+  | {
+      task_id,
+      stage: .components.reward_stage,
+      raw_score: .components.raw_score,
+      score: .components.score,
+      reason_codes
+    }
+' "$SELFPLAY_METRICS_DIR"/reward_components.rank-*.jsonl
+```
+
+- Questioner `score=-0.35` 现在只表示最低的 `NON_JSON` 阶段，不再代表所有解析、schema、shape 和
+  执行失败。
 - Solver 出现 `format` 或 `reject_*`：解析或执行失败。
 - Solver 有 `f1=0, exact_match=0` 且无格式拒绝：程序可执行，但答案错误。
 - `opponent_success_rate`：frozen Solver 对 Questioner 新任务的采样成功率。
@@ -294,7 +324,7 @@ find "$SELFPLAY_TRAINER_DIR" -path '*/checkpoint-*/adapter_model.safetensors' \
 |---|---|---|
 | model/adapter 关系错误 | SFT 加载问题 | 使用 base model + 单独 SFT LoRA，避免重复应用 |
 | Solver 单独也大量解析失败 | SFT/checkpoint 问题 | 检查 SFT 数据、版本、catalog、checkpoint 选择 |
-| Solver 正常，Questioner 大量 `-0.35` | 旧 Solver-only SFT 或 Questioner prompt/seed 不匹配 | 重生成双角色 SFT/seed + 分阶段 reward |
+| Solver 正常，Questioner 大量停留在 stage 0–2 | 旧 Solver-only SFT 或 Questioner prompt/seed 不匹配 | 重生成双角色 SFT/seed 并核对版本和字段契约 |
 | 相同 completion 得到不同 reward | stochastic reward 噪声 | opponent 显式 seed；按 task/signature 缓存同轮评估 |
 | 不同 completion 全部同分 | reward 过粗 | 增加 JSON/schema/执行/认证的稠密分阶段 reward |
 | `reward_std>0`、completion 不同、checkpoint 不变 | 梯度/训练器问题 | 单 GPU bounded smoke；检查 trainable LoRA、mask、DDP 切分 |
@@ -356,7 +386,7 @@ reward_std=0, loss=0, grad_norm=0
 `unique_rewards=2` 可能只来自：
 
 ```text
-Questioner reward = -0.35
+Questioner reward = 某个固定失败阶段分数
 Solver reward = 0
 ```
 
@@ -419,7 +449,7 @@ PY
 如果结果主要是：
 
 ```text
-questioner: unique_completions > 1, unique_rewards = 1, rewards = [-0.35]
+questioner: unique_completions > 1, unique_rewards = 1, rewards = [-0.2625]
 solver:     unique_completions > 1, unique_rewards = 1, rewards = [0.0]
 ```
 
@@ -428,8 +458,8 @@ solver:     unique_completions > 1, unique_rewards = 1, rewards = [0.0]
 
 ## 13. 定位 EXTRA_FIELD 的准确字段路径
 
-Questioner 的 `score=-0.35` 表示 GraphScript 解析、schema、shape 或执行阶段被拒绝。若
-`EXTRA_FIELD` 占主导，不要直接把 parser 改成忽略额外字段；先确认模型究竟添加了什么：
+Questioner 的 `reward_stage=2` 以及 `reject_extra_field` 表示 GraphScript schema 被额外字段拒绝。
+不要直接把 parser 改成忽略额外字段；先确认模型究竟添加了什么：
 
 ```bash
 PYTHONPATH=. python - <<'PY'
@@ -581,7 +611,7 @@ PY
    `QUESTIONER_COUNT_OVERRIDE=N`。确认多 entity root 分布与真实 train 一致，并检查 Questioner
    metrics 中的 `unique_selected`、`shortfall`、`repeated_rows=0` 和 `strata`；不要继续
    使用旧 Solver-only adapter。
-5. 将 reward 改为可区分的阶段信号：非 JSON、额外字段、schema、shape/handle、可执行、认证/F1。
-   保留最终严格认证目标，不把无效程序当作成功。
+5. 检查逐样本 `reward_stage` 是否能区分非 JSON、额外文本、schema、shape/handle、执行和认证阶段；
+   若同一失败原因仍占绝对多数，应修 SFT/prompt，而不是放宽最终严格认证目标。
 6. 重新运行小规模 smoke；只有同一 prompt group 出现 `unique_rewards>1`，且 generation step 出现
    `reward_std>0`、`grad_norm>0` 后，再恢复完整训练。

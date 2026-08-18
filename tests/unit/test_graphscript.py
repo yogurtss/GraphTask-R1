@@ -187,8 +187,68 @@ def test_questioner_reward_records_frozen_solver_success(
     )
 
     assert score["opponent_success_rate"] == 0.5
+    assert score["reward_stage"] == 6.0
+    assert score["raw_score"] > 0.2
     assert score["target_alignment"] == 1.0
     assert score["target_terminal_match"] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("solution", "allowed_relations", "raw_score", "stage", "reason"),
+    [
+        ("not-json", ["works_at", "located_in"], -1.0, 0.0, "reject_non_json"),
+        (
+            _script() + " trailing",
+            ["works_at", "located_in"],
+            -0.9,
+            1.0,
+            "reject_extra_text",
+        ),
+        (
+            _script().replace('"version": "0.1"', '"version": "9"'),
+            ["works_at", "located_in"],
+            -0.75,
+            2.0,
+            "reject_unsupported_version",
+        ),
+        (_script(), ["works_at"], -0.6, 3.0, "reject_relation_not_allowed"),
+        (
+            _script("friend", "located_in"),
+            ["friend", "located_in"],
+            -0.4,
+            4.0,
+            "reject_empty_result",
+        ),
+    ],
+)
+def test_questioner_reward_distinguishes_pre_certification_progress(
+    solution: str,
+    allowed_relations: list[str],
+    raw_score: float,
+    stage: float,
+    reason: str,
+) -> None:
+    score = asyncio.run(
+        compute_score(
+            "graphtask/questioner",
+            solution,
+            "{}",
+            {
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.1",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+                "allowed_relations": allowed_relations,
+                "max_edge_visits": 10,
+                "role_weight": 0.35,
+            },
+        )
+    )
+
+    assert score["raw_score"] == raw_score
+    assert score["score"] == pytest.approx(raw_score * 0.35)
+    assert score["reward_stage"] == stage
+    assert score[reason] == 1.0
 
 
 def test_program_converter_rejects_non_chain_program() -> None:
@@ -467,5 +527,6 @@ def test_tool_comparison_questioner_cannot_change_episode_seed() -> None:
             },
         )
     )
-    assert score["score"] == -1.0
+    assert score["score"] == -0.6
+    assert score["reward_stage"] == 3.0
     assert score["reject_seed_mismatch"] == 1.0
