@@ -193,6 +193,50 @@ def test_questioner_reward_records_frozen_solver_success(
     assert score["target_terminal_match"] == 1.0
 
 
+def test_frontier_v2_questioner_reward_passes_seed_and_uses_gated_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_opponent(*args: object, **kwargs: object) -> dict[str, float]:
+        del args
+        captured.update(kwargs)
+        return {
+            "pass_rate": 0.0,
+            "novelty_structural": 1.0,
+            "novelty_textual": 1.0,
+        }
+
+    monkeypatch.setattr(reward_module, "request_opponent", fake_opponent)
+
+    score = asyncio.run(
+        compute_score(
+            "graphtask/questioner",
+            _script(),
+            "{}",
+            {
+                "interaction_mode": "graphscript",
+                "graphscript_version": "0.1",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+                "allowed_relations": ["works_at", "located_in"],
+                "max_edge_visits": 10,
+                "opponent_url": "http://unused",
+                "opponent_samples": 8,
+                "opponent_seed": 123,
+                "round": 1,
+                "questioner_reward_variant": "frontier_v2",
+                "frontier_target": 0.5,
+                "frontier_sigma": 0.2,
+            },
+        )
+    )
+
+    assert captured["seed"] == 123
+    assert score["reward_variant_frontier_v2"] == 1.0
+    assert score["raw_score"] < 0.2
+
+
 @pytest.mark.parametrize(
     ("solution", "allowed_relations", "raw_score", "stage", "reason"),
     [

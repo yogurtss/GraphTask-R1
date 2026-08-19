@@ -19,6 +19,7 @@ from graphtask_r1.schema import Answer, AnswerSet, BenchmarkExample, RelationInf
 from graphtask_r1.training.parsing import parse_solver_output
 from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
+from graphtask_r1.utils import stable_hash
 
 TOOLS = [
     {
@@ -86,6 +87,7 @@ async def request_opponent(
     allowed_relations: tuple[str, ...] = (),
     max_follow_limit: int = 100,
     max_edge_visits: int | None = None,
+    seed: int | None = None,
 ) -> dict[str, Any]:
     try:
         import aiohttp
@@ -105,6 +107,8 @@ async def request_opponent(
     }
     if max_edge_visits is not None:
         payload["max_edge_visits"] = max_edge_visits
+    if seed is not None:
+        payload["seed"] = seed
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -131,6 +135,8 @@ class FrozenSolverService:
         model_url: str | None,
         model: str,
         archive_path: Path,
+        candidate_archive_path: Path | None = None,
+        cache_evaluations: bool = False,
         max_turns: int = 8,
         request_timeout_s: float = 120.0,
         interaction_mode: InteractionMode = "tool",
@@ -151,6 +157,11 @@ class FrozenSolverService:
         self.model_url = model_url.rstrip("/") if model_url else None
         self.model = model
         self.archive = TaskArchive(archive_path)
+        self.candidate_archive = (
+            TaskArchive(candidate_archive_path) if candidate_archive_path is not None else None
+        )
+        self.cache_evaluations = cache_evaluations
+        self._evaluation_cache: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self.max_turns = max_turns
         self.request_timeout_s = request_timeout_s
         self.interaction_mode = interaction_mode
@@ -171,7 +182,11 @@ class FrozenSolverService:
         return self.backends[snapshot]
 
     async def _completion(
-        self, messages: list[dict[str, Any]], *, use_tools: bool
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_tools: bool,
+        seed: int | None = None,
     ) -> dict[str, Any]:
         if self.local_model:
             if use_tools:
@@ -189,6 +204,8 @@ class FrozenSolverService:
             "top_p": 0.8,
             "max_tokens": self.max_completion_tokens,
         }
+        if seed is not None:
+            payload["seed"] = seed
         if use_tools:
             payload["tools"] = TOOLS
         async with (
@@ -334,6 +351,8 @@ class FrozenSolverService:
         max_follow_limit: int | None = None,
         max_edge_visits: int | None = None,
         graphscript_version: GraphScriptVersion | None = None,
+        seed: int | None = None,
+        sample_index: int | None = None,
     ) -> dict[str, float]:
         mode = interaction_mode or self.interaction_mode
         catalog = self.relation_catalog
@@ -368,7 +387,8 @@ class FrozenSolverService:
         visible_entities = set(topic_ids)
         started = time.perf_counter()
         if mode == "graphscript":
-            message = await self._completion(messages, use_tools=False)
+            completion_kwargs = {"seed": seed} if seed is not None else {}
+            message = await self._completion(messages, use_tools=False, **completion_kwargs)
             try:
                 script = parse_graphscript(
                     str(message.get("content", "")),
@@ -399,7 +419,11 @@ class FrozenSolverService:
                         allowed_relations or (value.relation_id for value in self.relation_catalog)
                     ),
                     max_edge_visits=max_edge_visits or self.max_edge_visits or 200,
-                    trace_id=str(getattr(task, "task_id", "opponent")),
+                    trace_id=(
+                        f"{getattr(task, 'task_id', 'opponent')}:sample-{sample_index}"
+                        if sample_index is not None
+                        else str(getattr(task, "task_id", "opponent"))
+                    ),
                 )
                 metrics = self._answer_metrics(task, execution.answers, backend)
                 edge_visits = execution.usage.edge_visits
@@ -426,8 +450,10 @@ class FrozenSolverService:
                 "passage_searches": float(execution.usage.passage_searches),
                 "latency_ms": (time.perf_counter() - started) * 1000,
             }
-        for _ in range(self.max_turns):
-            message = await self._completion(messages, use_tools=True)
+        for turn_index in range(self.max_turns):
+            turn_seed = seed + turn_index if seed is not None else None
+            completion_kwargs = {"seed": turn_seed} if turn_seed is not None else {}
+            message = await self._completion(messages, use_tools=True, **completion_kwargs)
             messages.append(message)
             calls = message.get("tool_calls") or []
             if calls:
@@ -502,6 +528,21 @@ class FrozenSolverService:
         }
 
     async def evaluate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.cache_evaluations:
+            return await self._evaluate_uncached(payload)
+        cache_key = stable_hash(payload)
+        task = self._evaluation_cache.get(cache_key)
+        if task is None:
+            task = asyncio.create_task(self._evaluate_uncached(payload))
+            self._evaluation_cache[cache_key] = task
+        try:
+            return await task
+        except Exception:
+            if self._evaluation_cache.get(cache_key) is task:
+                self._evaluation_cache.pop(cache_key, None)
+            raise
+
+    async def _evaluate_uncached(self, payload: dict[str, Any]) -> dict[str, Any]:
         proposal = TaskProposal.model_validate(payload["proposal"])
         snapshot = str(payload["graph_snapshot"])
         samples = max(1, min(int(payload.get("samples", 8)), 64))
@@ -518,6 +559,8 @@ class FrozenSolverService:
         backend = self.backend(snapshot)
         task = certify_proposal(proposal, backend, graph_snapshot=snapshot, round_index=round_index)
         structural, textual = self.archive.novelty(task.program_signature, task.question)
+        raw_seed = payload.get("seed")
+        base_seed = int(raw_seed) if raw_seed is not None else None
         results = await asyncio.gather(
             *(
                 self.rollout(
@@ -530,8 +573,19 @@ class FrozenSolverService:
                     if payload.get("max_edge_visits") is not None
                     else self.max_edge_visits,
                     graphscript_version=graphscript_version,
+                    seed=(
+                        int(
+                            stable_hash(
+                                [base_seed, round_index, task.program_signature, sample_index]
+                            )[:8],
+                            16,
+                        )
+                        if base_seed is not None
+                        else None
+                    ),
+                    sample_index=sample_index if base_seed is not None else None,
                 )
-                for _ in range(samples)
+                for sample_index in range(samples)
             )
         )
         summary = {
@@ -563,7 +617,7 @@ class FrozenSolverService:
                 "generation": {**task.generation, "interaction_mode": mode},
             }
         )
-        self.archive.add(task)
+        (self.candidate_archive or self.archive).add(task)
         return summary
 
     async def solve(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -640,6 +694,8 @@ def main() -> int:
     parser.add_argument("--local-model", action="store_true")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument("--candidate-archive", type=Path)
+    parser.add_argument("--cache-evaluations", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--max-turns", type=int, default=8)
@@ -656,6 +712,8 @@ def main() -> int:
         model_url=args.model_url,
         model=args.model,
         archive_path=args.archive,
+        candidate_archive_path=args.candidate_archive,
+        cache_evaluations=args.cache_evaluations,
         max_turns=args.max_turns,
         interaction_mode=args.interaction_mode,
         graphscript_version=args.graphscript_version,

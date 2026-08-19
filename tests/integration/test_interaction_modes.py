@@ -12,6 +12,7 @@ from graphtask_r1.data import select_graphscript_tasks
 from graphtask_r1.data.seeds import export_questioner_task_seeds, sample_questioner_seeds
 from graphtask_r1.generation import certify_proposal
 from graphtask_r1.graph import InMemoryGraphBackend, toy_graph
+from graphtask_r1.graphscript import program_to_graphscript
 from graphtask_r1.schema import (
     Entity,
     Hop,
@@ -308,6 +309,8 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert plan["train_environment"]["VLLM_SLEEP_LEVEL"] == "1"
     assert plan["train_environment"]["DEEPSPEED"] == "none"
     assert plan["train_environment"]["RL_ALGORITHM"] == "grpo"
+    assert plan["train_environment"]["SAVE_STEPS"] == "20"
+    assert plan["train_environment"]["SAVE_TOTAL_LIMIT"] == "2"
     assert "EVAL_ROLLOUT_N" not in plan["train_environment"]
     assert plan["train_environment"]["VLLM_MODE"] == "colocate"
     assert plan["deepspeed"] == "none"
@@ -384,6 +387,7 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
         }
     )
     assert config.graph_snapshot == "kqapro-v1"
+    assert config.selfplay_variant == "legacy"
     assert config.interaction_mode == "graphscript"
     assert config.graphscript_version == "0.3"
     assert config.program_profile == "graphscript_v0_3"
@@ -406,6 +410,8 @@ def test_selfplay_defaults_use_kqapro_graphscript_profile() -> None:
     assert config.gradient_accumulation_steps == 2
     assert config.steps_per_generation == 4
     assert config.rollout_n == 4
+    assert config.save_steps == 20
+    assert config.save_total_limit == 2
     assert config.validation_samples == 256
 
 
@@ -539,6 +545,29 @@ def test_default_selfplay_file_uses_kqapro_snapshot() -> None:
     assert config.solver_episodes == 320
     assert config.eval_batch_size == 4
     assert config.validation_samples == 256
+    assert config.selfplay_variant == "legacy"
+
+
+def test_frontier_v2_config_is_isolated_from_legacy() -> None:
+    root = Path(__file__).parents[2]
+    legacy = load_selfplay_config(root / "configs/training/selfplay.yaml")
+    frontier_v2 = load_selfplay_config(root / "configs/training/selfplay_frontier_v2.yaml")
+
+    assert legacy.selfplay_variant == "legacy"
+    assert legacy.opponent_samples == 4
+    assert frontier_v2.selfplay_variant == "frontier_v2"
+    assert frontier_v2.opponent_samples == 8
+    assert frontier_v2.frontier_target_start == 0.55
+    assert frontier_v2.frontier_target_end == 0.40
+    commands = _commands(
+        frontier_v2,
+        adapter=Path("adapter"),
+        archive_path=Path("archive.sqlite"),
+        mixed_data=Path("mixed.parquet"),
+        round_dir=Path("round"),
+    )
+    assert "--candidate-archive" in commands["opponent"]
+    assert "--cache-evaluations" in commands["opponent"]
 
 
 def test_validation_subset_is_bounded_deterministic_and_replayable(tmp_path: Path) -> None:
@@ -707,6 +736,71 @@ class _ScriptedOpponent(FrozenSolverService):
         return next(self.responses)
 
 
+class _SeededCachedOpponent(FrozenSolverService):
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(
+            model_url="http://unused",
+            model="seeded-scripted",
+            archive_path=tmp_path / "archive.sqlite",
+            candidate_archive_path=tmp_path / "candidates.sqlite",
+            cache_evaluations=True,
+            interaction_mode="graphscript",
+            graphscript_version="0.1",
+            relation_catalog=_catalog(),
+            max_edge_visits=10,
+        )
+        self.seeds: list[int | None] = []
+
+    async def _completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_tools: bool,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        del messages, use_tools
+        self.seeds.append(seed)
+        script = program_to_graphscript(_task().program)
+        return {"role": "assistant", "content": script.model_dump_json(by_alias=True)}
+
+
+def test_frontier_v2_opponent_seeds_caches_and_stages_without_mutating_archive(
+    tmp_path: Path,
+) -> None:
+    service = _SeededCachedOpponent(tmp_path)
+    task = _task()
+    payload = {
+        "proposal": TaskProposal(
+            topic_entities=("alice",), program=task.program
+        ).model_dump(mode="json"),
+        "graph_snapshot": "toy-v1",
+        "samples": 2,
+        "round": 1,
+        "interaction_mode": "graphscript",
+        "graphscript_version": "0.1",
+        "allowed_relations": ["works_at", "located_in"],
+        "max_follow_limit": 100,
+        "max_edge_visits": 10,
+        "seed": 42,
+    }
+
+    async def evaluate_twice() -> tuple[dict[str, Any], dict[str, Any]]:
+        return await service.evaluate(payload), await service.evaluate(payload)
+
+    first, second = asyncio.run(evaluate_twice())
+
+    assert first == second
+    assert first["pass_rate"] == 1.0
+    assert len(service.seeds) == 2
+    assert len(set(service.seeds)) == 2
+    assert all(seed is not None for seed in service.seeds)
+    assert service.archive.all() == []
+    assert service.candidate_archive is not None
+    assert len(service.candidate_archive.all()) == 1
+    service.archive.close()
+    service.candidate_archive.close()
+
+
 def _tool_call(name: str, arguments: dict[str, Any], index: int) -> dict[str, Any]:
     return {
         "role": "assistant",
@@ -860,6 +954,68 @@ def test_selfplay_bounds_questioner_rows_per_round(tmp_path: Path) -> None:
     )
 
     assert counts == {"questioner": 1, "solver": 1, "total": 2}
+
+
+def test_frontier_v2_writes_independent_role_datasets_and_reward_contract(
+    tmp_path: Path,
+) -> None:
+    tasks_path = tmp_path / "tasks.parquet"
+    seeds_path = tmp_path / "seeds.parquet"
+    catalog_path = tmp_path / "relations.json"
+    write_records(
+        tasks_path,
+        [TaskTrainingRecord.model_validate(_task().model_dump(mode="json")).model_dump()],
+    )
+    write_json(catalog_path, [value.model_dump(mode="json") for value in _catalog()])
+    sample_questioner_seeds(
+        "toy-v1",
+        seeds_path,
+        count=1,
+        seed=42,
+        min_degree=1,
+        interaction_mode="graphscript",
+        graphscript_version="0.1",
+        relation_catalog=_catalog(),
+    )
+    config = SelfPlayConfig(
+        initial_adapter="adapter",
+        base_tasks=tasks_path,
+        val_data=tmp_path / "val.parquet",
+        questioner_seeds=seeds_path,
+        graph_snapshot="toy-v1",
+        selfplay_variant="frontier_v2",
+        rounds=3,
+        questioner_episodes=2,
+        solver_episodes=2,
+        base_ratio=1.0,
+        archive_ratio=0.0,
+        new_ratio=0.0,
+        interaction_mode="graphscript",
+        graphscript_version="0.1",
+        relation_catalog=catalog_path,
+        relation_catalogs={"toy-v1": catalog_path},
+        program_profile="graphscript_v0_1",
+    )
+
+    output = tmp_path / "mixed.parquet"
+    counts = _assemble_dataset(
+        config,
+        tmp_path / "archive.sqlite",
+        output,
+        round_index=2,
+        opponent_url="http://127.0.0.1:18080",
+    )
+
+    assert counts == {"questioner": 2, "solver": 2, "total": 4}
+    questioner_rows = pq.read_table(tmp_path / "questioner.parquet").to_pylist()
+    assert len(questioner_rows) == 2
+    assert all(
+        row["extra_info"]["questioner_reward_variant"] == "frontier_v2"
+        for row in questioner_rows
+    )
+    assert all(row["extra_info"]["opponent_seed"] == 42 for row in questioner_rows)
+    assert all(row["extra_info"]["frontier_target"] == 0.5 for row in questioner_rows)
+    assert pq.ParquetFile(tmp_path / "solver.parquet").metadata.num_rows == 2
 
 
 def test_kqapro_questioner_seeds_default_to_graphscript_v03(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from graphtask_r1.graphscript import (
 )
 from graphtask_r1.rewards import (
     challenger_reward,
+    frontier_gated_challenger_reward,
     questioner_rejection_reward,
     solver_outcome_reward,
     solver_rejection_reward,
@@ -159,6 +160,11 @@ async def compute_score(
                     if interaction_mode == "graphscript"
                     or info.get("program_profile") == "graphscript_v0_1"
                     else None,
+                    seed=(
+                        int(info["opponent_seed"])
+                        if info.get("opponent_seed") is not None
+                        else None
+                    ),
                 )
                 result = result.model_copy(
                     update={
@@ -178,12 +184,26 @@ async def compute_score(
                     root_count=len(proposal.topic_entities),
                     answers=proposal_answers,
                 )
-            reward = challenger_reward(
-                result,
-                pass_rate=pass_rate,
-                cost=program_cost(proposal.program),
-                target_alignment=alignment_components.get("target_alignment"),
-            )
+            reward_variant = str(info.get("questioner_reward_variant", "legacy"))
+            if reward_variant == "frontier_v2":
+                reward = frontier_gated_challenger_reward(
+                    result,
+                    pass_rate=pass_rate,
+                    samples=int(info.get("opponent_samples", 8)),
+                    cost=program_cost(proposal.program),
+                    target_alignment=alignment_components.get("target_alignment"),
+                    frontier_target=float(info.get("frontier_target", 0.5)),
+                    frontier_sigma=float(info.get("frontier_sigma", 0.2)),
+                )
+            elif reward_variant == "legacy":
+                reward = challenger_reward(
+                    result,
+                    pass_rate=pass_rate,
+                    cost=program_cost(proposal.program),
+                    target_alignment=alignment_components.get("target_alignment"),
+                )
+            else:
+                raise ValueError(f"unsupported questioner reward variant: {reward_variant}")
             return {
                 "score": reward.total * role_weight,
                 "raw_score": reward.total,

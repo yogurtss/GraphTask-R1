@@ -120,6 +120,28 @@ def _trainer_history(path: Path | None) -> list[dict[str, float]]:
     return history
 
 
+def _combined_trainer_history(
+    trainer_logs: Mapping[str, Path],
+) -> list[dict[str, float]]:
+    history: list[dict[str, float]] = []
+    step_offset = 0.0
+    for phase_index, (_, path) in enumerate(trainer_logs.items()):
+        phase_history = _trainer_history(path)
+        phase_step_max = 0.0
+        for row in phase_history:
+            phase_step = float(row["step"])
+            phase_step_max = max(phase_step_max, phase_step)
+            history.append(
+                {
+                    **row,
+                    "step": step_offset + phase_step,
+                    "phase_index": float(phase_index),
+                }
+            )
+        step_offset += phase_step_max
+    return history
+
+
 def _metric_statistics(history: Iterable[Mapping[str, float]]) -> dict[str, dict[str, float]]:
     values: dict[str, list[float]] = defaultdict(list)
     for row in history:
@@ -183,8 +205,13 @@ def summarize_selfplay_round(
     reward_metrics_dir: Path | None,
     archive_size_before: int | None = None,
     archive_size_after: int | None = None,
+    trainer_logs: Mapping[str, Path] | None = None,
 ) -> dict[str, Any]:
-    history = _trainer_history(trainer_log)
+    history = (
+        _combined_trainer_history(trainer_logs)
+        if trainer_logs is not None
+        else _trainer_history(trainer_log)
+    )
     roles = _reward_role_metrics(reward_metrics_dir)
     questioner = roles.get("questioner", {}).get("means", {})
     solver = roles.get("solver", {}).get("means", {})
@@ -212,6 +239,11 @@ def summarize_selfplay_round(
             ),
         },
         "trainer_log": str(trainer_log) if trainer_log is not None else None,
+        "trainer_logs": (
+            {phase: str(path) for phase, path in trainer_logs.items()}
+            if trainer_logs is not None
+            else None
+        ),
         "reward_metrics_dir": str(reward_metrics_dir) if reward_metrics_dir is not None else None,
         "training_history": history,
         "trainer_metrics": _metric_statistics(history),

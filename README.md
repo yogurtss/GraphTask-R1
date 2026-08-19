@@ -134,3 +134,24 @@ python -m graphtask_r1.cli train sft \
 [训练手册](docs/TRAINING.md)。完整原始数据准备
 见 [数据准备](docs/DATA_PREPARATION.md)，GraphScript 与显式工具模式的边界见
 [交互模式](docs/INTERACTION_MODES.md)。
+
+## Self-play A/B 版本
+
+原方法保持为默认的 `legacy`，继续使用 `configs/training/selfplay.yaml`。新的
+`frontier_v2` 使用独立的 Solver/Questioner 更新、frontier-gated reward 和逐轮候选档案，
+通过 `configs/training/selfplay_frontier_v2.yaml` 显式启用。两者可以从同一个初始 adapter
+启动，但必须写入不同目录：
+
+```bash
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay.yaml \
+  --output-dir outputs/selfplay-legacy
+
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay_frontier_v2.yaml \
+  --output-dir outputs/selfplay-frontier-v2
+```
+
+两套生产配置都关闭 trainer eval，每 20 个 optimizer steps 保存一次 checkpoint，最多保留
+2 个。短流程 smoke 为保证跨轮 adapter 交接会每步保存；版本边界与对比产物见
+[Frontier v2 A/B 说明](docs/SELFPLAY_FRONTIER_V2.md)。

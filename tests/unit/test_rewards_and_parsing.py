@@ -1,10 +1,13 @@
 import math
 from pathlib import Path
 
-from graphtask_r1.archive import TaskArchive
+import pytest
+
+from graphtask_r1.archive import TaskArchive, promote_staged_tasks
 from graphtask_r1.pipeline import run_mini_pipeline
 from graphtask_r1.rewards import (
     challenger_reward,
+    frontier_gated_challenger_reward,
     frontier_reward,
     normalize_advantages,
     questioner_rejection_reward,
@@ -76,6 +79,49 @@ def test_questioner_verification_and_quality_rewards_preserve_stage_order() -> N
     assert certified.total > leaked.total > questioner_rejection_reward("EMPTY_RESULT").total
 
 
+def test_frontier_v2_is_opt_in_and_difficulty_dominates_quality() -> None:
+    result = _verifier_result(passed=True)
+    legacy_extreme = challenger_reward(
+        result,
+        pass_rate=0.0,
+        cost=0.0,
+        target_alignment=1.0,
+    )
+    v2_extreme = frontier_gated_challenger_reward(
+        result,
+        pass_rate=0.0,
+        samples=8,
+        cost=0.0,
+        target_alignment=1.0,
+    )
+    v2_frontier = frontier_gated_challenger_reward(
+        result,
+        pass_rate=0.5,
+        samples=8,
+        cost=0.0,
+        target_alignment=1.0,
+    )
+
+    assert legacy_extreme.total == pytest.approx(0.7705448641)
+    assert v2_extreme.total < 0.2
+    assert v2_frontier.total == 1.0
+    assert v2_frontier.components["reward_variant_frontier_v2"] == 1.0
+    assert v2_extreme.components["opponent_pass_rate_smoothed"] == 0.1
+
+
+def test_frontier_v2_keeps_legacy_verification_penalties() -> None:
+    failed = _verifier_result(passed=False, reasons=("ANSWER_LEAK",))
+    reward = frontier_gated_challenger_reward(
+        failed,
+        pass_rate=0.0,
+        samples=8,
+        cost=1.0,
+    )
+
+    assert reward.total == -0.3
+    assert reward.components["reward_stage"] == 5.0
+
+
 def test_role_output_parsers() -> None:
     output = (
         '<task>{"question":"Who?","topic_entities":["alice"],'
@@ -97,3 +143,34 @@ def test_archive_novelty_is_data_dependent(tmp_path: Path) -> None:
         structural, textual = archive.novelty(task.program_signature, task.question)
         assert structural == 0.0
         assert textual == 0.0
+
+
+def test_staged_archive_admission_is_deterministic_and_difficulty_gated(
+    tmp_path: Path,
+) -> None:
+    run_mini_pipeline(tmp_path / "data", num_programs=20, seed=42)
+    tasks = [
+        TaskCertificate.model_validate(value)
+        for value in read_records(tmp_path / "data" / "tasks.parquet")[:3]
+    ]
+    staged_path = tmp_path / "staged.sqlite"
+    archive_path = tmp_path / "archive.sqlite"
+    with TaskArchive(staged_path) as staged:
+        for task, pass_rate in zip(tasks, (0.0, 0.5, 1.0), strict=True):
+            assert staged.add(task.model_copy(update={"solver_stats": {"pass_rate": pass_rate}}))
+
+    summary = promote_staged_tasks(
+        staged_path,
+        archive_path,
+        min_pass_rate=0.25,
+        max_pass_rate=0.75,
+        min_novelty=0.0,
+    )
+
+    assert summary["candidates"] == 3
+    assert summary["accepted"] == 1
+    assert summary["reason_counts"] == {"TOO_EASY": 1, "TOO_HARD": 1}
+    with TaskArchive(archive_path) as archive:
+        promoted = archive.all()
+    assert len(promoted) == 1
+    assert promoted[0].solver_stats["archive_admission"]["accepted"] is True

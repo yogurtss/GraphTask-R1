@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from graphtask_r1.archive import TaskArchive
+from graphtask_r1.archive import TaskArchive, promote_staged_tasks
 from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
 from graphtask_r1.training.prompts import GraphScriptVersion, role_prompt
 from graphtask_r1.training.questioner_context import render_questioner_seed_payload
@@ -44,6 +44,7 @@ DeepSpeedStage = Literal[
     "zero3_offload",
 ]
 RLAlgorithm = Literal["grpo", "reinforce_plus_plus"]
+SelfPlayVariant = Literal["legacy", "frontier_v2"]
 
 
 def _gpu_ids(value: str) -> tuple[str, ...]:
@@ -60,12 +61,19 @@ class SelfPlayConfig(BaseModel):
     val_data: Path
     questioner_seeds: Path
     graph_snapshot: str = "kqapro-v1"
+    selfplay_variant: SelfPlayVariant = "legacy"
     rounds: int = Field(default=3, gt=0)
     questioner_episodes: int = Field(default=256, gt=0, le=4_096)
     solver_episodes: int = Field(default=256, gt=0)
     questioner_reward_weight: float = Field(default=1.0, gt=0.0)
     solver_reward_weight: float = Field(default=1.0, gt=0.0)
     opponent_samples: int = Field(default=4, gt=0, le=64)
+    frontier_target_start: float = Field(default=0.5, ge=0.0, le=1.0)
+    frontier_target_end: float = Field(default=0.5, ge=0.0, le=1.0)
+    frontier_sigma: float = Field(default=0.2, gt=0.0)
+    archive_min_pass_rate: float = Field(default=0.25, ge=0.0, le=1.0)
+    archive_max_pass_rate: float = Field(default=0.75, ge=0.0, le=1.0)
+    archive_min_novelty: float = Field(default=0.25, ge=0.0, le=1.0)
     base_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     archive_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     new_ratio: float = Field(default=0.30, ge=0.0, le=1.0)
@@ -99,6 +107,8 @@ class SelfPlayConfig(BaseModel):
     gradient_accumulation_steps: int = Field(default=2, gt=0)
     steps_per_generation: int = Field(default=4, gt=0)
     rollout_n: int = Field(default=4, gt=0)
+    save_steps: int = Field(default=20, gt=0)
+    save_total_limit: int = Field(default=2, gt=0)
     program_profile: Literal[
         "full", "graphscript_v0_1", "graphscript_v0_2", "graphscript_v0_3"
     ] = "graphscript_v0_3"
@@ -119,6 +129,8 @@ class SelfPlayConfig(BaseModel):
             )
         if abs(self.base_ratio + self.archive_ratio + self.new_ratio - 1.0) > 1e-9:
             raise ValueError("base_ratio, archive_ratio, and new_ratio must sum to 1")
+        if self.archive_min_pass_rate > self.archive_max_pass_rate:
+            raise ValueError("archive_min_pass_rate cannot exceed archive_max_pass_rate")
         if self.opponent_backend == "transformers" and self.opponent_samples != 1:
             raise ValueError("the deterministic Transformers opponent requires opponent_samples=1")
         if self.vllm_max_model_len <= self.max_completion_tokens:
@@ -171,6 +183,15 @@ def _sample(values: Sequence[TaskT], count: int, rng: random.Random) -> list[Tas
     if count <= len(values):
         return rng.sample(values, count)
     return [rng.choice(values) for _ in range(count)]
+
+
+def _frontier_target(config: SelfPlayConfig, round_index: int) -> float:
+    if config.rounds == 1:
+        return config.frontier_target_end
+    progress = (round_index - 1) / (config.rounds - 1)
+    return config.frontier_target_start + progress * (
+        config.frontier_target_end - config.frontier_target_start
+    )
 
 
 def _round_tasks(
@@ -235,8 +256,12 @@ def _assemble_dataset(
     seed_table = pq.read_table(config.questioner_seeds)
     seed_rows = seed_table.to_pylist()
     questioner_rng = random.Random(config.seed + 10_000 + round_index)
-    seed_rows = questioner_rng.sample(
-        seed_rows, k=min(config.questioner_episodes, len(seed_rows))
+    seed_rows = (
+        _sample(seed_rows, config.questioner_episodes, questioner_rng)
+        if config.selfplay_variant == "frontier_v2"
+        else questioner_rng.sample(
+            seed_rows, k=min(config.questioner_episodes, len(seed_rows))
+        )
     )
     for row in seed_rows:
         extra = dict(row["extra_info"])
@@ -254,8 +279,15 @@ def _assemble_dataset(
                 "max_returned_entities": config.max_returned_entities,
                 "program_profile": config.program_profile,
                 "role_weight": config.questioner_reward_weight,
+                "questioner_reward_variant": (
+                    "frontier_v2" if config.selfplay_variant == "frontier_v2" else "legacy"
+                ),
+                "frontier_target": _frontier_target(config, round_index),
+                "frontier_sigma": config.frontier_sigma,
             }
         )
+        if config.selfplay_variant == "frontier_v2":
+            extra["opponent_seed"] = config.seed
         row["extra_info"] = extra
         raw_seed_context = extra.get("seed_context")
         payload = (
@@ -274,6 +306,8 @@ def _assemble_dataset(
         row.pop("agent_name", None)
         row.pop("tools_kwargs", None)
     questioner_table = pa.Table.from_pylist(seed_rows)
+    questioner_path = output_path.with_name("questioner.parquet")
+    pq.write_table(questioner_table, questioner_path)
     solver_table = pq.read_table(solver_path)
     combined = pa.concat_tables([questioner_table, solver_table], promote_options="default")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -508,6 +542,14 @@ def _commands(
         "--max-completion-tokens",
         str(config.max_completion_tokens),
     ]
+    if config.selfplay_variant == "frontier_v2":
+        opponent.extend(
+            [
+                "--candidate-archive",
+                str((round_dir / "candidate_archive.sqlite").resolve()),
+                "--cache-evaluations",
+            ]
+        )
     if config.opponent_backend == "transformers":
         sglang = []
         model_url_index = opponent.index("--model-url")
@@ -625,12 +667,14 @@ def run_self_play(
             "INTERACTION_MODE": config.interaction_mode,
             "GRAPHSCRIPT_VERSION": config.graphscript_version,
             "VLLM_MODE": "colocate",
-            "SAVE_STEPS": "1",
+            "SAVE_STEPS": str(config.save_steps),
+            "SAVE_TOTAL_LIMIT": str(config.save_total_limit),
             "GRAPHTASK_REWARD_METRICS_DIR": str(reward_metrics_dir.resolve()),
             "PYTHONUNBUFFERED": "1",
         }
         plan = {
             "round": round_index,
+            "selfplay_variant": config.selfplay_variant,
             "adapter_in": str(adapter),
             "dataset": str(mixed_data),
             "counts": counts,
@@ -654,6 +698,13 @@ def run_self_play(
             "program_profile": config.program_profile,
             "max_completion_tokens": config.max_completion_tokens,
             "reward_metrics_dir": str(reward_metrics_dir),
+            "questioner_reward": {
+                "variant": (
+                    "frontier_v2" if config.selfplay_variant == "frontier_v2" else "legacy"
+                ),
+                "frontier_target": _frontier_target(config, round_index),
+                "frontier_sigma": config.frontier_sigma,
+            },
             "rollout_budget": {
                 "questioner_prompts": (
                     counts["questioner"] if not dry_run else config.questioner_episodes
@@ -724,6 +775,7 @@ def run_self_play(
             write_json(merge_manifest_path, merge_spec)
             LOGGER.info("selfplay_merge_completed round=%d", round_index)
         sglang_process: subprocess.Popen[Any] | None = None
+        phase_trainer_logs: dict[str, Path] = {}
         if commands["sglang"]:
             LOGGER.info("selfplay_sglang_started round=%d log=%s", round_index, logs / "sglang.log")
             with (logs / "sglang.log").open("w") as sglang_log:
@@ -762,7 +814,52 @@ def run_self_play(
                     train_log_path,
                 )
                 try:
-                    _run_with_tee(commands["train"], env=train_env, log_path=train_log_path)
+                    if config.selfplay_variant == "legacy":
+                        _run_with_tee(commands["train"], env=train_env, log_path=train_log_path)
+                    else:
+                        phase_adapter = adapter
+                        for phase, phase_data in (
+                            ("solver", round_dir / "solver.parquet"),
+                            ("questioner", round_dir / "questioner.parquet"),
+                        ):
+                            phase_dir = round_dir / f"{phase}_update"
+                            phase_known_adapters = frozenset(
+                                path.resolve()
+                                for path in phase_dir.rglob("adapter_model.safetensors")
+                            )
+                            phase_log_path = logs / f"ms_swift_{phase}.log"
+                            phase_env = {
+                                **train_env,
+                                "LORA_ADAPTER_PATH": str(phase_adapter),
+                                "TRAIN_DATA": str(phase_data.resolve()),
+                                "OUTPUT_DIR": str(phase_dir.resolve()),
+                                "EXPERIMENT_NAME": (
+                                    f"graphtask-selfplay-frontier-v2-r{round_index:03d}-{phase}"
+                                ),
+                            }
+                            LOGGER.info(
+                                "selfplay_phase_training_started round=%d phase=%s data=%s log=%s",
+                                round_index,
+                                phase,
+                                phase_data,
+                                phase_log_path,
+                            )
+                            _run_with_tee(
+                                commands["train"], env=phase_env, log_path=phase_log_path
+                            )
+                            phase_adapter = _adapter_from_checkpoint(
+                                phase_dir, known_adapters=phase_known_adapters
+                            )
+                            phase_log = find_trainer_log(phase_dir, phase_adapter)
+                            if phase_log is not None:
+                                phase_trainer_logs[phase] = phase_log
+                            LOGGER.info(
+                                "selfplay_phase_training_completed round=%d phase=%s adapter=%s",
+                                round_index,
+                                phase,
+                                phase_adapter,
+                            )
+                        adapter = phase_adapter
                 except (OSError, subprocess.CalledProcessError) as exc:
                     raise RuntimeError(
                         f"self-play GRPO training failed; see {train_log_path}"
@@ -773,9 +870,24 @@ def run_self_play(
         finally:
             if sglang_process is not None:
                 _stop(sglang_process)
-        adapter = _adapter_from_checkpoint(round_dir, known_adapters=known_adapters)
+        if config.selfplay_variant == "legacy":
+            adapter = _adapter_from_checkpoint(round_dir, known_adapters=known_adapters)
+        admission_summary: dict[str, Any] | None = None
+        if config.selfplay_variant == "frontier_v2":
+            admission_summary = promote_staged_tasks(
+                round_dir / "candidate_archive.sqlite",
+                archive_path,
+                min_pass_rate=config.archive_min_pass_rate,
+                max_pass_rate=config.archive_max_pass_rate,
+                min_novelty=config.archive_min_novelty,
+            )
+            write_json(logs / "archive_admission.json", admission_summary)
         archive_size_after = _archive_size(archive_path)
-        trainer_log = find_trainer_log(round_dir, adapter)
+        trainer_log = (
+            find_trainer_log(round_dir, adapter)
+            if config.selfplay_variant == "legacy"
+            else None
+        )
         round_metrics = summarize_selfplay_round(
             round_index,
             counts,
@@ -783,7 +895,10 @@ def run_self_play(
             reward_metrics_dir=reward_metrics_dir,
             archive_size_before=archive_size_before,
             archive_size_after=archive_size_after,
+            trainer_logs=phase_trainer_logs or None,
         )
+        if admission_summary is not None:
+            round_metrics["archive_admission"] = admission_summary
         metrics_summary_path = logs / "metrics_summary.json"
         write_json(metrics_summary_path, round_metrics)
         report_artifacts = write_selfplay_report(output_dir)
@@ -795,6 +910,15 @@ def run_self_play(
                 "dataset_hash": file_hash(mixed_data),
                 "metrics_summary": str(metrics_summary_path),
                 "reward_metrics_dir": str(reward_metrics_dir),
+                "selfplay_variant": config.selfplay_variant,
+                "trainer_logs": {
+                    phase: str(path) for phase, path in sorted(phase_trainer_logs.items())
+                },
+                "archive_admission": (
+                    str(logs / "archive_admission.json")
+                    if admission_summary is not None
+                    else None
+                ),
                 "completed": True,
             },
         )
@@ -805,6 +929,7 @@ def run_self_play(
                 "adapter": str(adapter),
                 "config_hash": file_hash(config_path),
                 "ms_swift_version": MS_SWIFT_VERSION,
+                "selfplay_variant": config.selfplay_variant,
             },
         )
         LOGGER.info(

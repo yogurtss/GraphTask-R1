@@ -141,3 +141,25 @@ def test_selfplay_metrics_preserve_role_components_and_render_curves(tmp_path: P
     assert report["training_history"][-1]["global_step"] == 2
     assert Path(artifacts["round_metrics"]).read_text().count("\n") == 1
     assert Path(artifacts["plot"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_frontier_v2_combines_separate_phase_histories(tmp_path: Path) -> None:
+    solver_log = tmp_path / "solver" / "logging.jsonl"
+    questioner_log = tmp_path / "questioner" / "logging.jsonl"
+    _write_jsonl(solver_log, [{"loss": 0.4, "reward": 0.3, "step": 1}])
+    _write_jsonl(questioner_log, [{"loss": 0.2, "reward": 0.6, "step": 1}])
+
+    summary = summarize_selfplay_round(
+        1,
+        {"questioner": 2, "solver": 2, "total": 4},
+        trainer_log=None,
+        trainer_logs={"solver": solver_log, "questioner": questioner_log},
+        reward_metrics_dir=None,
+    )
+
+    assert [row["step"] for row in summary["training_history"]] == [1.0, 2.0]
+    assert [row["phase_index"] for row in summary["training_history"]] == [0.0, 1.0]
+    assert summary["trainer_logs"] == {
+        "solver": str(solver_log),
+        "questioner": str(questioner_log),
+    }

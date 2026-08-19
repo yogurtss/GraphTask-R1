@@ -153,3 +153,82 @@ def challenger_reward(
     components["reward_stage"] = float(QUESTIONER_STAGE_CERTIFIED)
     total = 0.20 + 0.80 * quality
     return RewardBreakdown(total=total, components=components)
+
+
+def frontier_gated_challenger_reward(
+    result: VerifierResult,
+    *,
+    pass_rate: float,
+    samples: int,
+    cost: float,
+    target_alignment: float | None = None,
+    frontier_target: float = 0.5,
+    frontier_sigma: float = 0.2,
+) -> RewardBreakdown:
+    """Questioner v2 reward with certification as a gate and difficulty as the driver.
+
+    The legacy additive reward intentionally remains in :func:`challenger_reward` so
+    old experiments are exactly reproducible.  This opt-in variant smooths the
+    opponent success estimate with a Beta(1, 1) prior, then multiplies task quality
+    by the frontier score.  Consequently novelty or efficiency cannot compensate
+    for a task that is trivial or impossible for the frozen Solver.
+    """
+    if samples <= 0:
+        raise ValueError("samples must be positive")
+    if not 0.0 <= pass_rate <= 1.0:
+        raise ValueError("pass_rate must be between 0 and 1")
+    if target_alignment is not None and not 0.0 <= target_alignment <= 1.0:
+        raise ValueError("target_alignment must be between 0 and 1")
+    if not 0.0 <= frontier_target <= 1.0:
+        raise ValueError("frontier_target must be between 0 and 1")
+
+    validity = float(result.passed)
+    efficiency = math.exp(-0.05 * cost)
+    smoothed_pass_rate = (pass_rate * samples + 1.0) / (samples + 2.0)
+    frontier = (
+        frontier_reward(
+            smoothed_pass_rate,
+            target=frontier_target,
+            sigma=frontier_sigma,
+        )
+        if validity
+        else 0.0
+    )
+    components = {
+        "validity": validity,
+        "frontier": frontier,
+        "opponent_pass_rate_smoothed": smoothed_pass_rate,
+        "necessity": result.necessity_mean if validity else 0.0,
+        "novelty": (
+            0.5 * (result.novelty_structural + result.novelty_textual) if validity else 0.0
+        ),
+        "shortcut_penalty": -float(result.shortcut_found is True),
+        "answer_leak_penalty": -float(result.answer_leak),
+        "efficiency": efficiency,
+        "executable": float(result.executable),
+        "answer_nonempty": float(result.answer_nonempty),
+        "cardinality_valid": float(result.cardinality_valid),
+        "certified": validity,
+        "reward_variant_frontier_v2": 1.0,
+    }
+    if not result.passed:
+        components["reward_stage"] = float(QUESTIONER_STAGE_VERIFICATION)
+        return RewardBreakdown(
+            total=_verification_failure_reward(result, efficiency=efficiency),
+            components=components,
+        )
+
+    alignment = target_alignment if target_alignment is not None else 1.0
+    if target_alignment is not None:
+        components["target_alignment"] = target_alignment
+    quality = (
+        0.35 * components["necessity"]
+        + 0.25 * components["novelty"]
+        + 0.20 * alignment
+        + 0.20 * components["efficiency"]
+    )
+    frontier_quality = frontier * (0.5 + 0.5 * quality)
+    components["quality"] = quality
+    components["frontier_quality"] = frontier_quality
+    components["reward_stage"] = float(QUESTIONER_STAGE_CERTIFIED)
+    return RewardBreakdown(total=0.05 + 0.95 * frontier_quality, components=components)

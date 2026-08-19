@@ -1,18 +1,24 @@
+# Opt-in A/B variant. The legacy path remains configs/training/selfplay.yaml.
 model_path: Qwen/Qwen3-4B-Instruct-2507
 model_type: qwen3
-# Mainline: point this at the completed mixed-role SFT LoRA. A Solver-only GRPO LoRA is an
-# optional warm-up/ablation starting point, not a prerequisite.
 initial_adapter: ${INITIAL_ADAPTER}
 base_tasks: ${BASE_TASKS}
 val_data: ${VAL_DATA}
 questioner_seeds: ${QUESTIONER_SEEDS}
 graph_snapshot: kqapro-v1
+selfplay_variant: frontier_v2
 rounds: 3
 questioner_episodes: 192
 solver_episodes: 320
 questioner_reward_weight: 1.0
 solver_reward_weight: 1.0
-opponent_samples: 4
+opponent_samples: 8
+frontier_target_start: 0.55
+frontier_target_end: 0.40
+frontier_sigma: 0.20
+archive_min_pass_rate: 0.25
+archive_max_pass_rate: 0.75
+archive_min_novelty: 0.25
 base_ratio: 0.35
 archive_ratio: 0.35
 new_ratio: 0.30
@@ -35,8 +41,6 @@ max_completion_tokens: 4096
 vllm_max_model_len: 32768
 vllm_gpu_memory_utilization: 0.6
 vllm_sleep_level: 1
-# Actor training remains LoRA. DeepSpeed only controls distributed state sharding.
-# Choices: none, zero0, zero1, zero2, zero3, zero2_offload, zero3_offload.
 deepspeed: zero2
 rl_algorithm: reinforce_plus_plus
 micro_batch_size: 4

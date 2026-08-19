@@ -1,3 +1,4 @@
+# Three-round, single-GPU smoke for the isolated frontier_v2 path.
 model_path: ${SMOKE_MODEL_PATH}
 model_type: qwen3
 initial_adapter: ${INITIAL_ADAPTER}
@@ -5,10 +6,17 @@ base_tasks: ${BASE_TASKS}
 val_data: ${VAL_DATA}
 questioner_seeds: ${QUESTIONER_SEEDS}
 graph_snapshot: toy-v1
-rounds: 2
-questioner_episodes: 1
-solver_episodes: 1
+selfplay_variant: frontier_v2
+rounds: 3
+questioner_episodes: 2
+solver_episodes: 2
 opponent_samples: 1
+frontier_target_start: 0.55
+frontier_target_end: 0.40
+frontier_sigma: 0.20
+archive_min_pass_rate: 0.0
+archive_max_pass_rate: 1.0
+archive_min_novelty: 0.0
 base_ratio: 1.0
 archive_ratio: 0.0
 new_ratio: 0.0
