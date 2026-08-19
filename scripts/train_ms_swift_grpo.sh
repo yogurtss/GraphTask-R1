@@ -5,7 +5,6 @@ set -euo pipefail
 : "${MODEL_TYPE:=qwen3}"
 : "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift LoRA checkpoint (SFT by default)}"
 : "${TRAIN_DATA:?Set TRAIN_DATA to a Solver RL parquet file}"
-: "${VAL_DATA:=$TRAIN_DATA}"
 : "${OUTPUT_DIR:=outputs/ms-swift-solver-grpo-cu124}"
 
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-32768}"
@@ -63,6 +62,14 @@ case "$RL_ALGORITHM" in
     exit 2
     ;;
 esac
+LOG_ENTROPY="${LOG_ENTROPY:-true}"
+if [[ "$LOG_ENTROPY" != "true" && "$LOG_ENTROPY" != "false" ]]; then
+  echo "LOG_ENTROPY must be true or false" >&2
+  exit 2
+fi
+# A rollout is generated once per window. Logging at that boundary prevents
+# ms-swift from clearing rollout metrics on an earlier optimizer-only step.
+LOGGING_STEPS="${LOGGING_STEPS:-${STEPS_PER_GENERATION:-4}}"
 VLLM_COLOCATE_ARGS=()
 VLLM_SERVER_ARGS=()
 VLLM_MODE_ARGS=()
@@ -103,15 +110,15 @@ if [[ ! -d "$LORA_ADAPTER_PATH" ]]; then
   echo "SFT adapter directory not found: $LORA_ADAPTER_PATH" >&2
   exit 2
 fi
-if [[ ! -f "$TRAIN_DATA" || ! -f "$VAL_DATA" ]]; then
-  echo "Solver RL parquet not found; generate it or fix TRAIN_DATA/VAL_DATA" >&2
+if [[ ! -f "$TRAIN_DATA" ]]; then
+  echo "Solver RL parquet not found; generate it or fix TRAIN_DATA" >&2
   exit 2
 fi
 
 export GRAPHTASK_MS_SWIFT_DATA_KIND=rl
 export GRAPHTASK_MS_SWIFT_TRAIN_DATA="$TRAIN_DATA"
-export GRAPHTASK_MS_SWIFT_VAL_DATA="$VAL_DATA"
 export INTERACTION_MODE
+export RL_ALGORITHM
 export CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES:-1,2,3}"
 NUM_GPUS="${NUM_GPUS:-3}"
 MULTI_TURN_ARGS=()
@@ -127,7 +134,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --adapters "$LORA_ADAPTER_PATH" \
   --train_type lora \
   --dataset graphtask-train \
-  --val_dataset graphtask-val \
+  --eval_strategy no \
   --external_plugins "$PROJECT_ROOT/graphtask_r1/training/ms_swift_plugin.py" \
   --reward_funcs graphtask_score \
   --agent_template hermes \
@@ -158,11 +165,11 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --dataloader_num_workers "${DATALOADER_NUM_WORKERS:-1}" \
   --load_from_cache_file false \
   --split_dataset_ratio 0 \
-  --eval_steps "${EVAL_STEPS:-20}" \
   --save_steps "${SAVE_STEPS:-20}" \
   --save_total_limit "${SAVE_TOTAL_LIMIT:-2}" \
-  --logging_steps "${LOGGING_STEPS:-1}" \
+  --logging_steps "$LOGGING_STEPS" \
   --warmup_ratio "${WARMUP_RATIO:-0.05}" \
+  --log_entropy "$LOG_ENTROPY" \
   --log_completions true \
   --report_to none \
   --seed "${SEED:-42}" \

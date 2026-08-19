@@ -189,6 +189,7 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
         event: dict[str, object] = {
             "event": "graphtask_reward_components",
             "sequence": self._metrics_sequence,
+            "rl_algorithm": os.environ.get("RL_ALGORITHM", "grpo"),
             "rank": os.environ.get("RANK", "0"),
             "world_size": os.environ.get("WORLD_SIZE", "1"),
             "samples": size,

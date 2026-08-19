@@ -10,23 +10,40 @@ from typing import Any
 
 from graphtask_r1.utils import write_json
 
-TRAINER_METRICS = (
-    "loss",
-    "grad_norm",
-    "learning_rate",
-    "reward",
-    "reward_std",
-    "kl",
-    "completions/mean_length",
-    "completions/clipped_ratio",
-    "clip_ratio/region_mean",
-    "eval_loss",
-    "eval_reward",
-    "eval_reward_std",
-    "eval_kl",
-    "eval_completions/mean_length",
-    "eval_completions/clipped_ratio",
+_STEP_METRIC_NAMES = frozenset(
+    {
+        "loss",
+        "grad_norm",
+        "learning_rate",
+        "reward",
+        "reward_std",
+        "frac_reward_zero_std",
+        "kl",
+    }
 )
+_STEP_METRIC_PREFIXES = (
+    "completions/",
+    "rewards/",
+    "clip_ratio/",
+    "entropy/",
+    "rollout_correction/",
+)
+
+
+def _is_step_metric_row(row: Mapping[str, object]) -> bool:
+    """Distinguish optimizer/eval events from terminal trainer summaries.
+
+    Once a row is known to be a step event, all of its finite numeric fields are
+    retained. This keeps the report compatible with new ms-swift metrics without
+    inventing extra steps from the final ``train_runtime`` summary.
+    """
+    for name in row:
+        unprefixed = name.removeprefix("eval_")
+        if unprefixed in _STEP_METRIC_NAMES or unprefixed.startswith(
+            _STEP_METRIC_PREFIXES
+        ):
+            return True
+    return False
 
 
 def _number(value: object) -> float | None:
@@ -78,6 +95,8 @@ def _trainer_history(path: Path | None) -> list[dict[str, float]]:
     history: list[dict[str, float]] = []
     inferred_step = 0
     for row in _read_jsonl(path):
+        if not _is_step_metric_row(row):
+            continue
         raw_step = _number(row.get("step"))
         if raw_step is None:
             raw_global_step = row.get("global_step/max_steps")
@@ -93,8 +112,8 @@ def _trainer_history(path: Path | None) -> list[dict[str, float]]:
             inferred_step = max(inferred_step, int(raw_step))
         metrics = {
             name: number
-            for name in TRAINER_METRICS
-            if (number := _number(row.get(name))) is not None
+            for name, value in row.items()
+            if name != "step" and (number := _number(value)) is not None
         }
         if metrics:
             history.append({"step": raw_step, **metrics})

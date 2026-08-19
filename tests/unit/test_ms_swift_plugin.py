@@ -251,6 +251,7 @@ def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
     caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
     metrics_dir = tmp_path / "reward_metrics"
     monkeypatch.setenv("GRAPHTASK_REWARD_METRICS_DIR", str(metrics_dir))
+    monkeypatch.setenv("RL_ALGORITHM", "reinforce_plus_plus")
     monkeypatch.setenv("RANK", "2")
     reward = plugin.GraphTaskReward()
 
@@ -270,6 +271,7 @@ def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
     assert values == [1.0]
     event = json.loads(caplog.records[-1].message)
     assert event["event"] == "graphtask_reward_components"
+    assert event["rl_algorithm"] == "reinforce_plus_plus"
     assert event["means"]["f1"] == 1.0
     assert event["means"]["exact_match"] == 1.0
     assert event["roles"]["solver"]["means"]["unweighted_score"] == 1.0

@@ -50,7 +50,14 @@ def test_selfplay_metrics_preserve_role_components_and_render_curves(tmp_path: P
                 "loss": 0.4,
                 "grad_norm": 1.2,
                 "reward": 0.2,
+                "reward_std": 0.3,
+                "frac_reward_zero_std": 0.25,
                 "kl": 0.01,
+                "completions/min_length": 12.0,
+                "completions/max_length": 40.0,
+                "clip_ratio/high_max": 0.2,
+                "entropy/mean": 1.5,
+                "memory(GiB)": 7.5,
                 "global_step/max_steps": "1/2",
             },
             {
@@ -61,6 +68,11 @@ def test_selfplay_metrics_preserve_role_components_and_render_curves(tmp_path: P
                 "global_step/max_steps": "2/2",
             },
             {"eval_reward": 0.6, "eval_loss": 0.1, "global_step/max_steps": "2/2"},
+            {
+                "train_runtime": 10.0,
+                "train_samples_per_second": 2.0,
+                "train_loss": 0.3,
+            },
         ],
     )
     stale = round_dir / "stale" / "logging.jsonl"
@@ -115,6 +127,12 @@ def test_selfplay_metrics_preserve_role_components_and_render_curves(tmp_path: P
         "min": 0.2,
         "max": 0.4,
     }
+    assert summary["training_history"][0]["frac_reward_zero_std"] == 0.25
+    assert summary["training_history"][0]["completions/min_length"] == 12.0
+    assert summary["training_history"][0]["clip_ratio/high_max"] == 0.2
+    assert summary["training_history"][0]["entropy/mean"] == 1.5
+    assert summary["training_history"][0]["memory(GiB)"] == 7.5
+    assert "train_runtime" not in summary["trainer_metrics"]
     write_json(round_dir / "logs" / "metrics_summary.json", summary)
 
     artifacts = write_selfplay_report(output_dir)

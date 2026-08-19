@@ -133,6 +133,11 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     )
     assert reinforce[reinforce.index("--scale_rewards") + 1] == "batch"
     assert reinforce[reinforce.index("--kl_in_reward") + 1] == "true"
+    assert reinforce[reinforce.index("--log_entropy") + 1] == "true"
+    assert reinforce[reinforce.index("--logging_steps") + 1] == "4"
+    assert reinforce[reinforce.index("--eval_strategy") + 1] == "no"
+    assert "--val_dataset" not in reinforce
+    assert "--eval_steps" not in reinforce
     assert "--num_generations_eval" not in reinforce
 
     zero3 = launch("colocate", deepspeed="zero3")
