@@ -3,9 +3,12 @@ set -euo pipefail
 
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
 : "${MODEL_TYPE:=qwen3}"
+LORA_ADAPTER_PATH="${LORA_ADAPTER_PATH:-${MS_SWIFT_SFT_ADAPTER:-}}"
+TRAIN_DATA="${TRAIN_DATA:-${SOLVER_RL_TRAIN_DATA:-}}"
+VAL_DATA="${VAL_DATA:-${SOLVER_RL_VAL_DATA:-${TRAIN_DATA:-}}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${SOLVER_GRPO_OUTPUT_DIR:-outputs/ms-swift-solver-grpo-cu124}}"
 : "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift LoRA checkpoint (SFT by default)}"
 : "${TRAIN_DATA:?Set TRAIN_DATA to a Solver RL parquet file}"
-: "${OUTPUT_DIR:=outputs/ms-swift-solver-grpo-cu124}"
 
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-32768}"
 if ! [[ "$MAX_COMPLETION_LENGTH" =~ ^[0-9]+$ ]] || (( MAX_COMPLETION_LENGTH < 1 || MAX_COMPLETION_LENGTH > 40960 )); then
@@ -121,9 +124,15 @@ export INTERACTION_MODE
 export RL_ALGORITHM
 export CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_VISIBLE_DEVICES:-1,2,3}"
 NUM_GPUS="${NUM_GPUS:-3}"
+MULTI_TURN_SCHEDULER="${MULTI_TURN_SCHEDULER:-graphtask_solver}"
 MULTI_TURN_ARGS=()
 if [[ "$INTERACTION_MODE" == "tool" ]]; then
-  MULTI_TURN_ARGS=(--multi_turn_scheduler graphtask_solver --max_turns "${MAX_TURNS:-8}")
+  # Default invocation remains: --multi_turn_scheduler graphtask_solver
+  MULTI_TURN_ARGS=(--multi_turn_scheduler "$MULTI_TURN_SCHEDULER" --max_turns "${MAX_TURNS:-8}")
+fi
+TEMPLATE_ARGS=()
+if [[ -n "${RESPONSE_PREFIX:-}" ]]; then
+  TEMPLATE_ARGS=(--response_prefix "$RESPONSE_PREFIX")
 fi
 
 NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
@@ -139,6 +148,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --reward_funcs graphtask_score \
   --agent_template hermes \
   --loss_scale default \
+  "${TEMPLATE_ARGS[@]}" \
   "${DEEPSPEED_ARGS[@]}" \
   --use_vllm "$USE_VLLM" \
   "${VLLM_MODE_ARGS[@]}" \

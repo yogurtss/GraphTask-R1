@@ -140,7 +140,11 @@ def normalize_agent_messages(messages: object) -> list[dict[str, str]]:
     """Convert existing OpenAI-style Parquet messages to ms-swift agent messages."""
     normalized = to_json_compatible(messages)
     if not isinstance(normalized, list):
-        raise ValueError("messages must be a list")
+        raise ValueError(
+            "messages must be a list, got "
+            f"{type(normalized).__name__}; check that TRAIN_DATA/VAL_DATA point to "
+            "preflight SFT accepted Parquet files, not certified tasks or RL rows"
+        )
     result: list[dict[str, str]] = []
     for raw_message in normalized:
         if not isinstance(raw_message, Mapping):

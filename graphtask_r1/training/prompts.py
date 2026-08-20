@@ -6,6 +6,7 @@ from graphtask_r1.schema import RelationInfo
 
 InteractionMode = Literal["tool", "graphscript"]
 GraphScriptVersion = Literal["0.1", "0.2", "0.3"]
+QuestionerContract = Literal["program", "question_program"]
 
 
 QUESTIONER_SYSTEM_PROMPT = """You are the Questioner in graph self-play. Explore only with the
@@ -13,6 +14,14 @@ provided privileged graph tools. Construct a typed executable program whose answ
 The canonical question is rendered externally from the verified program. Return exactly:
 <task>{\"topic_entities\": [\"...\"], \"program\": {...}, \"paraphrase\": null}</task>
 Never use an all_entities root and never invent or include gold answers."""
+
+
+QUESTIONER_QUESTION_PROGRAM_TOOL_PROMPT = """You are the Questioner in graph self-play. Construct
+both one natural-language question and one typed executable program whose answer is non-empty.
+Return exactly one object and no other text:
+<task>{"question":"...","topic_entities":["..."],"program":{...}}</task>
+The question must describe the program and must not contain or reveal its executed answer. Never use
+an all_entities root; program execution, not a guessed answer, supplies gold."""
 
 SOLVER_SYSTEM_PROMPT = """You are the Solver in graph self-play. You cannot see the gold program
 or answer. Use only graph_search, text_search, and inspect_entity results that are available in the
@@ -30,7 +39,9 @@ SOLVER_GRAPHSCRIPT_PROMPT = """You are the Solver in graph self-play. Infer a bo
 GraphScript v0.1 program from the question and topic seed. Output exactly one JSON object and no
 prose or markdown. The only valid shape is start -> follow -> follow -> require_unique -> emit.
 Use only relation IDs from the provided catalog; program execution, not parametric recall, supplies
-the answer."""
+the answer. Follow this exact JSON schema, replacing RELATION_ID_1 and RELATION_ID_2 with catalog
+IDs:
+{"version":"0.1","ops":[{"op":"start","entity":"$seed","out":"h0"},{"op":"follow","in":"h0","relation":"RELATION_ID_1","direction":"out","limit":8,"out":"h1"},{"op":"follow","in":"h1","relation":"RELATION_ID_2","direction":"out","limit":8,"out":"h2"},{"op":"require_unique","in":"h2"},{"op":"emit","in":"h2"}]}"""
 
 
 QUESTIONER_GRAPHSCRIPT_V02_PROMPT = """You are the Questioner in graph self-play. Produce one
@@ -66,6 +77,22 @@ program in every provided seed using the required resolve_entity operation with 
 and match="id"; never use all_entities or a different root. Traverse only observed/allowed relation
 IDs, include only fields listed in the operation signatures, and end with exactly one emit. Never
 embed a guessed gold answer; execution supplies it."""
+
+
+QUESTIONER_QUESTION_PROGRAM_PROMPT = """You are the Questioner in structured graph self-play.
+Produce both one natural-language question and one bounded, typed GraphScript program that answers
+that question. Output exactly one JSON object in this shape and no prose or markdown:
+{"question":"...","program":{"version":"$version","ops":[...]}}
+The question must not contain or reveal the executed answer. The program must use only the provided
+seed entities and allowed relation IDs; program execution, not a guessed answer, supplies gold."""
+
+
+QUESTIONER_QUESTION_PROGRAM_V01_GRAMMAR = """
+GraphScript v0.1 must have exactly this shape: start(entity="$seed", out="h0"), then two
+follow operations producing h1 and h2, then require_unique(in="h2"), then emit(in="h2"). Use
+only h0/h1/h2 and relation IDs from the provided catalog. Follow this exact JSON schema, replacing
+the question and both RELATION_ID placeholders:
+{"question":"QUESTION","program":{"version":"0.1","ops":[{"op":"start","entity":"$seed","out":"h0"},{"op":"follow","in":"h0","relation":"RELATION_ID_1","direction":"out","limit":8,"out":"h1"},{"op":"follow","in":"h1","relation":"RELATION_ID_2","direction":"out","limit":8,"out":"h2"},{"op":"require_unique","in":"h2"},{"op":"emit","in":"h2"}]}}"""
 
 
 SOLVER_GRAPHSCRIPT_V03_PROMPT = """You are the Solver in structured graph self-play. Compile the
@@ -119,16 +146,25 @@ def role_prompt(
     interaction_mode: InteractionMode = "tool",
     relation_catalog: tuple[RelationInfo, ...] = (),
     graphscript_version: GraphScriptVersion = "0.1",
+    questioner_contract: QuestionerContract = "program",
 ) -> list[dict[str, str]]:
     if role == "questioner":
         if interaction_mode == "tool":
-            system = QUESTIONER_SYSTEM_PROMPT
+            system = (
+                QUESTIONER_QUESTION_PROGRAM_TOOL_PROMPT
+                if questioner_contract == "question_program"
+                else QUESTIONER_SYSTEM_PROMPT
+            )
         else:
-            system = {
-                "0.1": QUESTIONER_GRAPHSCRIPT_PROMPT,
-                "0.2": QUESTIONER_GRAPHSCRIPT_V02_PROMPT,
-                "0.3": QUESTIONER_GRAPHSCRIPT_V03_PROMPT,
-            }[graphscript_version]
+            system = (
+                QUESTIONER_QUESTION_PROGRAM_PROMPT.replace("$version", graphscript_version)
+                if questioner_contract == "question_program"
+                else {
+                    "0.1": QUESTIONER_GRAPHSCRIPT_PROMPT,
+                    "0.2": QUESTIONER_GRAPHSCRIPT_V02_PROMPT,
+                    "0.3": QUESTIONER_GRAPHSCRIPT_V03_PROMPT,
+                }[graphscript_version]
+            )
     elif role == "solver":
         if interaction_mode == "tool":
             system = SOLVER_SYSTEM_PROMPT
@@ -140,6 +176,13 @@ def role_prompt(
             }[graphscript_version]
     else:
         raise ValueError(f"unknown role: {role}")
+    if (
+        interaction_mode == "graphscript"
+        and graphscript_version == "0.1"
+        and role == "questioner"
+        and questioner_contract == "question_program"
+    ):
+        system += QUESTIONER_QUESTION_PROGRAM_V01_GRAMMAR
     if interaction_mode == "graphscript" and graphscript_version == "0.2":
         system += GRAPHSCRIPT_V02_GRAMMAR
     if interaction_mode == "graphscript" and graphscript_version == "0.3":

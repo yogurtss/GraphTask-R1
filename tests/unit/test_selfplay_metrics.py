@@ -163,3 +163,59 @@ def test_frontier_v2_combines_separate_phase_histories(tmp_path: Path) -> None:
         "solver": str(solver_log),
         "questioner": str(questioner_log),
     }
+
+
+def test_sparse_reward_components_use_all_role_samples_as_denominator(tmp_path: Path) -> None:
+    reward_dir = tmp_path / "reward_metrics"
+    _write_jsonl(
+        reward_dir / "reward_components.rank-0.jsonl",
+        [
+            {
+                "event": "graphtask_reward_components",
+                "roles": {
+                    "questioner": {
+                        "samples": 4,
+                        "means": {
+                            "unweighted_score": 0.25,
+                            "reject_non_json": 1.0,
+                            "milestone_json_valid": 1.0,
+                        },
+                    }
+                },
+                "sample_components": [
+                    {
+                        "role": "questioner",
+                        "reason_codes": ["NON_JSON"],
+                        "components": {"reject_non_json": 1.0},
+                    },
+                    {
+                        "role": "questioner",
+                        "reason_codes": [],
+                        "components": {"milestone_json_valid": 1.0},
+                    },
+                    {
+                        "role": "questioner",
+                        "reason_codes": [],
+                        "components": {"milestone_json_valid": 1.0},
+                    },
+                    {
+                        "role": "questioner",
+                        "reason_codes": [],
+                        "components": {"milestone_json_valid": 1.0},
+                    },
+                ],
+            }
+        ],
+    )
+
+    summary = summarize_selfplay_round(
+        1,
+        {"questioner": 1, "solver": 0, "total": 1},
+        trainer_log=None,
+        reward_metrics_dir=reward_dir,
+    )
+
+    means = summary["roles"]["questioner"]["means"]
+    assert means["reject_non_json"] == 0.25
+    assert means["milestone_json_valid"] == 0.75
+    assert means["unweighted_score"] == 0.25

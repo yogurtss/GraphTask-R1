@@ -24,6 +24,8 @@ def export_role_dataset(
     opponent_samples: int = 8,
     questioner_weight: float = 0.35,
     solver_weight: float = 0.65,
+    solver_reward_variant: str = "legacy",
+    curriculum_phase: str | None = None,
     interaction_mode: InteractionMode = "tool",
     graphscript_version: GraphScriptVersion = "0.1",
     relation_catalog: tuple[RelationInfo, ...] = (),
@@ -134,7 +136,10 @@ def export_role_dataset(
                     **common,
                     "role": "solver",
                     "role_weight": solver_weight,
+                    "solver_reward_variant": solver_reward_variant,
                 }
+                if curriculum_phase is not None:
+                    solver_extra["curriculum_phase"] = curriculum_phase
                 writer.write(
                     {
                         "data_source": "graphtask/solver",

@@ -16,6 +16,7 @@ from graphtask_r1.graphscript import program_to_graphscript
 from graphtask_r1.schema import (
     Entity,
     Hop,
+    QueryAttribute,
     QueryRelation,
     RelationInfo,
     TaskCertificate,
@@ -815,9 +816,27 @@ def _tool_call(name: str, arguments: dict[str, Any], index: int) -> dict[str, An
 
 
 def test_tool_opponent_is_confined_to_observed_frontier(tmp_path: Path) -> None:
-    invalid = _ScriptedOpponent(
+    legacy_invalid = _ScriptedOpponent(
         tmp_path,
         [_tool_call("graph_search", {"entity_ids": ["cara"]}, 0)],
+    )
+    legacy_rejected = asyncio.run(
+        legacy_invalid.rollout(
+            _task(),
+            toy_graph(),
+            allowed_relations=("works_at", "located_in"),
+            max_edge_visits=10,
+        )
+    )
+    assert legacy_rejected["passed"] == 0.0
+    assert "program_parse" not in legacy_rejected
+
+    invalid = _ScriptedOpponent(
+        tmp_path,
+        [
+            _tool_call("graph_search", {"entity_ids": ["cara"]}, 0),
+            {"role": "assistant", "content": '<answer>["wrong"]</answer>'},
+        ],
     )
     rejected = asyncio.run(
         invalid.rollout(
@@ -825,10 +844,14 @@ def test_tool_opponent_is_confined_to_observed_frontier(tmp_path: Path) -> None:
             toy_graph(),
             allowed_relations=("works_at", "located_in"),
             max_edge_visits=10,
+            recover_invalid_tool_calls=True,
         )
     )
     assert rejected["passed"] == 0.0
     assert rejected["edge_visits"] == 0.0
+    assert rejected["tool_calls"] == 1.0
+    assert rejected["invalid_tool_calls"] == 1.0
+    assert rejected["program_parse"] == 1.0
 
     valid = _ScriptedOpponent(
         tmp_path,
@@ -864,6 +887,29 @@ def test_tool_opponent_is_confined_to_observed_frontier(tmp_path: Path) -> None:
     )
     assert accepted["passed"] == 1.0
     assert accepted["edge_visits"] == 2.0
+
+
+def test_tool_opponent_parses_literal_answers_from_gold_kind(tmp_path: Path) -> None:
+    literal_task = certify_proposal(
+        TaskProposal(
+            topic_entities=("alice",),
+            program=QueryAttribute(input=Entity(entity_id="alice"), attribute="age"),
+        ),
+        toy_graph(),
+        graph_snapshot="toy-v1",
+    )
+    value = literal_task.gold_answers.answers[0].value
+    service = _ScriptedOpponent(
+        tmp_path,
+        [{"role": "assistant", "content": f"<answer>{json.dumps([value])}</answer>"}],
+    )
+
+    result = asyncio.run(service.rollout(literal_task, toy_graph()))
+
+    assert literal_task.gold_answers.answers[0].kind == "literal"
+    assert result["passed"] == 1.0
+    assert result["program_parse"] == 1.0
+    assert result["program_executable"] == 1.0
 
 
 def test_graphscript_selfplay_assembles_mixed_single_turn_dataset(tmp_path: Path) -> None:
@@ -1016,6 +1062,61 @@ def test_frontier_v2_writes_independent_role_datasets_and_reward_contract(
     assert all(row["extra_info"]["opponent_seed"] == 42 for row in questioner_rows)
     assert all(row["extra_info"]["frontier_target"] == 0.5 for row in questioner_rows)
     assert pq.ParquetFile(tmp_path / "solver.parquet").metadata.num_rows == 2
+
+
+def test_curriculum_prompt_hint_does_not_narrow_execution_relations(tmp_path: Path) -> None:
+    tasks_path = tmp_path / "tasks.parquet"
+    seeds_path = tmp_path / "seeds.parquet"
+    catalog_path = tmp_path / "relations.json"
+    write_records(
+        tasks_path,
+        [TaskTrainingRecord.model_validate(_task().model_dump(mode="json")).model_dump()],
+    )
+    write_json(catalog_path, [value.model_dump(mode="json") for value in _catalog()])
+    sample_questioner_seeds(
+        "toy-v1",
+        seeds_path,
+        count=1,
+        seed=42,
+        min_degree=1,
+        interaction_mode="graphscript",
+        graphscript_version="0.1",
+        relation_catalog=_catalog(),
+    )
+    config = SelfPlayConfig(
+        initial_adapter="adapter",
+        base_tasks=tasks_path,
+        val_data=tmp_path / "val.parquet",
+        questioner_seeds=seeds_path,
+        graph_snapshot="toy-v1",
+        selfplay_variant="curriculum_v3",
+        rounds=3,
+        questioner_episodes=1,
+        solver_episodes=1,
+        base_ratio=1.0,
+        archive_ratio=0.0,
+        new_ratio=0.0,
+        interaction_mode="graphscript",
+        graphscript_version="0.1",
+        relation_catalog=catalog_path,
+        relation_catalogs={"toy-v1": catalog_path},
+        program_profile="graphscript_v0_1",
+    )
+
+    _assemble_dataset(
+        config,
+        tmp_path / "archive.sqlite",
+        tmp_path / "mixed.parquet",
+        round_index=1,
+        opponent_url="http://127.0.0.1:18080",
+    )
+
+    row = pq.read_table(tmp_path / "questioner.parquet").to_pylist()[0]
+    info = row["extra_info"]
+    assert set(info["allowed_relations"]) == {"works_at", "located_in"}
+    assert info["observed_relation_ids"] == ["works_at"]
+    assert "- works_at: works at" in row["prompt"][1]["content"]
+    assert "- located_in: located in" not in row["prompt"][1]["content"]
 
 
 def test_kqapro_questioner_seeds_default_to_graphscript_v03(tmp_path: Path) -> None:

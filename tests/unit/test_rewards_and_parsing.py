@@ -132,6 +132,8 @@ def test_role_output_parsers() -> None:
     assert topics == ("alice",)
     assert program.op == "entity"
     assert parse_solver_output('<answer>["alice"]</answer>').values() == ("alice",)
+    literal = parse_solver_output('<answer>["Paris"]</answer>', answer_kind="literal")
+    assert literal.answers[0].kind == "literal"
 
 
 def test_archive_novelty_is_data_dependent(tmp_path: Path) -> None:

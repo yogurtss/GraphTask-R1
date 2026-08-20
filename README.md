@@ -107,7 +107,7 @@ export MODEL_PATH=/path/to/model
 
 ```bash
 bash scripts/prepare_mixed_sft_data.sh
-source outputs/sft-data/sft_data.env
+source "$WORK_DIR/sft_data.env"
 ```
 
 该脚本依次完成 deep audit、training view、relation catalog、双角色导出、按比例混合及真实训练模板
@@ -121,9 +121,13 @@ source outputs/sft-data/sft_data.env
 `source_stratum` 交给 reward（不进入模型 prompt），生成程序按 root、terminal、长度、operator 和
 答案类型计算 `target_alignment`，使合成任务向真实 train 分布靠拢；该指标也会写入日志曲线。预检
 默认要求所有行通过，以免过滤后静默改变比例。确认数据后再启动 SFT；`--dry-run` 只打印实际训练
-脚本和环境变量：
+脚本和环境变量。不要手动把 `TRAIN_DATA` 指向 `training_tasks.parquet`、RL Parquet 或
+`exported/*.parquet`；SFT 必须使用 env 文件中的 `preflight/mixed-train-accepted.parquet`：
 
 ```bash
+printf 'TRAIN_DATA=%s\nVAL_DATA=%s\n' "$TRAIN_DATA" "$VAL_DATA"
+python scripts/validate_ms_swift_data.py --kind sft --input "$TRAIN_DATA" "$VAL_DATA"
+
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b
 
 python -m graphtask_r1.cli train sft \

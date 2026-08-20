@@ -56,6 +56,7 @@ def test_gpu_profiles_keep_kqapro_and_kilt_graphscript_versions_separate() -> No
 def test_ms_swift_sft_reads_existing_parquet_through_runtime_plugin() -> None:
     script = (PROJECT_ROOT / "scripts/train_ms_swift_sft.sh").read_text()
     assert "GRAPHTASK_MS_SWIFT_TRAIN_DATA" in script
+    assert "validate_ms_swift_data.py" in script
     assert "graphtask_r1/training/ms_swift_plugin.py" in script
     assert ': "${MODEL_TYPE:=qwen3}"' in script
     assert '--model_type "$MODEL_TYPE"' in script

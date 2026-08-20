@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import random
 import re
@@ -18,6 +19,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from graphtask_r1.archive import TaskArchive, promote_staged_tasks
+from graphtask_r1.dsl import program_cost
 from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
 from graphtask_r1.training.prompts import GraphScriptVersion, role_prompt
 from graphtask_r1.training.questioner_context import render_questioner_seed_payload
@@ -44,7 +46,8 @@ DeepSpeedStage = Literal[
     "zero3_offload",
 ]
 RLAlgorithm = Literal["grpo", "reinforce_plus_plus"]
-SelfPlayVariant = Literal["legacy", "frontier_v2"]
+SelfPlayVariant = Literal["legacy", "frontier_v2", "curriculum_v3"]
+CurriculumPhase = Literal["production", "grounding", "frontier"]
 
 
 def _gpu_ids(value: str) -> tuple[str, ...]:
@@ -56,6 +59,7 @@ class SelfPlayConfig(BaseModel):
 
     model_path: str = "Qwen/Qwen3-4B-Instruct-2507"
     model_type: str = "qwen3"
+    response_prefix: str | None = None
     initial_adapter: str
     base_tasks: Path
     val_data: Path
@@ -74,6 +78,11 @@ class SelfPlayConfig(BaseModel):
     archive_min_pass_rate: float = Field(default=0.25, ge=0.0, le=1.0)
     archive_max_pass_rate: float = Field(default=0.75, ge=0.0, le=1.0)
     archive_min_novelty: float = Field(default=0.25, ge=0.0, le=1.0)
+    curriculum_production_rounds: int = Field(default=1, ge=0)
+    curriculum_grounding_rounds: int = Field(default=1, ge=0)
+    curriculum_solver_fraction_start: float = Field(default=0.4, gt=0.0, le=1.0)
+    curriculum_replay_ratio: float = Field(default=0.3, ge=0.0, lt=1.0)
+    curriculum_question_alignment_min: float = Field(default=0.35, ge=0.0, le=1.0)
     base_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     archive_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     new_ratio: float = Field(default=0.30, ge=0.0, le=1.0)
@@ -194,6 +203,54 @@ def _frontier_target(config: SelfPlayConfig, round_index: int) -> float:
     )
 
 
+def _curriculum_phase(config: SelfPlayConfig, round_index: int) -> CurriculumPhase:
+    if round_index <= config.curriculum_production_rounds:
+        return "production"
+    if round_index <= config.curriculum_production_rounds + config.curriculum_grounding_rounds:
+        return "grounding"
+    return "frontier"
+
+
+def _curriculum_progress(config: SelfPlayConfig, round_index: int) -> float:
+    if config.rounds == 1:
+        return 1.0
+    return (round_index - 1) / (config.rounds - 1)
+
+
+def _task_difficulty(task: SelfPlayTask) -> tuple[float, int, int, str]:
+    return (
+        program_cost(task.program),
+        len(task.topic_entities),
+        len(task.gold_answers.answers),
+        task.task_id,
+    )
+
+
+def _curriculum_sample(
+    values: Sequence[SelfPlayTask],
+    count: int,
+    rng: random.Random,
+    *,
+    visible_fraction: float,
+    replay_ratio: float,
+) -> list[SelfPlayTask]:
+    """Draw mostly from the current structural frontier while replaying easier tasks."""
+    if not values or count <= 0:
+        return []
+    ranked = sorted(values, key=_task_difficulty)
+    visible_count = max(1, math.ceil(len(ranked) * visible_fraction))
+    visible = ranked[:visible_count]
+    split = max(1, len(visible) // 2)
+    replay_pool = visible[:split]
+    frontier_pool = visible[split:] or visible
+    replay_count = round(count * replay_ratio)
+    frontier_count = count - replay_count
+    selected = _sample(frontier_pool, frontier_count, rng)
+    selected.extend(_sample(replay_pool, replay_count, rng))
+    rng.shuffle(selected)
+    return selected
+
+
 def _round_tasks(
     config: SelfPlayConfig, archive_path: Path, *, round_index: int
 ) -> list[SelfPlayTask]:
@@ -204,7 +261,8 @@ def _round_tasks(
     ]
     with TaskArchive(archive_path) as archive:
         archived = archive.all()
-    new = [task for task in archived if task.generation.get("round") == round_index - 1]
+    new_round = round_index if config.selfplay_variant == "curriculum_v3" else round_index - 1
+    new = [task for task in archived if task.generation.get("round") == new_round]
     old = [task for task in archived if task not in new]
     rng = random.Random(config.seed + round_index)
     base_count = round(config.solver_episodes * config.base_ratio)
@@ -216,30 +274,48 @@ def _round_tasks(
     if not old:
         base_count += archive_count
         archive_count = 0
+    if config.selfplay_variant == "curriculum_v3":
+        progress = _curriculum_progress(config, round_index)
+        visible_fraction = config.curriculum_solver_fraction_start + progress * (
+            1.0 - config.curriculum_solver_fraction_start
+        )
+
+        def choose(values: Sequence[SelfPlayTask], count: int) -> list[SelfPlayTask]:
+            return _curriculum_sample(
+                values,
+                count,
+                rng,
+                visible_fraction=visible_fraction,
+                replay_ratio=config.curriculum_replay_ratio,
+            )
+
+    else:
+
+        def choose(values: Sequence[SelfPlayTask], count: int) -> list[SelfPlayTask]:
+            return _sample(values, count, rng)
+
     selected: list[SelfPlayTask] = []
-    selected.extend(_sample(base, base_count, rng))
-    selected.extend(_sample(old, archive_count, rng))
-    selected.extend(_sample(new, new_count, rng))
+    selected.extend(choose(base, base_count))
+    selected.extend(choose(old, archive_count))
+    selected.extend(choose(new, new_count))
     return selected
 
 
-def _assemble_dataset(
+def _write_solver_dataset(
     config: SelfPlayConfig,
     archive_path: Path,
     output_path: Path,
     *,
     round_index: int,
-    opponent_url: str,
-) -> dict[str, int]:
+) -> int:
     relation_catalog = load_relation_catalog(config.relation_catalog)
     relation_catalogs = {
         snapshot: load_relation_catalog(path) for snapshot, path in config.relation_catalogs.items()
     }
     solver_tasks = _round_tasks(config, archive_path, round_index=round_index)
-    solver_path = output_path.with_name("solver.parquet")
     export_role_dataset(
         solver_tasks,
-        solver_path,
+        output_path,
         include_questioner=False,
         include_solver=True,
         interaction_mode=config.interaction_mode,
@@ -252,13 +328,40 @@ def _assemble_dataset(
         program_profile=config.program_profile,
         questioner_weight=config.questioner_reward_weight,
         solver_weight=config.solver_reward_weight,
+        solver_reward_variant=(
+            "curriculum_v3" if config.selfplay_variant == "curriculum_v3" else "legacy"
+        ),
+        curriculum_phase=(
+            _curriculum_phase(config, round_index)
+            if config.selfplay_variant == "curriculum_v3"
+            else None
+        ),
+    )
+    return len(solver_tasks)
+
+
+def _assemble_dataset(
+    config: SelfPlayConfig,
+    archive_path: Path,
+    output_path: Path,
+    *,
+    round_index: int,
+    opponent_url: str,
+) -> dict[str, int]:
+    relation_catalog = load_relation_catalog(config.relation_catalog)
+    solver_path = output_path.with_name("solver.parquet")
+    solver_count = _write_solver_dataset(
+        config,
+        archive_path,
+        solver_path,
+        round_index=round_index,
     )
     seed_table = pq.read_table(config.questioner_seeds)
     seed_rows = seed_table.to_pylist()
     questioner_rng = random.Random(config.seed + 10_000 + round_index)
     seed_rows = (
         _sample(seed_rows, config.questioner_episodes, questioner_rng)
-        if config.selfplay_variant == "frontier_v2"
+        if config.selfplay_variant in {"frontier_v2", "curriculum_v3"}
         else questioner_rng.sample(
             seed_rows, k=min(config.questioner_episodes, len(seed_rows))
         )
@@ -266,6 +369,27 @@ def _assemble_dataset(
     for row in seed_rows:
         extra = dict(row["extra_info"])
         topic_ids = [str(value) for value in extra.get("topic_entity_ids", [])]
+        raw_seed_context = extra.get("seed_context")
+        prompt_relation_catalog = relation_catalog
+        observed_relations: set[str] = set()
+        if (
+            config.selfplay_variant == "curriculum_v3"
+            and isinstance(raw_seed_context, list)
+        ):
+            observed_relations = {
+                str(relation_id)
+                for context in raw_seed_context
+                if isinstance(context, dict)
+                for field in ("outgoing_relation_ids", "incoming_relation_ids")
+                for relation_id in context.get(field, [])
+            }
+            local_catalog = tuple(
+                relation
+                for relation in relation_catalog
+                if relation.relation_id in observed_relations
+            )
+            if local_catalog:
+                prompt_relation_catalog = local_catalog
         extra.update(
             {
                 "opponent_url": opponent_url,
@@ -273,23 +397,31 @@ def _assemble_dataset(
                 "round": round_index,
                 "interaction_mode": config.interaction_mode,
                 "graphscript_version": config.graphscript_version,
-                "allowed_relations": [value.relation_id for value in relation_catalog],
+                "allowed_relations": [
+                    value.relation_id for value in relation_catalog
+                ],
                 "max_follow_limit": config.max_follow_limit,
                 "max_edge_visits": config.max_edge_visits,
                 "max_returned_entities": config.max_returned_entities,
                 "program_profile": config.program_profile,
                 "role_weight": config.questioner_reward_weight,
-                "questioner_reward_variant": (
-                    "frontier_v2" if config.selfplay_variant == "frontier_v2" else "legacy"
-                ),
+                "questioner_reward_variant": config.selfplay_variant,
                 "frontier_target": _frontier_target(config, round_index),
                 "frontier_sigma": config.frontier_sigma,
             }
         )
-        if config.selfplay_variant == "frontier_v2":
+        if config.selfplay_variant in {"frontier_v2", "curriculum_v3"}:
             extra["opponent_seed"] = config.seed
+        if config.selfplay_variant == "curriculum_v3":
+            extra.update(
+                {
+                    "curriculum_phase": _curriculum_phase(config, round_index),
+                    "question_alignment_min": config.curriculum_question_alignment_min,
+                    "use_proposed_question": True,
+                    "observed_relation_ids": sorted(observed_relations),
+                }
+            )
         row["extra_info"] = extra
-        raw_seed_context = extra.get("seed_context")
         payload = (
             render_questioner_seed_payload(raw_seed_context)
             if isinstance(raw_seed_context, list) and raw_seed_context
@@ -300,8 +432,11 @@ def _assemble_dataset(
             "questioner",
             payload,
             interaction_mode=config.interaction_mode,
-            relation_catalog=relation_catalog,
+            relation_catalog=prompt_relation_catalog,
             graphscript_version=config.graphscript_version,
+            questioner_contract=(
+                "question_program" if config.selfplay_variant == "curriculum_v3" else "program"
+            ),
         )
         row.pop("agent_name", None)
         row.pop("tools_kwargs", None)
@@ -312,7 +447,7 @@ def _assemble_dataset(
     combined = pa.concat_tables([questioner_table, solver_table], promote_options="default")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(combined, output_path)
-    return {"questioner": len(seed_rows), "solver": len(solver_tasks), "total": len(combined)}
+    return {"questioner": len(seed_rows), "solver": solver_count, "total": len(combined)}
 
 
 def _wait_for(url: str, *, timeout_s: int) -> None:
@@ -542,7 +677,7 @@ def _commands(
         "--max-completion-tokens",
         str(config.max_completion_tokens),
     ]
-    if config.selfplay_variant == "frontier_v2":
+    if config.selfplay_variant in {"frontier_v2", "curriculum_v3"}:
         opponent.extend(
             [
                 "--candidate-archive",
@@ -608,10 +743,14 @@ def run_self_play(
     manifest_path = output_dir / "manifest.json"
     completed = 0
     adapter = Path(config.initial_adapter)
+    questioner_adapter = adapter
+    solver_adapter = adapter
     if resume and manifest_path.exists():
         state = read_json(manifest_path)
         completed = int(state["last_completed_round"])
         adapter = Path(state["adapter"])
+        questioner_adapter = Path(state.get("questioner_adapter", state["adapter"]))
+        solver_adapter = Path(state.get("solver_adapter", state["adapter"]))
         if state["config_hash"] != file_hash(config_path):
             raise ValueError("cannot resume: self-play config changed")
     plans: list[dict[str, Any]] = []
@@ -636,7 +775,7 @@ def run_self_play(
         archive_size_before = 0 if dry_run else _archive_size(archive_path)
         commands = _commands(
             config,
-            adapter=adapter,
+            adapter=(solver_adapter if config.selfplay_variant == "curriculum_v3" else adapter),
             archive_path=archive_path,
             mixed_data=mixed_data,
             round_dir=round_dir,
@@ -670,12 +809,25 @@ def run_self_play(
             "SAVE_STEPS": str(config.save_steps),
             "SAVE_TOTAL_LIMIT": str(config.save_total_limit),
             "GRAPHTASK_REWARD_METRICS_DIR": str(reward_metrics_dir.resolve()),
+            "SEED": str(config.seed),
             "PYTHONUNBUFFERED": "1",
         }
+        if config.selfplay_variant == "curriculum_v3":
+            train_overrides["MULTI_TURN_SCHEDULER"] = "graphtask_curriculum_solver"
+        if config.response_prefix is not None:
+            train_overrides["RESPONSE_PREFIX"] = config.response_prefix
         plan = {
             "round": round_index,
             "selfplay_variant": config.selfplay_variant,
             "adapter_in": str(adapter),
+            "questioner_adapter_in": (
+                str(questioner_adapter)
+                if config.selfplay_variant == "curriculum_v3"
+                else None
+            ),
+            "solver_adapter_in": (
+                str(solver_adapter) if config.selfplay_variant == "curriculum_v3" else None
+            ),
             "dataset": str(mixed_data),
             "counts": counts,
             "validation": validation,
@@ -696,14 +848,26 @@ def run_self_play(
             if config.relation_catalog is not None
             else None,
             "program_profile": config.program_profile,
+            "update_order": (
+                ["questioner", "archive", "solver"]
+                if config.selfplay_variant == "curriculum_v3"
+                else (
+                    ["solver", "questioner"]
+                    if config.selfplay_variant == "frontier_v2"
+                    else ["mixed"]
+                )
+            ),
             "max_completion_tokens": config.max_completion_tokens,
             "reward_metrics_dir": str(reward_metrics_dir),
             "questioner_reward": {
-                "variant": (
-                    "frontier_v2" if config.selfplay_variant == "frontier_v2" else "legacy"
-                ),
+                "variant": config.selfplay_variant,
                 "frontier_target": _frontier_target(config, round_index),
                 "frontier_sigma": config.frontier_sigma,
+                "curriculum_phase": (
+                    _curriculum_phase(config, round_index)
+                    if config.selfplay_variant == "curriculum_v3"
+                    else None
+                ),
             },
             "rollout_budget": {
                 "questioner_prompts": (
@@ -746,7 +910,10 @@ def run_self_play(
         opponent_env = {**os.environ, "CUDA_VISIBLE_DEVICES": config.opponent_gpus}
         merged_model = (round_dir / "opponent_merged").resolve()
         merge_manifest_path = round_dir / "opponent_merge.json"
-        merge_spec = _opponent_merge_spec(config, adapter)
+        opponent_adapter = (
+            solver_adapter if config.selfplay_variant == "curriculum_v3" else adapter
+        )
+        merge_spec = _opponent_merge_spec(config, opponent_adapter)
         if merged_model.exists():
             LOGGER.info("selfplay_merge_reused round=%d model=%s", round_index, merged_model)
             if not merge_manifest_path.is_file() or read_json(merge_manifest_path) != merge_spec:
@@ -776,6 +943,7 @@ def run_self_play(
             LOGGER.info("selfplay_merge_completed round=%d", round_index)
         sglang_process: subprocess.Popen[Any] | None = None
         phase_trainer_logs: dict[str, Path] = {}
+        admission_summary: dict[str, Any] | None = None
         if commands["sglang"]:
             LOGGER.info("selfplay_sglang_started round=%d log=%s", round_index, logs / "sglang.log")
             with (logs / "sglang.log").open("w") as sglang_log:
@@ -816,7 +984,7 @@ def run_self_play(
                 try:
                     if config.selfplay_variant == "legacy":
                         _run_with_tee(commands["train"], env=train_env, log_path=train_log_path)
-                    else:
+                    elif config.selfplay_variant == "frontier_v2":
                         phase_adapter = adapter
                         for phase, phase_data in (
                             ("solver", round_dir / "solver.parquet"),
@@ -860,6 +1028,88 @@ def run_self_play(
                                 phase_adapter,
                             )
                         adapter = phase_adapter
+                    else:
+                        curriculum_phase = _curriculum_phase(config, round_index)
+                        for phase, phase_data in (
+                            ("questioner", round_dir / "questioner.parquet"),
+                            ("solver", round_dir / "solver.parquet"),
+                        ):
+                            if phase == "solver":
+                                relaxed = curriculum_phase != "frontier"
+                                admission_summary = promote_staged_tasks(
+                                    round_dir / "candidate_archive.sqlite",
+                                    archive_path,
+                                    min_pass_rate=(
+                                        0.0 if relaxed else config.archive_min_pass_rate
+                                    ),
+                                    max_pass_rate=(
+                                        1.0 if relaxed else config.archive_max_pass_rate
+                                    ),
+                                    min_novelty=(
+                                        0.0 if relaxed else config.archive_min_novelty
+                                    ),
+                                )
+                                admission_summary["curriculum_phase"] = curriculum_phase
+                                write_json(logs / "archive_admission.json", admission_summary)
+                                counts["solver"] = _write_solver_dataset(
+                                    config,
+                                    archive_path,
+                                    phase_data,
+                                    round_index=round_index,
+                                )
+                                counts["total"] = counts["questioner"] + counts["solver"]
+
+                            phase_dir = round_dir / f"{phase}_update"
+                            phase_known_adapters = frozenset(
+                                path.resolve()
+                                for path in phase_dir.rglob("adapter_model.safetensors")
+                            )
+                            phase_log_path = logs / f"ms_swift_{phase}.log"
+                            phase_adapter = (
+                                questioner_adapter if phase == "questioner" else solver_adapter
+                            )
+                            phase_env = {
+                                **train_env,
+                                "LORA_ADAPTER_PATH": str(phase_adapter),
+                                "TRAIN_DATA": str(phase_data.resolve()),
+                                "OUTPUT_DIR": str(phase_dir.resolve()),
+                                "EXPERIMENT_NAME": (
+                                    f"graphtask-selfplay-curriculum-v3-"
+                                    f"r{round_index:03d}-{phase}"
+                                ),
+                                "SEED": str(
+                                    config.seed
+                                    + round_index * 1_000
+                                    + (1 if phase == "questioner" else 2)
+                                ),
+                            }
+                            LOGGER.info(
+                                "selfplay_phase_training_started round=%d phase=%s data=%s log=%s",
+                                round_index,
+                                phase,
+                                phase_data,
+                                phase_log_path,
+                            )
+                            _run_with_tee(
+                                commands["train"], env=phase_env, log_path=phase_log_path
+                            )
+                            updated_adapter = _adapter_from_checkpoint(
+                                phase_dir, known_adapters=phase_known_adapters
+                            )
+                            if phase == "questioner":
+                                questioner_adapter = updated_adapter
+                            else:
+                                solver_adapter = updated_adapter
+                            phase_log = find_trainer_log(phase_dir, updated_adapter)
+                            if phase_log is not None:
+                                phase_trainer_logs[phase] = phase_log
+                            LOGGER.info(
+                                "selfplay_phase_training_completed round=%d phase=%s adapter=%s",
+                                round_index,
+                                phase,
+                                updated_adapter,
+                            )
+                        adapter = solver_adapter
                 except (OSError, subprocess.CalledProcessError) as exc:
                     raise RuntimeError(
                         f"self-play GRPO training failed; see {train_log_path}"
@@ -872,7 +1122,6 @@ def run_self_play(
                 _stop(sglang_process)
         if config.selfplay_variant == "legacy":
             adapter = _adapter_from_checkpoint(round_dir, known_adapters=known_adapters)
-        admission_summary: dict[str, Any] | None = None
         if config.selfplay_variant == "frontier_v2":
             admission_summary = promote_staged_tasks(
                 round_dir / "candidate_archive.sqlite",
@@ -907,7 +1156,19 @@ def run_self_play(
             {
                 "round": round_index,
                 "adapter": str(adapter),
+                "questioner_adapter": (
+                    str(questioner_adapter)
+                    if config.selfplay_variant == "curriculum_v3"
+                    else None
+                ),
+                "solver_adapter": (
+                    str(solver_adapter)
+                    if config.selfplay_variant == "curriculum_v3"
+                    else None
+                ),
                 "dataset_hash": file_hash(mixed_data),
+                "questioner_dataset_hash": file_hash(round_dir / "questioner.parquet"),
+                "solver_dataset_hash": file_hash(round_dir / "solver.parquet"),
                 "metrics_summary": str(metrics_summary_path),
                 "reward_metrics_dir": str(reward_metrics_dir),
                 "selfplay_variant": config.selfplay_variant,
@@ -927,6 +1188,16 @@ def run_self_play(
             {
                 "last_completed_round": round_index,
                 "adapter": str(adapter),
+                "questioner_adapter": (
+                    str(questioner_adapter)
+                    if config.selfplay_variant == "curriculum_v3"
+                    else None
+                ),
+                "solver_adapter": (
+                    str(solver_adapter)
+                    if config.selfplay_variant == "curriculum_v3"
+                    else None
+                ),
                 "config_hash": file_hash(config_path),
                 "ms_swift_version": MS_SWIFT_VERSION,
                 "selfplay_variant": config.selfplay_variant,

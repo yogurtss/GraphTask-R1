@@ -7,7 +7,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from graphtask_r1.archive import TaskArchive
 from graphtask_r1.envs.text_search import execute_text_search
@@ -88,6 +88,9 @@ async def request_opponent(
     max_follow_limit: int = 100,
     max_edge_visits: int | None = None,
     seed: int | None = None,
+    generated_question: str | None = None,
+    allowed_rejection_reasons: frozenset[str] = frozenset(),
+    recover_invalid_tool_calls: bool = False,
 ) -> dict[str, Any]:
     try:
         import aiohttp
@@ -109,6 +112,12 @@ async def request_opponent(
         payload["max_edge_visits"] = max_edge_visits
     if seed is not None:
         payload["seed"] = seed
+    if generated_question is not None:
+        payload["generated_question"] = generated_question
+    if allowed_rejection_reasons:
+        payload["allowed_rejection_reasons"] = sorted(allowed_rejection_reasons)
+    if recover_invalid_tool_calls:
+        payload["recover_invalid_tool_calls"] = True
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -353,6 +362,7 @@ class FrozenSolverService:
         graphscript_version: GraphScriptVersion | None = None,
         seed: int | None = None,
         sample_index: int | None = None,
+        recover_invalid_tool_calls: bool = False,
     ) -> dict[str, float]:
         mode = interaction_mode or self.interaction_mode
         catalog = self.relation_catalog
@@ -383,6 +393,7 @@ class FrozenSolverService:
             )
         )
         tool_calls = 0
+        invalid_tool_calls = 0
         edge_visits = 0
         visible_entities = set(topic_ids)
         started = time.perf_counter()
@@ -458,6 +469,7 @@ class FrozenSolverService:
             calls = message.get("tool_calls") or []
             if calls:
                 for call in calls:
+                    name = "invalid_tool"
                     try:
                         name = str(call["function"]["name"])
                         edge_budget = max_edge_visits or self.max_edge_visits
@@ -476,14 +488,35 @@ class FrozenSolverService:
                             visible_entities=visible_entities,
                             restrict_frontier=edge_budget is not None and bool(effective_relations),
                         )
-                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                        return {
-                            "passed": 0.0,
-                            "f1": 0.0,
-                            "tool_calls": float(tool_calls),
-                            "edge_visits": float(edge_visits),
-                            "latency_ms": (time.perf_counter() - started) * 1000,
-                        }
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        if not recover_invalid_tool_calls:
+                            return {
+                                "passed": 0.0,
+                                "f1": 0.0,
+                                "tool_calls": float(tool_calls),
+                                "edge_visits": float(edge_visits),
+                                "latency_ms": (time.perf_counter() - started) * 1000,
+                            }
+                        invalid_tool_calls += 1
+                        tool_calls += 1
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.get("id", f"call-{tool_calls}"),
+                                "name": name,
+                                "content": json.dumps(
+                                    {
+                                        "error": {
+                                            "reason_code": "INVALID_TOOL_CALL",
+                                            "message": str(exc),
+                                        }
+                                    },
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            }
+                        )
+                        continue
                     edge_visits += visited
                     if edge_budget is not None and edge_visits > edge_budget:
                         return {
@@ -504,26 +537,37 @@ class FrozenSolverService:
                     tool_calls += 1
                 continue
             content = str(message.get("content", ""))
+            answer_parsed = 0.0
             try:
-                count = bool(
-                    task.gold_answers.answers and task.gold_answers.answers[0].kind == "count"
+                answer_kind = cast(
+                    Literal["entity", "literal", "count"],
+                    task.gold_answers.answers[0].kind
+                    if task.gold_answers.answers
+                    else "entity",
                 )
-                predicted = parse_solver_output(content, count=count)
+                predicted = parse_solver_output(content, answer_kind=answer_kind)
                 metrics = self._answer_metrics(task, predicted, backend)
+                answer_parsed = 1.0
             except (TypeError, ValueError, json.JSONDecodeError):
                 metrics = {"f1": 0.0, "exact_match": 0.0}
             return {
                 "passed": float(metrics["exact_match"]),
                 "f1": float(metrics["f1"]),
                 "tool_calls": float(tool_calls),
+                "invalid_tool_calls": float(invalid_tool_calls),
                 "edge_visits": float(edge_visits),
+                "program_parse": answer_parsed,
+                "program_executable": answer_parsed,
                 "latency_ms": (time.perf_counter() - started) * 1000,
             }
         return {
             "passed": 0.0,
             "f1": 0.0,
             "tool_calls": float(tool_calls),
+            "invalid_tool_calls": float(invalid_tool_calls),
             "edge_visits": float(edge_visits),
+            "program_parse": 0.0,
+            "program_executable": 0.0,
             "latency_ms": (time.perf_counter() - started) * 1000,
         }
 
@@ -557,7 +601,20 @@ class FrozenSolverService:
         graphscript_version = cast(GraphScriptVersion, raw_version)
         allowed_relations = tuple(str(value) for value in payload.get("allowed_relations", []))
         backend = self.backend(snapshot)
-        task = certify_proposal(proposal, backend, graph_snapshot=snapshot, round_index=round_index)
+        task = certify_proposal(
+            proposal,
+            backend,
+            graph_snapshot=snapshot,
+            round_index=round_index,
+            generated_question=(
+                str(payload["generated_question"])
+                if payload.get("generated_question") is not None
+                else None
+            ),
+            allowed_rejection_reasons=frozenset(
+                str(value) for value in payload.get("allowed_rejection_reasons", [])
+            ),
+        )
         structural, textual = self.archive.novelty(task.program_signature, task.question)
         raw_seed = payload.get("seed")
         base_seed = int(raw_seed) if raw_seed is not None else None
@@ -584,20 +641,36 @@ class FrozenSolverService:
                         else None
                     ),
                     sample_index=sample_index if base_seed is not None else None,
+                    recover_invalid_tool_calls=bool(
+                        payload.get("recover_invalid_tool_calls", False)
+                    ),
                 )
                 for sample_index in range(samples)
             )
+        )
+        parsed = sum(value.get("program_parse", 0.0) for value in results)
+        executable = sum(value.get("program_executable", 0.0) for value in results)
+        semantic_f1 = sum(
+            value["f1"] * value.get("program_executable", 0.0) for value in results
         )
         summary = {
             "task_id": task.task_id,
             "pass_rate": sum(value["passed"] for value in results) / samples,
             "mean_f1": sum(value["f1"] for value in results) / samples,
             "mean_tool_calls": sum(value["tool_calls"] for value in results) / samples,
+            "mean_invalid_tool_calls": sum(
+                value.get("invalid_tool_calls", 0.0) for value in results
+            )
+            / samples,
             "mean_edge_visits": sum(value.get("edge_visits", 0.0) for value in results) / samples,
             "program_parse_rate": sum(value.get("program_parse", 0.0) for value in results)
             / samples,
             "program_execution_rate": sum(value.get("program_executable", 0.0) for value in results)
             / samples,
+            "execution_rate_given_parse": executable / parsed if parsed else 0.0,
+            "semantic_success_given_execution": (
+                semantic_f1 / executable if executable else 0.0
+            ),
             "mean_program_operators": sum(value.get("program_operators", 0.0) for value in results)
             / samples,
             "mean_passage_searches": sum(value.get("passage_searches", 0.0) for value in results)

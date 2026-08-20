@@ -1,0 +1,65 @@
+# Independent co-evolution experiment. legacy and frontier_v2 remain unchanged.
+model_path: Qwen/Qwen3-4B-Instruct-2507
+model_type: qwen3
+initial_adapter: ${INITIAL_ADAPTER}
+base_tasks: ${BASE_TASKS}
+val_data: ${VAL_DATA}
+questioner_seeds: ${QUESTIONER_SEEDS}
+graph_snapshot: kqapro-v1
+selfplay_variant: curriculum_v3
+rounds: 3
+questioner_episodes: 192
+solver_episodes: 320
+questioner_reward_weight: 1.0
+solver_reward_weight: 1.0
+opponent_samples: 8
+
+# Round 1 learns the question+program contract, round 2 grounding/execution,
+# and round 3 conditional semantic frontier difficulty.
+curriculum_production_rounds: 1
+curriculum_grounding_rounds: 1
+curriculum_solver_fraction_start: 0.40
+curriculum_replay_ratio: 0.30
+curriculum_question_alignment_min: 0.35
+frontier_target_start: 0.80
+frontier_target_end: 0.50
+frontier_sigma: 0.20
+
+# Only the frontier round uses these archive thresholds. Production does not admit
+# generated tasks; grounding keeps locally certified tasks without a difficulty gate.
+archive_min_pass_rate: 0.20
+archive_max_pass_rate: 0.85
+archive_min_novelty: 0.15
+base_ratio: 0.40
+archive_ratio: 0.25
+new_ratio: 0.35
+seed: 42
+actor_gpus: "0,1,2"
+opponent_gpus: "3"
+sglang_port: 30000
+opponent_port: 18080
+train_script: scripts/train_ms_swift_grpo.sh
+sglang_start_timeout_s: 300
+interaction_mode: graphscript
+graphscript_version: "0.3"
+relation_catalog: ${KQAPRO_RELATION_CATALOG}
+relation_catalogs:
+  kqapro-v1: ${KQAPRO_RELATION_CATALOG}
+max_follow_limit: 100
+max_edge_visits: 200
+max_returned_entities: 1000
+max_completion_tokens: 4096
+vllm_max_model_len: 32768
+vllm_gpu_memory_utilization: 0.6
+vllm_sleep_level: 1
+deepspeed: zero2
+rl_algorithm: reinforce_plus_plus
+micro_batch_size: 4
+eval_batch_size: 4
+validation_samples: 256
+gradient_accumulation_steps: 2
+steps_per_generation: 4
+rollout_n: 4
+save_steps: 20
+save_total_limit: 2
+program_profile: graphscript_v0_3

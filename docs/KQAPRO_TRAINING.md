@@ -576,6 +576,10 @@ python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml
 ```
 
+若绕过 CLI 直接运行 `bash scripts/train_ms_swift_grpo.sh`，脚本同样接受上述
+`SOLVER_RL_TRAIN_DATA`、`SOLVER_RL_VAL_DATA`、`MS_SWIFT_SFT_ADAPTER` 和
+`SOLVER_GRPO_OUTPUT_DIR` 变量。
+
 运行完后，将第 5 节的 `INITIAL_ADAPTER` 指向
 `outputs/grpo/qwen3-4b-kqapro-v03/checkpoint-last`。
 

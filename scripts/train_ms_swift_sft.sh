@@ -26,6 +26,9 @@ if [[ ! -f "$TRAIN_DATA" || ! -f "$VAL_DATA" ]]; then
   exit 2
 fi
 
+python "$PROJECT_ROOT/scripts/validate_ms_swift_data.py" \
+  --kind sft --input "$TRAIN_DATA" "$VAL_DATA"
+
 export GRAPHTASK_MS_SWIFT_DATA_KIND=sft
 export GRAPHTASK_MS_SWIFT_TRAIN_DATA="$TRAIN_DATA"
 export GRAPHTASK_MS_SWIFT_VAL_DATA="$VAL_DATA"

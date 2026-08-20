@@ -96,6 +96,13 @@ def _choice(name: str | None) -> SimpleNamespace:
     return _choice_with_arguments(name)
 
 
+def test_reward_completion_removes_only_prefilled_empty_thinking(plugin: Any) -> None:
+    payload = '{"version":"0.1","ops":[]}'
+
+    assert plugin._reward_completion(f"<think>\n\n</think>\n\n{payload}") == payload
+    assert plugin._reward_completion(f"<think>reason</think>{payload}") != payload
+
+
 def test_graphscript_mode_does_not_register_multi_turn_scheduler(plugin: Any) -> None:
     del plugin
     from swift.plugin import multi_turns
@@ -113,8 +120,15 @@ def test_tool_mode_registers_multi_turn_scheduler(
 
     importlib.import_module(module_name)
     from swift.plugin import multi_turns
+    from swift.plugin.multi_turn import MultiTurnScheduler
 
     assert multi_turns["graphtask_solver"].__name__ == "GraphTaskSolverScheduler"
+    assert (
+        multi_turns["graphtask_curriculum_solver"].__name__ == "GraphTaskCurriculumSolverScheduler"
+    )
+    assert issubclass(
+        multi_turns["graphtask_curriculum_solver"], MultiTurnScheduler
+    )
 
 
 def test_solver_scheduler_keeps_json_session_state_per_request(plugin: Any) -> None:
@@ -155,6 +169,149 @@ def test_solver_scheduler_returns_structured_invalid_call(plugin: Any) -> None:
 
     assert result is request
     assert request.data_dict["_graphtask_session"]["invalid_calls"] == 1
+    error = json.loads(request.messages[-1]["content"])["error"]
+    assert error["reason_code"] == "INVALID_TOOL_CALL"
+
+
+def test_curriculum_solver_scheduler_returns_cumulative_rollout_infos(plugin: Any) -> None:
+    scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=8)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "solver",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+                "task_id": "task-curriculum",
+                "max_edge_visits": 10,
+            }
+        },
+    )
+
+    result = scheduler.step(request, _choice("graph_search"), 1)
+
+    assert result["infer_request"] is request
+    assert result["rollout_infos"] == {
+        "calls": 1,
+        "valid_calls": 1,
+        "invalid_calls": 0,
+        "edge_visits": 1,
+        "new_visible_entities": 1,
+    }
+    json.dumps(result["rollout_infos"])
+
+
+def test_curriculum_solver_scheduler_counts_malformed_calls(plugin: Any) -> None:
+    scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=8)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "solver",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+            }
+        },
+    )
+    malformed = SimpleNamespace(
+        message=SimpleNamespace(
+            tool_calls=[
+                SimpleNamespace(
+                    function=SimpleNamespace(name="graph_search", arguments="{not-json")
+                )
+            ]
+        )
+    )
+
+    result = scheduler.step(request, malformed, 1)
+
+    assert result["rollout_infos"] == {
+        "calls": 1,
+        "valid_calls": 0,
+        "invalid_calls": 1,
+        "edge_visits": 0,
+        "new_visible_entities": 0,
+    }
+    error = json.loads(request.messages[-1]["content"])["error"]
+    assert error["reason_code"] == "INVALID_TOOL_CALL"
+
+
+def test_curriculum_scheduler_allows_questioner_graph_search(plugin: Any) -> None:
+    scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=8)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "questioner",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+                "max_edge_visits": 10,
+            }
+        },
+    )
+
+    result = scheduler.step(request, _choice("graph_search"), 1)
+
+    assert result["rollout_infos"]["valid_calls"] == 1
+    assert json.loads(request.messages[-1]["content"]) == [
+        {"subject": "alice", "relation": "works_at", "object": "acme"}
+    ]
+
+
+def test_curriculum_scheduler_executes_questioner_program(plugin: Any) -> None:
+    scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=8)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "questioner",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+            }
+        },
+    )
+    program = {
+        "op": "hop",
+        "input": {"op": "entity", "entity_id": "alice"},
+        "relation": "works_at",
+        "direction": "out",
+    }
+
+    result = scheduler.step(
+        request,
+        _choice_with_arguments("execute_program", {"program": program}),
+        1,
+    )
+
+    assert result["rollout_infos"]["valid_calls"] == 1
+    assert AnswerSet.model_validate_json(request.messages[-1]["content"]) == (
+        AnswerSet.entities(["acme"])
+    )
+
+
+def test_curriculum_scheduler_rejects_solver_execute_program(plugin: Any) -> None:
+    scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=8)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "solver",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+            }
+        },
+    )
+
+    result = scheduler.step(
+        request,
+        _choice_with_arguments(
+            "execute_program", {"program": {"op": "entity", "entity_id": "alice"}}
+        ),
+        1,
+    )
+
+    assert result["rollout_infos"]["valid_calls"] == 0
+    assert result["rollout_infos"]["invalid_calls"] == 1
     error = json.loads(request.messages[-1]["content"])["error"]
     assert error["reason_code"] == "INVALID_TOOL_CALL"
 
@@ -304,6 +461,85 @@ def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
         (metrics_dir / "reward_components.rank-2.jsonl").read_text().strip()
     )
     assert persisted == event
+
+
+def test_curriculum_solver_reward_receives_scheduler_rollout_infos(
+    plugin: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_compute_score(
+        data_source: str,
+        solution_str: str,
+        ground_truth: str,
+        extra_info: dict[str, object],
+    ) -> dict[str, float]:
+        del data_source, solution_str, ground_truth
+        captured.append(extra_info)
+        return {"score": 0.25, "raw_score": 0.25}
+
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+    reward = plugin.GraphTaskReward()
+
+    values = reward(
+        ['<answer>["acme"]</answer>'],
+        data_source=["graphtask/solver"],
+        ground_truth=[AnswerSet.entities(["acme"]).model_dump_json()],
+        extra_info=[
+            {
+                "graph_snapshot": "toy-v1",
+                "interaction_mode": "tool",
+                "solver_reward_variant": "curriculum_v3",
+                "curriculum_phase": 1,
+            }
+        ],
+        rollout_infos=[
+            {
+                "calls": 2,
+                "valid_calls": 1,
+                "invalid_calls": 1,
+                "edge_visits": 3,
+                "new_visible_entities": 2,
+                "num_turns": 3,
+            }
+        ],
+    )
+
+    assert values == [0.25]
+    assert captured[0]["curriculum_phase"] == 1
+    assert captured[0]["solver_rollout"] == {
+        "calls": 2,
+        "valid_calls": 1,
+        "invalid_calls": 1,
+        "edge_visits": 3,
+        "new_visible_entities": 2,
+        "num_turns": 3,
+    }
+
+    reward(
+        ['<answer>["acme"]</answer>'],
+        data_source=["graphtask/solver"],
+        ground_truth=[AnswerSet.entities(["acme"]).model_dump_json()],
+        extra_info=[
+            {
+                "graph_snapshot": "toy-v1",
+                "interaction_mode": "tool",
+                "solver_reward_variant": "legacy",
+            }
+        ],
+        rollout_infos=[{"calls": 9}],
+    )
+    assert "solver_rollout" not in captured[1]
+
+
+def test_grpo_launcher_can_select_curriculum_scheduler() -> None:
+    project_root = Path(__file__).parents[2]
+    launcher = (project_root / "scripts/train_ms_swift_grpo.sh").read_text()
+
+    assert 'MULTI_TURN_SCHEDULER="${MULTI_TURN_SCHEDULER:-graphtask_solver}"' in launcher
+    assert '--multi_turn_scheduler "$MULTI_TURN_SCHEDULER"' in launcher
+    assert '--response_prefix "$RESPONSE_PREFIX"' in launcher
+    assert 'TRAIN_DATA="${TRAIN_DATA:-${SOLVER_RL_TRAIN_DATA:-}}"' in launcher
 
 
 def test_ms_swift_reward_logs_questioner_stage_and_reason_per_sample(

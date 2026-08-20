@@ -28,6 +28,23 @@ _STEP_METRIC_PREFIXES = (
     "entropy/",
     "rollout_correction/",
 )
+_OVERALL_SAMPLE_COMPONENT_PREFIXES = ("reject_", "milestone_", "stage_")
+_OVERALL_SAMPLE_COMPONENTS = frozenset(
+    {
+        "answer_leak",
+        "answer_nonempty",
+        "cardinality_valid",
+        "certified",
+        "exact_match",
+        "exact_output",
+        "executable",
+        "format",
+        "json_valid",
+        "schema_valid",
+        "structure_valid",
+        "validity",
+    }
+)
 
 
 def _is_step_metric_row(row: Mapping[str, object]) -> bool:
@@ -159,14 +176,42 @@ def _metric_statistics(history: Iterable[Mapping[str, float]]) -> dict[str, dict
     }
 
 
+def _is_overall_sample_component(name: str) -> bool:
+    return name in _OVERALL_SAMPLE_COMPONENTS or name.startswith(
+        _OVERALL_SAMPLE_COMPONENT_PREFIXES
+    )
+
+
 def _reward_role_metrics(metrics_dir: Path | None) -> dict[str, dict[str, Any]]:
     weighted_sums: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     samples: dict[str, int] = defaultdict(int)
+    sample_components: dict[str, list[dict[str, float]]] = defaultdict(list)
     if metrics_dir is None:
         return {}
     for path in sorted(metrics_dir.glob("reward_components.rank-*.jsonl")):
         for event in _read_jsonl(path):
+            raw_sample_components = event.get("sample_components")
+            if isinstance(raw_sample_components, list):
+                for raw_sample in raw_sample_components:
+                    if not isinstance(raw_sample, dict):
+                        continue
+                    role = raw_sample.get("role")
+                    raw_components = raw_sample.get("components")
+                    if not isinstance(role, str) or not isinstance(raw_components, dict):
+                        continue
+                    components = {
+                        name: value
+                        for name, raw_value in raw_components.items()
+                        if isinstance(name, str)
+                        and (value := _number(raw_value)) is not None
+                    }
+                    reason_codes = raw_sample.get("reason_codes")
+                    if isinstance(reason_codes, list):
+                        for reason in reason_codes:
+                            if isinstance(reason, str):
+                                components[f"reject_{reason.casefold()}"] = 1.0
+                    sample_components[role].append(components)
             roles = event.get("roles")
             if not isinstance(roles, dict):
                 continue
@@ -184,6 +229,21 @@ def _reward_role_metrics(metrics_dir: Path | None) -> dict[str, dict[str, Any]]:
                     if isinstance(name, str) and value is not None:
                         weighted_sums[role][name] += value * role_samples
                         counts[role][name] += role_samples
+    for role, role_components in sample_components.items():
+        role_samples = samples[role]
+        if role_samples <= 0:
+            continue
+        overall_names = {
+            name
+            for components in role_components
+            for name in components
+            if _is_overall_sample_component(name)
+        }
+        for name in overall_names:
+            weighted_sums[role][name] = sum(
+                components.get(name, 0.0) for components in role_components
+            )
+            counts[role][name] = role_samples
     return {
         role: {
             "samples": samples[role],

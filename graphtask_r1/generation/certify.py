@@ -37,12 +37,23 @@ def certify_proposal(
     *,
     graph_snapshot: str,
     round_index: int | None = None,
+    generated_question: str | None = None,
+    allowed_rejection_reasons: frozenset[str] = frozenset(),
 ) -> TaskCertificate:
     validate_proposal(proposal)
-    question = verbalize(proposal.program, backend)
+    question = generated_question.strip() if generated_question is not None else verbalize(
+        proposal.program, backend
+    )
+    if not question:
+        raise ValueError("generated question must be non-empty")
     verification = verify_task(question, proposal.program, backend)
-    if not verification.passed:
-        raise ValueError("proposal rejected: " + ",".join(verification.rejection_reasons))
+    blocking_reasons = tuple(
+        reason
+        for reason in verification.rejection_reasons
+        if reason not in allowed_rejection_reasons
+    )
+    if blocking_reasons:
+        raise ValueError("proposal rejected: " + ",".join(blocking_reasons))
     answers = backend.execute_program(proposal.program)
     signature = canonical_signature(proposal.program)
     task_id = "gt_selfplay_" + stable_hash([graph_snapshot, signature, question, round_index])[:20]

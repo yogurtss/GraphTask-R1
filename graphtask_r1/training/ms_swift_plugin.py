@@ -18,6 +18,7 @@ from typing import Any
 from graphtask_r1.envs.graph_query import execute_compact_query
 from graphtask_r1.envs.text_search import execute_text_search
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
+from graphtask_r1.schema import parse_program
 from graphtask_r1.training.json_compat import to_json_compatible
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
 from graphtask_r1.training.ms_swift_reward import compute_score
@@ -25,6 +26,7 @@ from graphtask_r1.training.ms_swift_reward import compute_score
 try:
     from swift.llm.dataset import DatasetMeta, RowPreprocessor, register_dataset
     from swift.plugin import ORM, orms
+    from swift.plugin.multi_turn import MultiTurnScheduler
 except ImportError as exc:  # pragma: no cover - exercised on the training server
     raise ImportError(
         "Install the pinned ms-swift environment before loading the GraphTask plugin"
@@ -32,6 +34,13 @@ except ImportError as exc:  # pragma: no cover - exercised on the training serve
 
 
 logger = logging.getLogger(__name__)
+
+
+def _reward_completion(text: str) -> str:
+    """Remove a template-prefilled empty Qwen thinking block before scoring."""
+
+    prefix = "<think>\n\n</think>\n\n"
+    return text[len(prefix) :] if text.startswith(prefix) else text
 
 
 class GraphTaskSFTPreprocessor(RowPreprocessor):  # type: ignore[misc]
@@ -114,23 +123,38 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
         extra_info: object = None,
         **kwargs: object,
     ) -> list[float]:
-        del kwargs
         size = len(completions)
         sources = _batch(data_source, size, default="graphtask/solver")
         truths = _batch(ground_truth, size, default="")
         infos = _batch(extra_info, size, default={})
+        rollout_infos = _batch(kwargs.get("rollout_infos"), size, default={})
 
         normalized_infos: list[dict[str, Any]] = []
-        for raw_info in infos:
+        for index, raw_info in enumerate(infos):
             info = to_json_compatible(raw_info)
             if not isinstance(info, dict):
                 raise ValueError("extra_info reward column must contain objects")
+            if (
+                str(sources[index]) == "graphtask/solver"
+                and info.get("solver_reward_variant") == "curriculum_v3"
+            ):
+                rollout = to_json_compatible(rollout_infos[index])
+                if not isinstance(rollout, dict):
+                    raise ValueError("rollout_infos reward column must contain objects")
+                info["solver_rollout"] = {
+                    "calls": 0,
+                    "valid_calls": 0,
+                    "invalid_calls": 0,
+                    "edge_visits": 0,
+                    "new_visible_entities": 0,
+                    **rollout,
+                }
             normalized_infos.append(info)
 
         async def score_one(index: int) -> dict[str, float]:
             return await compute_score(
                 str(sources[index]),
-                completions[index],
+                _reward_completion(completions[index]),
                 str(truths[index]),
                 normalized_infos[index],
             )
@@ -402,6 +426,76 @@ class GraphTaskSolverScheduler:
         return infer_request
 
 
+class GraphTaskCurriculumSolverScheduler(GraphTaskSolverScheduler, MultiTurnScheduler):  # type: ignore[misc]
+    """Tool scheduler that exposes cumulative process signals to curriculum rewards."""
+
+    def __init__(self, *args: object, max_turns: int | None = None, **kwargs: object) -> None:
+        MultiTurnScheduler.__init__(self, *args, max_turns=max_turns, **kwargs)
+        self._backends: dict[str, GraphBackend] = {}
+
+    def _execute_tool(
+        self,
+        name: str,
+        parameters: Mapping[str, object],
+        info: Mapping[str, object],
+        state: dict[str, object],
+    ) -> str:
+        if name == "execute_program":
+            state["calls"] = _int_value(state.get("calls", 0)) + 1
+            max_calls = _int_value(info.get("max_tool_calls", self.max_turns or 8))
+            if _int_value(state["calls"]) > max_calls:
+                raise ValueError("graph tool call budget exhausted")
+            if str(info.get("role", "solver")) != "questioner":
+                raise ValueError("execute_program is questioner-only")
+            snapshot = str(info.get("graph_snapshot", "kqapro-v1"))
+            program = parse_program(parameters["program"])
+            return self._backend(snapshot).execute_program(program).model_dump_json()
+        return super()._execute_tool(name, parameters, info, state)
+
+    def step(
+        self, infer_request: Any, response_choice: Any, current_turn: int
+    ) -> dict[str, object]:
+        del current_turn
+        info = self._info(infer_request)
+        if str(info.get("role", "solver")) not in {"questioner", "solver"}:
+            raise ValueError("curriculum scheduler requires a Questioner or Solver role")
+        state = self._state(infer_request, info)
+        for call in _tool_calls(response_choice):
+            function = getattr(call, "function", None)
+            name = str(getattr(function, "name", ""))
+            calls_before = _int_value(state.get("calls", 0))
+            try:
+                parameters = _parse_arguments(getattr(function, "arguments", "{}"))
+                content = self._execute_tool(name, parameters, info, state)
+                state["valid_calls"] = _int_value(state.get("valid_calls", 0)) + 1
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                if _int_value(state.get("calls", 0)) == calls_before:
+                    state["calls"] = calls_before + 1
+                state["invalid_calls"] = _int_value(state.get("invalid_calls", 0)) + 1
+                content = json.dumps(
+                    {
+                        "error": {
+                            "reason_code": "INVALID_TOOL_CALL",
+                            "message": str(exc),
+                        }
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            infer_request.messages.append({"role": "tool", "content": content})
+
+        initial_entities = set(_string_list(info.get("topic_entity_ids", [])))
+        visible_entities = set(_string_list(state.get("visible_entities", [])))
+        rollout_infos = {
+            "calls": _int_value(state.get("calls", 0)),
+            "valid_calls": _int_value(state.get("valid_calls", 0)),
+            "invalid_calls": _int_value(state.get("invalid_calls", 0)),
+            "edge_visits": _int_value(state.get("edge_visits", 0)),
+            "new_visible_entities": len(visible_entities - initial_entities),
+        }
+        return {"infer_request": infer_request, "rollout_infos": rollout_infos}
+
+
 _register_data()
 orms["graphtask_score"] = GraphTaskReward
 if os.environ.get("INTERACTION_MODE", "graphscript") == "tool":
@@ -412,3 +506,4 @@ if os.environ.get("INTERACTION_MODE", "graphscript") == "tool":
             "ms-swift tool mode requires its optional math_verify dependency"
         ) from exc
     multi_turns["graphtask_solver"] = GraphTaskSolverScheduler
+    multi_turns["graphtask_curriculum_solver"] = GraphTaskCurriculumSolverScheduler

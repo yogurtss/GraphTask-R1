@@ -1,0 +1,56 @@
+# Three-round ToyGraph smoke for the independent curriculum_v3 path.
+model_path: ${SMOKE_MODEL_PATH}
+model_type: qwen3
+# The hybrid Qwen3-0.6B otherwise spends this bounded smoke entirely in <think>.
+response_prefix: '<think>\n\n</think>\n\n'
+initial_adapter: ${INITIAL_ADAPTER}
+base_tasks: ${BASE_TASKS}
+val_data: ${VAL_DATA}
+questioner_seeds: ${QUESTIONER_SEEDS}
+graph_snapshot: toy-v1
+selfplay_variant: curriculum_v3
+rounds: 3
+questioner_episodes: 2
+solver_episodes: 2
+opponent_samples: 1
+curriculum_production_rounds: 1
+curriculum_grounding_rounds: 1
+curriculum_solver_fraction_start: 0.5
+curriculum_replay_ratio: 0.5
+curriculum_question_alignment_min: 0.25
+frontier_target_start: 0.8
+frontier_target_end: 0.5
+frontier_sigma: 0.25
+archive_min_pass_rate: 0.0
+archive_max_pass_rate: 1.0
+archive_min_novelty: 0.0
+base_ratio: 0.5
+archive_ratio: 0.0
+new_ratio: 0.5
+seed: 42
+actor_gpus: "0"
+opponent_gpus: "0"
+allow_gpu_overlap: true
+use_vllm: false
+opponent_backend: transformers
+opponent_device: cuda:0
+opponent_port: 18080
+train_script: scripts/train_ms_swift_grpo.sh
+interaction_mode: graphscript
+graphscript_version: "0.1"
+relation_catalog: ${TOY_RELATION_CATALOG}
+relation_catalogs:
+  toy-v1: ${TOY_RELATION_CATALOG}
+max_follow_limit: 8
+max_edge_visits: 16
+max_returned_entities: 32
+max_completion_tokens: 384
+vllm_max_model_len: 1024
+micro_batch_size: 1
+eval_batch_size: 2
+gradient_accumulation_steps: 1
+steps_per_generation: 2
+rollout_n: 2
+save_steps: 1
+save_total_limit: 2
+program_profile: graphscript_v0_1

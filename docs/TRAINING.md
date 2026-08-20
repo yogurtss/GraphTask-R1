@@ -99,6 +99,8 @@ IDs，不包含邻居实体或答案。
 
 ```bash
 source "${WORK_DIR:-$PWD/outputs/sft-data}/sft_data.env"
+printf 'TRAIN_DATA=%s\nVAL_DATA=%s\n' "$TRAIN_DATA" "$VAL_DATA"
+python scripts/validate_ms_swift_data.py --kind sft --input "$TRAIN_DATA" "$VAL_DATA"
 export SFT_OUTPUT_DIR=$PWD/outputs/sft/qwen3-4b-kqapro-v03
 export NUM_GPUS=4
 export MAX_LENGTH=32768
@@ -112,6 +114,8 @@ python -m graphtask_r1.cli train sft \
 
 脚本使用 LoRA、BF16、SDPA 和显式 seed。显存不足时依次降低 `MAX_LENGTH`、
 `MICRO_BATCH_SIZE`，再提高 `GRADIENT_ACCUMULATION_STEPS`；不要让模板自动截断程序尾部。
+若校验报缺少 `messages`，说明 `TRAIN_DATA`/`VAL_DATA` 指向了 certified task、RL 或旧数据；
+重新 `source "$WORK_DIR/sft_data.env"`，不要手动修改 Parquet。
 上述 batch 参数已经是 experiment YAML 的正式字段，环境变量可临时覆盖；完整计算例子见
 [KQAPro 训练流程](KQAPRO_TRAINING.md#sft-batch-设置)。
 
@@ -155,6 +159,11 @@ python -m graphtask_r1.cli train solver-grpo \
 python -m graphtask_r1.cli train solver-grpo \
   --config configs/experiments/qwen3_4b_solver_grpo_ms_swift_cuda124.yaml
 ```
+
+推荐通过上面的 CLI 启动。若直接执行 `bash scripts/train_ms_swift_grpo.sh`，launcher 也会把
+`SOLVER_RL_TRAIN_DATA`、`SOLVER_RL_VAL_DATA`、`MS_SWIFT_SFT_ADAPTER` 和
+`SOLVER_GRPO_OUTPUT_DIR` 分别映射到内部的 `TRAIN_DATA`、`VAL_DATA`、
+`LORA_ADAPTER_PATH` 和 `OUTPUT_DIR`，无需再手工复制一套变量。
 
 确认 smoke test 后再提高 completion length、generation 数和 GPU 数。正式 server 模式先在独立
 GPU 上运行 `scripts/rollout_ms_swift.sh`，再以 `VLLM_MODE=server` 启动 GRPO。GraphScript 是单次
