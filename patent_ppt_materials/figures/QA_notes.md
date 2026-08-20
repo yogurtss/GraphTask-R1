@@ -10,7 +10,7 @@
 ## Visual inspection
 
 - Fig. 1: all three paradigm columns, arrows and notes fit within their containers after wrapping.
-- Fig. 2: generated with built-in GPT Image; inspected for module completeness and arrow direction. The PNG is 1672 × 941 RGBA and is intended for a white slide background. AI-rendered Chinese labels still require a final human spelling check before external filing or publication.
+- Fig. 2 English v2: generated with built-in GPT Image and inspected for module completeness, English-only labels, legibility, and role-update direction. The recommended file is `fig2_curriculum_v3_architecture_gpt_image_en_v2.png`, intended for a white 16:9 slide. The v2 correction removes the candidate-task-to-Questioner update implication and preserves reward feedback as the Questioner update path. AI-rendered labels still require final human verification before external filing or publication.
 - Fig. 3: all seven ordered steps and concrete outputs are visible; arrows follow the claimed data flow. This remains a draft until formal claim terminology is fixed.
 
 ## Integrity and evidence
