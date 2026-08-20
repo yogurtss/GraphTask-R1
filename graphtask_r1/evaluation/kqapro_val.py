@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import urllib.parse
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -12,7 +13,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import GraphScriptError, execute_graphscript, parse_graphscript
@@ -30,6 +31,7 @@ class KQAProModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model_url: str = Field(min_length=1)
+    api_key: SecretStr | None = Field(default=None, min_length=1)
     model: str = Field(min_length=1)
     max_completion_tokens: int = Field(default=4_096, ge=1, le=40_960)
 
@@ -103,6 +105,26 @@ class OpenAICompletionClient:
                 raise ValueError(f"completion cache must be a JSON object: {cache_path}")
             self._cache = {str(key): dict(value) for key, value in raw.items()}
 
+    def _chat_completions_url(self) -> str:
+        """Accept a service root, a /v1 base URL, or the complete chat endpoint."""
+        parsed = urllib.parse.urlsplit(self.config.model_url)
+        path = parsed.path.rstrip("/")
+        if path.endswith("/chat/completions"):
+            endpoint_path = path
+        elif path.endswith("/v1"):
+            endpoint_path = path + "/chat/completions"
+        else:
+            endpoint_path = path + "/v1/chat/completions"
+        return urllib.parse.urlunsplit(parsed._replace(path=endpoint_path))
+
+    def _request_headers(self, trace_id: str) -> dict[str, str]:
+        headers = {"X-Trace-ID": trace_id}
+        if self.config.api_key is not None:
+            headers["Authorization"] = (
+                f"Bearer {self.config.api_key.get_secret_value()}"
+            )
+        return headers
+
     async def complete(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -135,11 +157,11 @@ class OpenAICompletionClient:
         for attempt in range(self.retries + 1):
             try:
                 timeout = aiohttp.ClientTimeout(total=self.timeout_s)
-                headers = {"X-Trace-ID": trace_id}
+                headers = self._request_headers(trace_id)
                 async with (
                     aiohttp.ClientSession(timeout=timeout) as session,
                     session.post(
-                        self.config.model_url.rstrip("/") + "/v1/chat/completions",
+                        self._chat_completions_url(),
                         json=payload,
                         headers=headers,
                     ) as response,

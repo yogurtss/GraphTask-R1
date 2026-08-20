@@ -11,6 +11,7 @@ from graphtask_r1.evaluation.kqapro_val import (
     CompletionResult,
     KQAProModelConfig,
     KQAProValConfig,
+    OpenAICompletionClient,
     compare_kqapro_val_metrics,
     evaluate_kqapro_val,
     inspect_kqapro_val,
@@ -66,6 +67,51 @@ def _fixture(tmp_path: Path) -> tuple[Path, KQAProValConfig]:
         graph_snapshot="toy-v1",
         concurrency=3,
     )
+
+
+@pytest.mark.parametrize(
+    ("model_url", "expected"),
+    [
+        ("https://api.example.com", "https://api.example.com/v1/chat/completions"),
+        ("https://api.example.com/v1/", "https://api.example.com/v1/chat/completions"),
+        (
+            "https://api.example.com/v1/chat/completions",
+            "https://api.example.com/v1/chat/completions",
+        ),
+        (
+            "https://api.example.com/proxy/v1?region=test",
+            "https://api.example.com/proxy/v1/chat/completions?region=test",
+        ),
+    ],
+)
+def test_openai_client_accepts_common_url_forms_and_bearer_api_key(
+    tmp_path: Path, model_url: str, expected: str
+) -> None:
+    client = OpenAICompletionClient(
+        KQAProModelConfig(model_url=model_url, api_key="secret-key", model="remote"),
+        timeout_s=10,
+        retries=0,
+        cache_path=tmp_path / "cache.json",
+    )
+
+    assert client._chat_completions_url() == expected
+    assert client._request_headers("trace-7") == {
+        "X-Trace-ID": "trace-7",
+        "Authorization": "Bearer secret-key",
+    }
+
+
+def test_openai_client_omits_authorization_for_unauthenticated_local_model(
+    tmp_path: Path,
+) -> None:
+    client = OpenAICompletionClient(
+        KQAProModelConfig(model_url="http://127.0.0.1:18100", model="local"),
+        timeout_s=10,
+        retries=0,
+        cache_path=tmp_path / "cache.json",
+    )
+
+    assert client._request_headers("trace-local") == {"X-Trace-ID": "trace-local"}
 
 
 def _script() -> str:

@@ -99,6 +99,7 @@ graphscript_version: "0.3"
 
 model:
   model_url: ${KQAPRO_MODEL_URL}
+  api_key: null
   model: ${KQAPRO_MODEL}
   max_completion_tokens: 4096
 
@@ -111,8 +112,22 @@ max_edge_visits: 200
 max_returned_entities: 1000
 ```
 
-配置中只放当前正在评测的一个模型。`KQAPRO_MODEL` 必须等于服务的 `/v1/models` 返回的模型
-ID。切换 base checkpoint 与 SFT/GRPO checkpoint 时，修改当前服务和这一个环境变量即可；
+配置中只放当前正在评测的一个模型。`model_url` 可以填写服务根地址（如
+`https://api.example.com`）、`/v1` 地址（如 `https://api.example.com/v1`），也可以填写完整的
+`/v1/chat/completions` 地址。对于需要鉴权的 OpenAI-compatible 托管服务，将 `api_key` 改为密钥
+或 `${KQAPRO_API_KEY}`；客户端会发送 `Authorization: Bearer <api_key>`。本地无鉴权服务保持
+`api_key: null`。建议使用环境变量，避免把真实密钥提交到仓库：
+
+```yaml
+model:
+  model_url: https://api.example.com/v1
+  api_key: ${KQAPRO_API_KEY}
+  model: provider-model-id
+  max_completion_tokens: 4096
+```
+
+`KQAPRO_MODEL`（或上例中的 `model`）必须等于服务支持的模型 ID。切换 base checkpoint 与
+SFT/GRPO checkpoint 时，修改当前服务和这一个模型配置即可；
 `base` 与 `base_tool` 使用同一个原模型服务，只是评测 prompt/protocol 不同。
 
 这些默认值针对一个 4B 模型部署在单 GPU 上。首次测试仍建议用 `concurrency: 1`，确认显存、单条
@@ -370,9 +385,14 @@ curl -f http://127.0.0.1:18100/v1/chat/completions \
   -d "{\"model\":\"$KQAPRO_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK\"}],\"max_tokens\":8,\"temperature\":0}"
 ```
 
+若服务需要 API key，在 curl 中额外加入
+`-H "Authorization: Bearer $KQAPRO_API_KEY"`；正式评测由 YAML 的 `model.api_key` 自动添加。
+
 常见错误：
 
-- HTTP 404：`KQAPRO_MODEL_URL` 不应包含 `/v1`，只填 `http://host:port`；
+- HTTP 404：确认服务实际提供 Chat Completions 协议；配置可使用服务根地址、`/v1` 地址或完整
+  `/v1/chat/completions` 地址；
+- HTTP 401/403：确认 `model.api_key` 已配置且该密钥有权访问指定模型；
 - model not found：`KQAPRO_MODEL` 与 `/v1/models` 返回值不一致；
 - adapter load error：基础模型与 LoRA adapter 不匹配，或 adapter 路径不是实际 checkpoint；
 - CUDA OOM：降低配置中的 `concurrency`，降低服务显存占用，或增加 tensor parallel GPU；

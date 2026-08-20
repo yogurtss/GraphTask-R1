@@ -2,6 +2,8 @@
 # OpenAI-compatible /v1/chat/completions API before running the probe.
 model:
   model_url: ${SFT_PROBE_MODEL_URL}
+  # Set for hosted APIs; leave null for a local endpoint without authentication.
+  api_key: null
   model: ${SFT_PROBE_MODEL}
   max_completion_tokens: 4096
 

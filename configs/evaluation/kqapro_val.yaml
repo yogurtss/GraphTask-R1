@@ -8,6 +8,8 @@ graphscript_version: "0.3"
 # --model-stage base|sft|grpo; use a separate output directory for each checkpoint.
 model:
   model_url: ${KQAPRO_MODEL_URL}
+  # Set for hosted APIs; leave null for a local endpoint without authentication.
+  api_key: null
   model: ${KQAPRO_MODEL}
   max_completion_tokens: 4096
 
