@@ -1,0 +1,63 @@
+Use case: infographic-diagram
+Asset type: rigorous patent-PPT technical architecture diagram, landscape 16:9
+Primary request: Create a precise system architecture diagram for “GraphTask-R1 Curriculum v3: certified executable graph self-play”. The diagram must communicate a closed-loop training method, not marketing artwork.
+
+Scene/backdrop: clean white canvas, generous margins, no decorative background.
+Style/medium: sober scientific system architecture, high-end academic/patent presentation, flat vector-like blocks and orthogonal arrows, consistent 2 px strokes, no 3D, no gradients, no shadows.
+Composition/framing: left-to-right primary flow with three horizontal layers and one feedback loop. Use clear grouped containers with rounded corners. Keep arrow crossings minimal. Use a restrained navy / slate / muted teal palette plus a small amber accent only for validation gates.
+
+Exact diagram structure and text:
+Title at top: “GraphTask-R1 Curriculum v3：可认证的可执行图自博弈架构”
+Subtitle: “Questioner 生成任务 → 执行认证与确定性归档 → Solver 同轮学习 → 下一轮共同演化”
+
+Top band labeled “分阶段课程” with three ordered capsules:
+“阶段1 生产：问题 + 程序格式”
+“阶段2 接地：实体、关系、句柄、执行”
+“阶段3 前沿：条件化语义难度”
+
+Left input container labeled “实例级输入与约束”, containing:
+“图快照”
+“关系目录”
+“种子实体”
+“基础任务”
+“显式随机种子”
+and a small note “状态可回放 / JSON 可序列化”.
+
+Center upper lane labeled “Questioner 路径”:
+Block “Questioner 独立适配器”
+arrow to block “一次生成 {question, GraphScript v0.3}”
+arrow to amber gate “解析 + 类型/模式校验”
+arrow to amber gate “有界图执行器”
+arrow to amber gate “任务认证”
+Inside the three gates use smaller short labels:
+for parser: “≤64 操作 / SSA 句柄 / 关系白名单”
+for executor: “边访问预算 / 返回实体预算 / 步骤轨迹”
+for certification: “gold 仅由执行产生 / 对齐 / 无答案泄漏”
+Then arrow to block “候选任务暂存库”.
+
+Center middle feedback module beneath the gates:
+Block “冻结 Solver 评估”
+arrow to block “接口就绪度 = 解析率 × 条件执行率”
+arrow to block “语义成功率｜仅在可执行样本上计算”
+arrow upward to “Questioner 分阶段稠密奖励”.
+Clearly show that interface readiness gates the frontier contribution, with label:
+“有效前沿权重 = 配置权重 × 接口就绪度”.
+
+Center lower lane labeled “归档与 Solver 路径”:
+From “候选任务暂存库” arrow to amber diamond/gate “确定性准入”.
+Small labels next to it: “难度窗口”, “结构新颖性”, “文本新颖性”, “结构化拒绝原因”.
+arrow to block “持久任务归档”
+arrow to block “同轮重建 Solver 数据集”
+Inside dataset block: “基础任务 + 历史任务 + 本轮新任务” and “由易到难 + 简单样本回放”
+arrow to block “Solver 独立适配器 GRPO 更新”.
+
+Right side container labeled “轮次状态”:
+two parallel blocks “更新后的 Questioner 适配器” and “更新后的 Solver 适配器”
+then a large feedback arrow back to next-round inputs labeled “进入下一轮”.
+Connect Questioner training to updated Questioner adapter; connect Solver update to updated Solver adapter. Emphasize adapters remain separate.
+
+Bottom output bar:
+“输出：可验证图问答模型 + 可回放任务证书/轨迹 + 受控扩展的训练任务库”
+
+Typography: Simplified Chinese sans-serif, high legibility, consistent hierarchy. All text must be verbatim and correctly spelled. Keep labels short; do not add icons unless simple abstract database/circuit symbols help orientation.
+Constraints: no logos, no company branding, no people, no robots, no brain imagery, no clouds, no decorative particles, no performance numbers, no claims of SOTA, no unsupported modules, no watermark. Ensure every arrow direction is technically correct and all modules are fully visible.
