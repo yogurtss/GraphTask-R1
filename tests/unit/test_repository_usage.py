@@ -183,6 +183,7 @@ def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
     main_readme = (PROJECT_ROOT / "README.md").read_text()
     training_guide = (PROJECT_ROOT / "docs/TRAINING.md").read_text()
     kqapro_guide = (PROJECT_ROOT / "docs/KQAPRO_TRAINING.md").read_text()
+    data_guide = (PROJECT_ROOT / "docs/DATA_PREPARATION.md").read_text()
 
     assert "SFT → self-play → val 选模" in main_readme
     assert "Solver-only GRPO 不是前置依赖" in main_readme
@@ -192,12 +193,15 @@ def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
     )
     assert "## 4. 可选：KQAPro Solver-only GRPO warm-up" in training_guide
     assert "## 5. Questioner/Solver self-play" in kqapro_guide
-    assert "## 附录 A：可选的 Solver-only GRPO warm-up" in kqapro_guide
+    assert "## 6. 可选 Solver-only GRPO warm-up" in kqapro_guide
     assert kqapro_guide.index("## 5. Questioner/Solver self-play") < kqapro_guide.index(
-        "## 附录 A：可选的 Solver-only GRPO warm-up"
+        "## 6. 可选 Solver-only GRPO warm-up"
     )
-    assert "默认直接用 mixed-role SFT adapter 初始化 self-play" in kqapro_guide
-    assert "scripts/prepare_mixed_sft_data.sh" in main_readme
+    assert "SFT_TRAIN_DATA" in kqapro_guide
+    assert "SFT_VAL_DATA" in kqapro_guide
+    assert "data prepare" in kqapro_guide
+    assert "KQAPRO_TRAINING.md" in data_guide
+    assert "data prepare --dataset kqapro" not in data_guide
     assert "scripts/prepare_mixed_sft_data.sh" in training_guide
     assert "scripts/prepare_mixed_sft_data.sh" in kqapro_guide
     assert "SOLVER_RATIO=1" in kqapro_guide
