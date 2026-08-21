@@ -103,6 +103,24 @@ def test_reward_completion_removes_only_prefilled_empty_thinking(plugin: Any) ->
     assert plugin._reward_completion(f"<think>reason</think>{payload}") != payload
 
 
+def test_distributed_cleanup_destroys_initialized_process_group(
+    plugin: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destroyed: list[bool] = []
+    distributed = types.ModuleType("torch.distributed")
+    distributed.is_available = lambda: True
+    distributed.is_initialized = lambda: True
+    distributed.destroy_process_group = lambda: destroyed.append(True)
+    torch = types.ModuleType("torch")
+    torch.distributed = distributed
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", distributed)
+
+    plugin._destroy_distributed_process_group()
+
+    assert destroyed == [True]
+
+
 def test_graphscript_mode_does_not_register_multi_turn_scheduler(plugin: Any) -> None:
     del plugin
     from swift.plugin import multi_turns

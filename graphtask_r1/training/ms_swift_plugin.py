@@ -7,6 +7,7 @@ GraphTask does not require ms-swift to be installed.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import logging
 import os
@@ -34,6 +35,20 @@ except ImportError as exc:  # pragma: no cover - exercised on the training serve
 
 
 logger = logging.getLogger(__name__)
+
+
+def _destroy_distributed_process_group() -> None:
+    """Release NCCL resources before Python tears down CUDA objects."""
+
+    try:
+        import torch.distributed as distributed
+    except ImportError:  # pragma: no cover - torch is required by ms-swift
+        return
+    if distributed.is_available() and distributed.is_initialized():
+        distributed.destroy_process_group()
+
+
+atexit.register(_destroy_distributed_process_group)
 
 
 def _reward_completion(text: str) -> str:

@@ -206,6 +206,61 @@ python -m graphtask_r1.cli train self-play \
   --output-dir outputs/selfplay
 ```
 
+在启用了 GPU `Exclusive Process`、或希望每轮都彻底退出 torchrun/NCCL 进程的服务器上，可让每个
+round 使用独立的顶层 Python 进程。第一次运行只完成 round 1：
+
+```bash
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay_curriculum_v3.yaml \
+  --output-dir outputs/selfplay/curriculum-v3 \
+  --one-round
+```
+
+之后每次只执行下一个未完成 round，并从同一目录的 `manifest.json` 恢复 adapter 和 archive：
+
+```bash
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay_curriculum_v3.yaml \
+  --output-dir outputs/selfplay/curriculum-v3 \
+  --resume --one-round
+```
+
+三轮配置共执行一次首轮命令和两次恢复命令。若 round 1 已经完成，直接执行两次
+`--resume --one-round` 即可，不会重跑 round 1。不要并发启动这些命令，因为各轮复用相同的
+manifest、archive 和服务端口。
+
+`curriculum_v3` 的单个 round 内部依次运行 Questioner 和 Solver。每个成功阶段会写入各自
+`questioner_update/phase_manifest.json` 或 `solver_update/phase_manifest.json`。若进程在 Questioner
+完成后、Solver 完成前退出，恢复时也会识别旧运行的 `trainer_state.json`；只有满足
+`global_step >= max_steps` 且 LoRA 配置和权重都存在的阶段才会复用。这样 `--resume --one-round`
+只补跑缺失的 Solver，不会重新训练已经完成的 Questioner。
+
+恢复时以输出目录中的连续完整阶段为准，而不只依赖顶层 `manifest.json`。例如，round 1 的
+Questioner 和 Solver 均已完成、但进程在写 round manifest 前退出时，扫描会把 round 1 恢复为已完成
+并直接进入 round 2；若 round 2 只有完整的 Questioner，则定位为 `next_round=2 next_phase=solver`。
+启动日志会输出 `selfplay_resume_discovered`，返回 JSON 也包含 `resume_progress` 和每轮的
+`phase_resume`。顶层 manifest 比完整阶段产物更靠前时会拒绝恢复，以免跳过缺失训练。
+
+也可以把三轮拆为六个完全独立的命令：
+
+```bash
+bash scripts/run_selfplay_curriculum_phases.sh \
+  configs/training/selfplay_curriculum_v3.yaml \
+  outputs/selfplay/curriculum-v3
+```
+
+脚本内容就是 `round 1..3 × questioner/solver` 六条顺序命令。每条命令都先扫描同一输出目录；完整
+阶段会直接 no-op，Solver 会拒绝越过未完成的同轮 Questioner，后续 round 也会拒绝越过前序
+round。某条命令中断后，可重新执行原脚本，也可以复制脚本并删除已经完成的命令后继续。精确命令
+格式如下：
+
+```bash
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay_curriculum_v3.yaml \
+  --output-dir outputs/selfplay/curriculum-v3 \
+  --round-index 2 --phase solver
+```
+
 若有意运行了第 4 节，可选地把 `INITIAL_ADAPTER` 改为 Solver-only GRPO checkpoint；self-play
 其余配置不变。
 

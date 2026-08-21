@@ -5,11 +5,13 @@ import math
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
 import urllib.request
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -48,6 +50,7 @@ DeepSpeedStage = Literal[
 RLAlgorithm = Literal["grpo", "reinforce_plus_plus"]
 SelfPlayVariant = Literal["legacy", "frontier_v2", "curriculum_v3"]
 CurriculumPhase = Literal["production", "grounding", "frontier"]
+UpdatePhase = Literal["questioner", "solver"]
 
 
 def _gpu_ids(value: str) -> tuple[str, ...]:
@@ -487,6 +490,118 @@ def _adapter_from_checkpoint(
     return max(candidates, key=lambda path: (_checkpoint_step(path), str(path))).parent
 
 
+def _completed_phase_adapter(phase_dir: Path) -> Path | None:
+    """Return a certified final adapter from a completed or legacy phase run."""
+
+    phase_manifest = phase_dir / "phase_manifest.json"
+    if phase_manifest.is_file():
+        state = read_json(phase_manifest)
+        adapter = Path(str(state.get("adapter", "")))
+        if state.get("completed") is True and all(
+            (adapter / name).is_file()
+            for name in ("adapter_config.json", "adapter_model.safetensors")
+        ):
+            return adapter
+
+    candidates = sorted(
+        phase_dir.rglob("adapter_model.safetensors"),
+        key=lambda path: (_checkpoint_step(path), str(path)),
+        reverse=True,
+    )
+    for weights in candidates:
+        adapter = weights.parent
+        trainer_state_path = adapter / "trainer_state.json"
+        if not (adapter / "adapter_config.json").is_file() or not trainer_state_path.is_file():
+            continue
+        trainer_state = read_json(trainer_state_path)
+        global_step = int(trainer_state.get("global_step", -1))
+        max_steps = int(trainer_state.get("max_steps", 0))
+        if max_steps > 0 and global_step >= max_steps:
+            return adapter
+    return None
+
+
+def _write_phase_manifest(
+    phase_dir: Path,
+    *,
+    phase: str,
+    adapter: Path,
+    train_data: Path,
+    trainer_log: Path | None,
+) -> None:
+    write_json(
+        phase_dir / "phase_manifest.json",
+        {
+            "phase": phase,
+            "adapter": str(adapter.resolve()),
+            "adapter_config_hash": file_hash(adapter / "adapter_config.json"),
+            "adapter_weights_hash": file_hash(adapter / "adapter_model.safetensors"),
+            "train_data": str(train_data.resolve()),
+            "train_data_hash": file_hash(train_data),
+            "trainer_log": str(trainer_log.resolve()) if trainer_log is not None else None,
+            "completed": True,
+        },
+    )
+
+
+def _manifest_adapter(state: dict[str, Any], key: str) -> Path | None:
+    raw_adapter = state.get(key)
+    if not raw_adapter:
+        return None
+    adapter = Path(str(raw_adapter))
+    if all(
+        (adapter / name).is_file()
+        for name in ("adapter_config.json", "adapter_model.safetensors")
+    ):
+        return adapter
+    return None
+
+
+def _discover_curriculum_progress(
+    output_dir: Path, *, rounds: int
+) -> dict[str, Any]:
+    """Discover the last durable curriculum phase directly from output artifacts."""
+
+    completed = 0
+    questioner_adapter: Path | None = None
+    solver_adapter: Path | None = None
+    next_phase: str | None = "questioner"
+    for round_index in range(1, rounds + 1):
+        round_dir = output_dir / f"round_{round_index:03d}"
+        round_manifest_path = round_dir / "manifest.json"
+        round_state = (
+            read_json(round_manifest_path) if round_manifest_path.is_file() else {}
+        )
+        questioner = _completed_phase_adapter(round_dir / "questioner_update")
+        solver = _completed_phase_adapter(round_dir / "solver_update")
+        if round_state.get("completed") is True:
+            questioner = questioner or _manifest_adapter(round_state, "questioner_adapter")
+            solver = solver or _manifest_adapter(round_state, "solver_adapter")
+        if solver is not None and questioner is None:
+            raise RuntimeError(
+                f"round {round_index} has a completed Solver but no completed Questioner"
+            )
+        if questioner is None:
+            next_phase = "questioner"
+            break
+        if solver is None:
+            next_phase = "solver"
+            break
+        completed = round_index
+        questioner_adapter = questioner
+        solver_adapter = solver
+        next_phase = "questioner" if round_index < rounds else None
+    return {
+        "last_completed_round": completed,
+        "questioner_adapter": (
+            str(questioner_adapter) if questioner_adapter is not None else None
+        ),
+        "solver_adapter": str(solver_adapter) if solver_adapter is not None else None,
+        "next_round": completed + 1 if completed < rounds else None,
+        "next_phase": next_phase,
+    }
+
+
 def _validate_merged_model(model_dir: Path) -> None:
     missing = [
         name
@@ -527,15 +642,26 @@ def _opponent_merge_spec(config: SelfPlayConfig, adapter: Path) -> dict[str, str
     }
 
 
-def _stop(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
+def _signal_service(process: subprocess.Popen[Any], sig: signal.Signals) -> None:
+    if os.name == "posix":
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, sig)
         return
-    process.terminate()
+    if process.poll() is None:  # pragma: no cover - Windows fallback
+        process.send_signal(sig)
+
+
+def _stop(process: subprocess.Popen[Any]) -> None:
+    """Stop a long-lived service and all workers it spawned."""
+
+    _signal_service(process, signal.SIGTERM)
     try:
-        process.wait(timeout=30)
+        if process.poll() is None:
+            process.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=10)
+        _signal_service(process, signal.SIGKILL)
+        if process.poll() is None:
+            process.wait(timeout=10)
 
 
 def _run_with_tee(command: Sequence[str], *, env: dict[str, str], log_path: Path) -> None:
@@ -710,8 +836,23 @@ def run_self_play(
     *,
     resume: bool,
     dry_run: bool,
+    one_round: bool = False,
+    target_round: int | None = None,
+    target_phase: UpdatePhase | None = None,
 ) -> dict[str, Any]:
     config = load_selfplay_config(config_path)
+    if (target_round is None) != (target_phase is None):
+        raise ValueError("--round-index and --phase must be provided together")
+    if target_round is not None:
+        if one_round:
+            raise ValueError("--one-round cannot be combined with --round-index/--phase")
+        if config.selfplay_variant != "curriculum_v3":
+            raise ValueError("exact phase execution requires selfplay_variant=curriculum_v3")
+        if target_round > config.rounds:
+            raise ValueError(
+                f"--round-index {target_round} exceeds configured rounds={config.rounds}"
+            )
+        resume = True
     output_dir.mkdir(parents=True, exist_ok=True)
     validation_seed = config.seed + 20_000
     validation = (
@@ -745,17 +886,108 @@ def run_self_play(
     adapter = Path(config.initial_adapter)
     questioner_adapter = adapter
     solver_adapter = adapter
+    manifest_completed = 0
     if resume and manifest_path.exists():
         state = read_json(manifest_path)
-        completed = int(state["last_completed_round"])
+        manifest_completed = int(state["last_completed_round"])
+        completed = manifest_completed
         adapter = Path(state["adapter"])
         questioner_adapter = Path(state.get("questioner_adapter", state["adapter"]))
         solver_adapter = Path(state.get("solver_adapter", state["adapter"]))
         if state["config_hash"] != file_hash(config_path):
             raise ValueError("cannot resume: self-play config changed")
+    resume_progress: dict[str, Any] | None = None
+    if resume and config.selfplay_variant == "curriculum_v3":
+        resume_progress = _discover_curriculum_progress(output_dir, rounds=config.rounds)
+        discovered = int(resume_progress["last_completed_round"])
+        if discovered < manifest_completed:
+            raise RuntimeError(
+                "cannot resume: top-level manifest is ahead of complete phase artifacts "
+                f"({manifest_completed} > {discovered})"
+            )
+        completed = discovered
+        discovered_questioner = resume_progress["questioner_adapter"]
+        discovered_solver = resume_progress["solver_adapter"]
+        if discovered_questioner is not None:
+            questioner_adapter = Path(str(discovered_questioner))
+        if discovered_solver is not None:
+            solver_adapter = Path(str(discovered_solver))
+            adapter = solver_adapter
+        LOGGER.info(
+            "selfplay_resume_discovered completed_rounds=%d next_round=%s next_phase=%s",
+            completed,
+            resume_progress["next_round"],
+            resume_progress["next_phase"],
+        )
+        if not dry_run and completed > manifest_completed:
+            write_json(
+                manifest_path,
+                {
+                    "last_completed_round": completed,
+                    "adapter": str(adapter),
+                    "questioner_adapter": str(questioner_adapter),
+                    "solver_adapter": str(solver_adapter),
+                    "config_hash": file_hash(config_path),
+                    "ms_swift_version": MS_SWIFT_VERSION,
+                    "selfplay_variant": config.selfplay_variant,
+                    "recovered_from_phase_artifacts": True,
+                },
+            )
+    if target_round is not None and target_phase is not None:
+        next_round = resume_progress["next_round"] if resume_progress is not None else 1
+        requested_dir = output_dir / f"round_{target_round:03d}"
+        requested_questioner = _completed_phase_adapter(
+            requested_dir / "questioner_update"
+        )
+        requested_adapter = _completed_phase_adapter(
+            requested_dir / f"{target_phase}_update"
+        )
+        if requested_adapter is not None or target_round <= completed:
+            LOGGER.info(
+                "selfplay_phase_already_completed round=%d phase=%s adapter=%s",
+                target_round,
+                target_phase,
+                requested_adapter,
+            )
+            return {
+                "dry_run": dry_run,
+                "rounds_requested": config.rounds,
+                "rounds_completed": completed,
+                "rounds_planned": 0,
+                "rounds_remaining": config.rounds - completed,
+                "one_round": False,
+                "target_round": target_round,
+                "target_phase": target_phase,
+                "phase_skipped": True,
+                "resume_progress": resume_progress,
+                "plans": [],
+                "ms_swift_version": MS_SWIFT_VERSION,
+                "report_artifacts": None,
+            }
+        if target_round != next_round:
+            raise RuntimeError(
+                f"cannot run round {target_round} {target_phase}: next unfinished round is "
+                f"{next_round}"
+            )
+        if target_phase == "solver" and requested_questioner is None:
+            raise RuntimeError(
+                f"cannot run round {target_round} solver before its Questioner completes"
+            )
+        if target_phase == "solver":
+            # The scanner intentionally returns adapters only for fully completed
+            # rounds. An exact Solver invocation must consume this round's durable
+            # Questioner adapter instead of the previous round's Questioner.
+            assert requested_questioner is not None
+            questioner_adapter = requested_questioner
+        first_round = target_round
+        final_round = target_round
+    else:
+        first_round = completed + 1
+        final_round = min(config.rounds, completed + 1) if one_round else config.rounds
     plans: list[dict[str, Any]] = []
     report_artifacts: dict[str, str] | None = None
-    for round_index in range(completed + 1, config.rounds + 1):
+    completed_after = completed
+    for round_index in range(first_round, final_round + 1):
         round_dir = output_dir / f"round_{round_index:03d}"
         logs = round_dir / "logs"
         reward_metrics_dir = _next_metrics_attempt(logs)
@@ -818,6 +1050,13 @@ def run_self_play(
             train_overrides["RESPONSE_PREFIX"] = config.response_prefix
         plan = {
             "round": round_index,
+            "one_round": one_round,
+            "target_phase": target_phase,
+            "phase_resume": {
+                "questioner": _completed_phase_adapter(round_dir / "questioner_update")
+                is not None,
+                "solver": _completed_phase_adapter(round_dir / "solver_update") is not None,
+            },
             "selfplay_variant": config.selfplay_variant,
             "adapter_in": str(adapter),
             "questioner_adapter_in": (
@@ -943,6 +1182,10 @@ def run_self_play(
             LOGGER.info("selfplay_merge_completed round=%d", round_index)
         sglang_process: subprocess.Popen[Any] | None = None
         phase_trainer_logs: dict[str, Path] = {}
+        if target_phase == "solver":
+            questioner_log = find_trainer_log(round_dir, questioner_adapter)
+            if questioner_log is not None:
+                phase_trainer_logs["questioner"] = questioner_log
         admission_summary: dict[str, Any] | None = None
         if commands["sglang"]:
             LOGGER.info("selfplay_sglang_started round=%d log=%s", round_index, logs / "sglang.log")
@@ -952,6 +1195,7 @@ def run_self_play(
                     env=opponent_env,
                     stdout=sglang_log,
                     stderr=subprocess.STDOUT,
+                    start_new_session=os.name == "posix",
                 )
         try:
             if sglang_process is not None:
@@ -971,6 +1215,7 @@ def run_self_play(
                     env=opponent_env,
                     stdout=opponent_log,
                     stderr=subprocess.STDOUT,
+                    start_new_session=os.name == "posix",
                 )
             try:
                 _wait_for(opponent_url + "/health", timeout_s=60)
@@ -1030,10 +1275,15 @@ def run_self_play(
                         adapter = phase_adapter
                     else:
                         curriculum_phase = _curriculum_phase(config, round_index)
-                        for phase, phase_data in (
+                        phase_updates: tuple[tuple[UpdatePhase, Path], ...] = (
                             ("questioner", round_dir / "questioner.parquet"),
                             ("solver", round_dir / "solver.parquet"),
-                        ):
+                        )
+                        if target_phase is not None:
+                            phase_updates = tuple(
+                                update for update in phase_updates if update[0] == target_phase
+                            )
+                        for phase, phase_data in phase_updates:
                             if phase == "solver":
                                 relaxed = curriculum_phase != "frontier"
                                 admission_summary = promote_staged_tasks(
@@ -1060,6 +1310,29 @@ def run_self_play(
                                 counts["total"] = counts["questioner"] + counts["solver"]
 
                             phase_dir = round_dir / f"{phase}_update"
+                            recovered_adapter = _completed_phase_adapter(phase_dir)
+                            if recovered_adapter is not None:
+                                if phase == "questioner":
+                                    questioner_adapter = recovered_adapter
+                                else:
+                                    solver_adapter = recovered_adapter
+                                phase_log = find_trainer_log(phase_dir, recovered_adapter)
+                                if phase_log is not None:
+                                    phase_trainer_logs[phase] = phase_log
+                                _write_phase_manifest(
+                                    phase_dir,
+                                    phase=phase,
+                                    adapter=recovered_adapter,
+                                    train_data=phase_data,
+                                    trainer_log=phase_log,
+                                )
+                                LOGGER.info(
+                                    "selfplay_phase_training_reused round=%d phase=%s adapter=%s",
+                                    round_index,
+                                    phase,
+                                    recovered_adapter,
+                                )
+                                continue
                             phase_known_adapters = frozenset(
                                 path.resolve()
                                 for path in phase_dir.rglob("adapter_model.safetensors")
@@ -1103,6 +1376,13 @@ def run_self_play(
                             phase_log = find_trainer_log(phase_dir, updated_adapter)
                             if phase_log is not None:
                                 phase_trainer_logs[phase] = phase_log
+                            _write_phase_manifest(
+                                phase_dir,
+                                phase=phase,
+                                adapter=updated_adapter,
+                                train_data=phase_data,
+                                trainer_log=phase_log,
+                            )
                             LOGGER.info(
                                 "selfplay_phase_training_completed round=%d phase=%s adapter=%s",
                                 round_index,
@@ -1120,6 +1400,12 @@ def run_self_play(
         finally:
             if sglang_process is not None:
                 _stop(sglang_process)
+        if target_phase == "questioner":
+            LOGGER.info(
+                "selfplay_exact_phase_completed round=%d phase=questioner",
+                round_index,
+            )
+            continue
         if config.selfplay_variant == "legacy":
             adapter = _adapter_from_checkpoint(round_dir, known_adapters=known_adapters)
         if config.selfplay_variant == "frontier_v2":
@@ -1209,12 +1495,20 @@ def run_self_play(
             adapter,
             report_artifacts["plot"],
         )
+        completed_after = round_index
     if not dry_run and report_artifacts is None:
         report_artifacts = write_selfplay_report(output_dir)
     return {
         "dry_run": dry_run,
         "rounds_requested": config.rounds,
-        "rounds_completed": completed if dry_run else config.rounds,
+        "rounds_completed": completed if dry_run else completed_after,
+        "rounds_planned": len(plans),
+        "rounds_remaining": config.rounds - (completed if dry_run else completed_after),
+        "one_round": one_round,
+        "target_round": target_round,
+        "target_phase": target_phase,
+        "phase_skipped": False,
+        "resume_progress": resume_progress,
         "plans": plans,
         "ms_swift_version": MS_SWIFT_VERSION,
         "report_artifacts": report_artifacts,

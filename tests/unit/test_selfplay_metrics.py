@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from graphtask_r1.training.selfplay import _run_with_tee
+from graphtask_r1.training.selfplay import _run_with_tee, _stop
 from graphtask_r1.training.selfplay_metrics import (
     find_trainer_log,
     summarize_selfplay_round,
@@ -34,6 +36,57 @@ def test_run_with_tee_prints_and_persists_output(
     captured = capsys.readouterr()
     assert "visible self-play progress" in captured.out
     assert log_path.read_text() == "visible self-play progress\n"
+
+
+def test_stop_terminates_the_service_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcess:
+        pid = 4321
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: int) -> int:
+            assert timeout == 30
+            return 0
+
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr("graphtask_r1.training.selfplay.os.name", "posix")
+    monkeypatch.setattr(
+        "graphtask_r1.training.selfplay.os.killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    _stop(FakeProcess())  # type: ignore[arg-type]
+
+    assert signals == [(4321, signal.SIGTERM)]
+
+
+def test_stop_kills_service_group_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcess:
+        pid = 4321
+        waits = 0
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: int) -> int:
+            self.waits += 1
+            if self.waits == 1:
+                assert timeout == 30
+                raise subprocess.TimeoutExpired("service", timeout)
+            assert timeout == 10
+            return 0
+
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr("graphtask_r1.training.selfplay.os.name", "posix")
+    monkeypatch.setattr(
+        "graphtask_r1.training.selfplay.os.killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    _stop(FakeProcess())  # type: ignore[arg-type]
+
+    assert signals == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
 
 def test_selfplay_metrics_preserve_role_components_and_render_curves(tmp_path: Path) -> None:

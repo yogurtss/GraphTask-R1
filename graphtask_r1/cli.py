@@ -384,6 +384,21 @@ def build_parser() -> argparse.ArgumentParser:
     selfplay.add_argument("--config", type=Path, required=True)
     selfplay.add_argument("--output-dir", type=Path, required=True)
     selfplay.add_argument("--resume", action="store_true")
+    selfplay.add_argument(
+        "--one-round",
+        action="store_true",
+        help="run only the next unfinished round, then exit the process",
+    )
+    selfplay.add_argument(
+        "--round-index",
+        type=_positive_int,
+        help="run one exact curriculum round (requires --phase)",
+    )
+    selfplay.add_argument(
+        "--phase",
+        choices=["questioner", "solver"],
+        help="run one exact curriculum phase (requires --round-index)",
+    )
     selfplay.add_argument("--dry-run", action="store_true")
 
     evaluate = groups.add_parser("evaluate")
@@ -935,7 +950,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _launch_stage(args.action, args.config, dry_run=args.dry_run)
     elif args.group == "train":
         result = run_self_play(
-            args.config, args.output_dir, resume=args.resume, dry_run=args.dry_run
+            args.config,
+            args.output_dir,
+            resume=args.resume,
+            dry_run=args.dry_run,
+            one_round=args.one_round,
+            target_round=args.round_index,
+            target_phase=args.phase,
         )
     elif args.group == "evaluate" and args.action == "benchmark":
         result = asyncio.run(

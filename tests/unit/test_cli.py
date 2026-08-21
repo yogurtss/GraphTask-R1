@@ -10,6 +10,44 @@ from graphtask_r1.training.relations import load_relation_catalog
 from graphtask_r1.utils import write_json, write_records
 
 
+def test_selfplay_cli_accepts_one_round_mode() -> None:
+    args = build_parser().parse_args(
+        [
+            "train",
+            "self-play",
+            "--config",
+            "selfplay.yaml",
+            "--output-dir",
+            "outputs/selfplay",
+            "--resume",
+            "--one-round",
+        ]
+    )
+
+    assert args.resume is True
+    assert args.one_round is True
+
+
+def test_selfplay_cli_accepts_exact_round_phase() -> None:
+    args = build_parser().parse_args(
+        [
+            "train",
+            "self-play",
+            "--config",
+            "selfplay.yaml",
+            "--output-dir",
+            "outputs/selfplay",
+            "--round-index",
+            "2",
+            "--phase",
+            "solver",
+        ]
+    )
+
+    assert args.round_index == 2
+    assert args.phase == "solver"
+
+
 def test_data_prepare_accepts_positive_worker_count() -> None:
     args = build_parser().parse_args(
         [

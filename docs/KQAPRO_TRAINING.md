@@ -189,6 +189,11 @@ python -m graphtask_r1.cli train self-play \
   --output-dir outputs/selfplay/curriculum-v3
 ```
 
+若要让每个 round 在独立的顶层进程中运行，首轮增加 `--one-round`，之后使用
+`--resume --one-round` 逐轮继续。已完成的 round 由 `manifest.json` 识别，不会重新训练；三轮任务
+需要一次首轮调用和两次恢复调用。此模式适合 GPU `Exclusive Process` 或需要在轮次之间完全释放
+torchrun/NCCL/SGLang 资源的服务器，且各调用不能并发执行。
+
 `curriculum_v3` 将 Questioner 和 Solver adapter 分开，并按 production → grounding → frontier
 逐步增加 reward 难度。详细设计和 smoke 标准见
 [Curriculum v3](SELFPLAY_CURRICULUM_V3.md)。原始基线仍可分别使用
