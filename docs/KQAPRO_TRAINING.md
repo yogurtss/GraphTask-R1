@@ -189,10 +189,44 @@ python -m graphtask_r1.cli train self-play \
   --output-dir outputs/selfplay/curriculum-v3
 ```
 
-若要让每个 round 在独立的顶层进程中运行，首轮增加 `--one-round`，之后使用
-`--resume --one-round` 逐轮继续。已完成的 round 由 `manifest.json` 识别，不会重新训练；三轮任务
-需要一次首轮调用和两次恢复调用。此模式适合 GPU `Exclusive Process` 或需要在轮次之间完全释放
-torchrun/NCCL/SGLang 资源的服务器，且各调用不能并发执行。
+### 推荐：三轮拆成六个独立进程
+
+在 GPU `Exclusive Process`、或 torch distributed 在阶段切换时出现 native pointer/free 错误的
+服务器上，推荐直接运行六阶段脚本：
+
+```bash
+bash scripts/run_selfplay_curriculum_phases.sh \
+  configs/training/selfplay_curriculum_v3.yaml \
+  outputs/selfplay/curriculum-v3
+```
+
+脚本按照以下顺序启动六个彼此独立的顶层 Python 进程：round 1 Questioner、round 1 Solver、
+round 2 Questioner、round 2 Solver、round 3 Questioner、round 3 Solver。不要并发执行这些命令，
+因为它们复用同一个 archive、manifest 和服务端口。
+
+每个成功阶段都会写入 `round_NNN/questioner_update/phase_manifest.json` 或
+`round_NNN/solver_update/phase_manifest.json`。每条命令启动时都会扫描给定的输出目录，并按实际
+checkpoint 和阶段 manifest 判断进度：
+
+- 已完成的阶段自动 no-op，不会重新训练；原脚本可以安全地整体重跑。
+- 只有 Questioner 目录而没有完整 Solver，表示该 round 尚未完成；下一步运行同轮 Solver。
+- Solver checkpoint 已完成但 round manifest 尚未写入时，会把该轮恢复为已完成并进入下一轮。
+- 未完成 checkpoint 不会被误判为成功；只有完整 adapter 和已达到 `max_steps` 的旧 checkpoint
+  才能作为兼容恢复依据。
+
+所以某条命令中断后，可以直接重新执行整个脚本，也可以复制脚本、删除已经成功的行后继续。单独
+补跑阶段的命令格式为：
+
+```bash
+python -m graphtask_r1.cli train self-play \
+  --config configs/training/selfplay_curriculum_v3.yaml \
+  --output-dir outputs/selfplay/curriculum-v3 \
+  --round-index 2 --phase solver
+```
+
+若只需要按 round 隔离而不需要拆分 Questioner/Solver，也可以首轮使用 `--one-round`，之后重复
+`--resume --one-round`。恢复时仍以输出目录中的完整阶段产物为准，而不只依赖顶层
+`manifest.json`。
 
 `curriculum_v3` 将 Questioner 和 Solver adapter 分开，并按 production → grounding → frontier
 逐步增加 reward 难度。详细设计和 smoke 标准见
