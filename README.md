@@ -33,6 +33,21 @@ KQAPro 的下载、转换、SFT 数据环境变量、训练和 self-play 命令�
 
 不同版本可以从同一个 SFT adapter 开始，但应写入不同输出目录。
 
+### 三轮 Self-play 分阶段运行
+
+为避免 torchrun/NCCL 资源跨阶段残留，可把三轮 curriculum self-play 拆成六个独立进程：
+
+```bash
+bash scripts/run_selfplay_curriculum_phases.sh \
+  configs/training/selfplay_curriculum_v3.yaml \
+  outputs/selfplay/curriculum-v3
+```
+
+脚本依次运行每轮的 Questioner 和 Solver。每条命令都会扫描输出目录：已完成阶段自动跳过，
+Questioner 完成后中断可从同轮 Solver 继续，Solver 完成后中断可从下一轮继续。因此可以直接重跑
+整个脚本，也可以删除已经完成的命令后继续。阶段恢复和单命令用法见
+[训练手册的 Self-play 章节](docs/TRAINING.md#5-self-play默认接在-sft-后)。
+
 ## 环境与代码检查
 
 CUDA 12.4 环境见 [ms-swift 安装说明](docs/MS_SWIFT_CUDA_12_4.md)。只做 CPU 开发检查：
