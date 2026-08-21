@@ -43,7 +43,8 @@ bash scripts/run_selfplay_curriculum_phases.sh \
   outputs/selfplay/curriculum-v3
 ```
 
-脚本依次运行每轮的 Questioner 和 Solver。每条命令都会扫描输出目录：已完成阶段自动跳过，
+脚本依次运行每轮的 Questioner 和 Solver。某一阶段返回非零退出码时，脚本会记录错误并继续尝试
+下一条命令，全部六条尝试完毕后再返回失败状态。每条命令都会扫描输出目录：已完成阶段自动跳过，
 Questioner 完成后中断可从同轮 Solver 继续，Solver 完成后中断可从下一轮继续。因此可以直接重跑
 整个脚本，也可以删除已经完成的命令后继续。阶段恢复和单命令用法见
 [训练手册的 Self-play 章节](docs/TRAINING.md#5-self-play默认接在-sft-后)。

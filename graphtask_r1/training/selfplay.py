@@ -487,12 +487,37 @@ def _adapter_from_checkpoint(
     ]
     if not candidates:
         raise RuntimeError(f"ms-swift did not emit a new LoRA adapter under {round_dir}")
-    return max(candidates, key=lambda path: (_checkpoint_step(path), str(path))).parent
+    return max(candidates, key=lambda path: _adapter_checkpoint_order(path.parent)).parent
+
+
+def _adapter_run_version(adapter: Path) -> tuple[int, str]:
+    for parent in adapter.parents:
+        match = re.fullmatch(r"v(\d+)(?:-.+)?", parent.name)
+        if match:
+            return int(match.group(1)), parent.name
+        if parent.name.endswith("_update") or parent.name.startswith("round_"):
+            break
+    return -1, ""
+
+
+def _adapter_checkpoint_order(adapter: Path) -> tuple[int, str, int, int, str]:
+    """Order adapters by run version, checkpoint number, then modification time."""
+
+    weights = adapter / "adapter_model.safetensors"
+    run_version, run_name = _adapter_run_version(adapter)
+    return (
+        run_version,
+        run_name,
+        _checkpoint_step(weights),
+        weights.stat().st_mtime_ns,
+        str(adapter),
+    )
 
 
 def _completed_phase_adapter(phase_dir: Path) -> Path | None:
-    """Return a certified final adapter from a completed or legacy phase run."""
+    """Return the latest certified adapter from a completed or legacy phase run."""
 
+    completed_adapters: dict[Path, Path] = {}
     phase_manifest = phase_dir / "phase_manifest.json"
     if phase_manifest.is_file():
         state = read_json(phase_manifest)
@@ -501,14 +526,9 @@ def _completed_phase_adapter(phase_dir: Path) -> Path | None:
             (adapter / name).is_file()
             for name in ("adapter_config.json", "adapter_model.safetensors")
         ):
-            return adapter
+            completed_adapters[adapter.resolve()] = adapter
 
-    candidates = sorted(
-        phase_dir.rglob("adapter_model.safetensors"),
-        key=lambda path: (_checkpoint_step(path), str(path)),
-        reverse=True,
-    )
-    for weights in candidates:
+    for weights in phase_dir.rglob("adapter_model.safetensors"):
         adapter = weights.parent
         trainer_state_path = adapter / "trainer_state.json"
         if not (adapter / "adapter_config.json").is_file() or not trainer_state_path.is_file():
@@ -517,8 +537,10 @@ def _completed_phase_adapter(phase_dir: Path) -> Path | None:
         global_step = int(trainer_state.get("global_step", -1))
         max_steps = int(trainer_state.get("max_steps", 0))
         if max_steps > 0 and global_step >= max_steps:
-            return adapter
-    return None
+            completed_adapters[adapter.resolve()] = adapter
+    if not completed_adapters:
+        return None
+    return max(completed_adapters.values(), key=_adapter_checkpoint_order)
 
 
 def _write_phase_manifest(

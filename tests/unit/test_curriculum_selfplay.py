@@ -198,6 +198,64 @@ def test_incomplete_phase_checkpoint_is_not_reused(tmp_path: Path) -> None:
     assert _completed_phase_adapter(phase_dir) is None
 
 
+def test_completed_phase_adapter_uses_highest_complete_checkpoint(tmp_path: Path) -> None:
+    phase_dir = tmp_path / "questioner_update"
+    checkpoint_2 = phase_dir / "v0" / "checkpoint-2"
+    checkpoint_4 = phase_dir / "v0" / "checkpoint-4"
+    for checkpoint, step in ((checkpoint_2, 2), (checkpoint_4, 4)):
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "adapter_config.json").write_text("{}")
+        (checkpoint / "adapter_model.safetensors").write_bytes(str(step).encode())
+        write_json(
+            checkpoint / "trainer_state.json",
+            {"global_step": step, "max_steps": step},
+        )
+
+    assert _completed_phase_adapter(phase_dir) == checkpoint_4
+
+
+def test_completed_phase_adapter_uses_latest_run_version_before_checkpoint(
+    tmp_path: Path,
+) -> None:
+    phase_dir = tmp_path / "questioner_update"
+    checkpoint_v0 = phase_dir / "v0" / "checkpoint-8"
+    checkpoint_v1 = phase_dir / "v1" / "checkpoint-4"
+    for checkpoint, step in ((checkpoint_v0, 8), (checkpoint_v1, 4)):
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "adapter_config.json").write_text("{}")
+        (checkpoint / "adapter_model.safetensors").write_bytes(str(step).encode())
+        write_json(
+            checkpoint / "trainer_state.json",
+            {"global_step": step, "max_steps": step},
+        )
+
+    assert _completed_phase_adapter(phase_dir) == checkpoint_v1
+
+
+def test_newer_complete_checkpoint_supersedes_stale_phase_manifest(
+    tmp_path: Path,
+) -> None:
+    phase_dir = tmp_path / "questioner_update"
+    checkpoint_2 = phase_dir / "v0" / "checkpoint-8"
+    checkpoint_2.mkdir(parents=True)
+    (checkpoint_2 / "adapter_config.json").write_text("{}")
+    (checkpoint_2 / "adapter_model.safetensors").write_bytes(b"two")
+    write_json(
+        phase_dir / "phase_manifest.json",
+        {"completed": True, "adapter": str(checkpoint_2)},
+    )
+    checkpoint_4 = phase_dir / "v1" / "checkpoint-4"
+    checkpoint_4.mkdir(parents=True)
+    (checkpoint_4 / "adapter_config.json").write_text("{}")
+    (checkpoint_4 / "adapter_model.safetensors").write_bytes(b"four")
+    write_json(
+        checkpoint_4 / "trainer_state.json",
+        {"global_step": 4, "max_steps": 4},
+    )
+
+    assert _completed_phase_adapter(phase_dir) == checkpoint_4
+
+
 def test_phase_manifest_records_replayable_artifacts(tmp_path: Path) -> None:
     phase_dir = tmp_path / "solver_update"
     adapter = phase_dir / "v0" / "checkpoint-4"

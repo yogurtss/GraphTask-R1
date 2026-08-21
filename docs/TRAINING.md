@@ -233,7 +233,9 @@ manifest、archive 和服务端口。
 `questioner_update/phase_manifest.json` 或 `solver_update/phase_manifest.json`。若进程在 Questioner
 完成后、Solver 完成前退出，恢复时也会识别旧运行的 `trainer_state.json`；只有满足
 `global_step >= max_steps` 且 LoRA 配置和权重都存在的阶段才会复用。这样 `--resume --one-round`
-只补跑缺失的 Solver，不会重新训练已经完成的 Questioner。
+只补跑缺失的 Solver，不会重新训练已经完成的 Questioner。同一阶段存在 `v0`、`v1` 等多个运行
+目录时，先使用版本号最大的目录，再使用其中编号最大的完整 `checkpoint-xxx`；版本号和 checkpoint
+编号都相同时使用更新时间最新的重试产物。
 
 恢复时以输出目录中的连续完整阶段为准，而不只依赖顶层 `manifest.json`。例如，round 1 的
 Questioner 和 Solver 均已完成、但进程在写 round manifest 前退出时，扫描会把 round 1 恢复为已完成
@@ -251,8 +253,10 @@ bash scripts/run_selfplay_curriculum_phases.sh \
 
 脚本内容就是 `round 1..3 × questioner/solver` 六条顺序命令。每条命令都先扫描同一输出目录；完整
 阶段会直接 no-op，Solver 会拒绝越过未完成的同轮 Questioner，后续 round 也会拒绝越过前序
-round。某条命令中断后，可重新执行原脚本，也可以复制脚本并删除已经完成的命令后继续。精确命令
-格式如下：
+round。某条命令返回非零状态时，脚本会记录错误并继续执行下一条，六条全部尝试后才以非零状态
+退出；因此 checkpoint 已落盘但在 distributed/native 清理阶段报错时，不会阻止后续 Solver 或
+下一轮启动。某条命令中断后，可重新执行原脚本，也可以复制脚本并删除已经完成的命令后继续。
+精确命令格式如下：
 
 ```bash
 python -m graphtask_r1.cli train self-play \
