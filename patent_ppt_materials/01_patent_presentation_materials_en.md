@@ -306,7 +306,9 @@ The method transforms open-ended model self-play into a controlled process in wh
 
 ### Recommended architecture figure
 
-Use **figures/fig2_curriculum_v3_architecture_gpt_image_en_v2.png**.
+Use **figures/fig2_dsl_adversarial_coevolution_gpt_image_v2.png**. The editable vector fallback is **figures/fig2_curriculum_v3_architecture_dsl_coevolution.svg**.
+
+The revised GPT Image figure intentionally uses a single left-to-right spine: answer-free context → Questioner-emitted graph DSL task contract → certified execution → conditional Questioner–Solver duel. Small graph, code, certification, archive and update motifs add visual explanation without restoring the crossing arrows or dense lane structure of the earlier draft.
 
 ---
 

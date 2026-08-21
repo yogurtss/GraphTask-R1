@@ -269,6 +269,440 @@ def draw_related_work() -> None:
     plt.close(fig)
 
 
+def draw_curriculum_architecture() -> None:
+    """Draw a DSL-first, left-to-right view of Curriculum v3 co-evolution."""
+    fig, ax = plt.subplots(figsize=(13.333, 7.5))
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    fig.patch.set_facecolor(WHITE)
+
+    ax.text(
+        0.5,
+        0.965,
+        "GraphTask-R1 Curriculum v3: DSL-Centered Adversarial Co-Evolution",
+        ha="center",
+        va="top",
+        fontsize=21,
+        weight="bold",
+        color=NAVY,
+    )
+    ax.text(
+        0.5,
+        0.918,
+        "A Questioner proposes executable challenges; certified execution supplies gold; a Solver attempts and learns from them",
+        ha="center",
+        va="top",
+        fontsize=9.7,
+        color=SLATE,
+    )
+
+    # The curriculum remains visible, but is deliberately subordinate to the
+    # sample-level DSL and learning loop below.
+    ax.text(
+        0.105,
+        0.868,
+        "CURRICULUM\nACROSS ROUNDS",
+        ha="center",
+        fontsize=7.1,
+        weight="bold",
+        color=SLATE,
+        va="center",
+        linespacing=1.05,
+    )
+    stage_specs = [
+        (0.205, "1  PRODUCTION", "question + program"),
+        (0.465, "2  GROUNDING", "typed, executable, aligned"),
+        (0.725, "3  FRONTIER", "conditional semantic difficulty"),
+    ]
+    for left, heading, detail in stage_specs:
+        add_box(
+            ax,
+            (left, 0.838),
+            0.24,
+            0.058,
+            f"{heading}\n{detail}",
+            facecolor=LIGHT_GRAY,
+            edgecolor="#B8C4D1",
+            textcolor=NAVY,
+            fontsize=7.5,
+            linewidth=1.0,
+            radius=0.01,
+            weight="bold",
+        )
+
+    # Column 1: instance-scoped context and the current Questioner.
+    add_box(
+        ax,
+        (0.025, 0.33),
+        0.155,
+        0.45,
+        "",
+        facecolor=LIGHT_BLUE,
+        edgecolor=BLUE,
+        linewidth=1.5,
+        radius=0.014,
+    )
+    ax.text(
+        0.1025,
+        0.745,
+        "QUESTIONER  $Q_t$",
+        ha="center",
+        va="center",
+        fontsize=10.2,
+        weight="bold",
+        color=NAVY,
+    )
+    ax.text(
+        0.1025,
+        0.708,
+        "proposes one challenge",
+        ha="center",
+        va="center",
+        fontsize=8.0,
+        color=BLUE,
+        weight="bold",
+    )
+    ax.plot([0.045, 0.16], [0.681, 0.681], color="#B8CDE0", linewidth=1.0)
+    ax.text(
+        0.047,
+        0.648,
+        "ANSWER-FREE CONTEXT",
+        ha="left",
+        va="center",
+        fontsize=7.8,
+        weight="bold",
+        color=SLATE,
+    )
+    for index, item in enumerate(
+        [
+            "graph snapshot",
+            "relation catalogue",
+            "required seed IDs",
+            "explicit random seed",
+            "bounded budgets",
+        ]
+    ):
+        y = 0.607 - index * 0.047
+        ax.text(0.05, y, "•", fontsize=10, color=BLUE, va="center")
+        ax.text(0.064, y, item, fontsize=7.7, color=NAVY, va="center")
+    ax.text(
+        0.1025,
+        0.361,
+        "instance-scoped • replayable",
+        ha="center",
+        va="center",
+        fontsize=7.0,
+        color=SLATE,
+    )
+
+    # Column 2: hero panel — the actual current DSL envelope.
+    add_box(
+        ax,
+        (0.215, 0.285),
+        0.31,
+        0.535,
+        "",
+        facecolor=WHITE,
+        edgecolor=TEAL,
+        linewidth=2.1,
+        radius=0.016,
+    )
+    ax.text(
+        0.235,
+        0.787,
+        "CURRENT DSL TASK CONTRACT",
+        ha="left",
+        va="center",
+        fontsize=10.5,
+        weight="bold",
+        color=TEAL,
+    )
+    code_text = (
+        '{\n'
+        '  "question": "... ?",\n'
+        '  "program": {\n'
+        '    "ops": [\n'
+        '      {"op":"resolve_entity",\n'
+        '       "query":"SEED_ID", ...},\n'
+        '      {"op":"follow",\n'
+        '       "relation":"CATALOG_ID", ...},\n'
+        '      ...\n'
+        '      {"op":"emit", ...}\n'
+        '    ]\n'
+        '  }\n'
+        '}'
+    )
+    ax.text(
+        0.238,
+        0.744,
+        code_text,
+        ha="left",
+        va="top",
+        family="monospace",
+        fontsize=6.6,
+        color=NAVY,
+        linespacing=1.18,
+    )
+    dsl_rules = ["question + program", "catalog-constrained ops", "executable"]
+    chip_widths = [0.08, 0.105, 0.07]
+    chip_x = 0.232
+    for label, width in zip(dsl_rules, chip_widths, strict=True):
+        add_box(
+            ax,
+            (chip_x, 0.32),
+            width,
+            0.038,
+            label,
+            facecolor=LIGHT_TEAL,
+            edgecolor="#8CC9BF",
+            textcolor=NAVY,
+            fontsize=5.8,
+            linewidth=0.9,
+            radius=0.007,
+            weight="bold",
+        )
+        chip_x += width + 0.008
+    ax.text(
+        0.37,
+        0.295,
+        "No answer field — gold is never proposed by the model",
+        ha="center",
+        va="center",
+        fontsize=6.9,
+        weight="bold",
+        color="#A25522",
+    )
+
+    # Column 3: one certified-execution gate replaces several competing lanes.
+    add_box(
+        ax,
+        (0.56, 0.35),
+        0.17,
+        0.41,
+        "",
+        facecolor=LIGHT_AMBER,
+        edgecolor=AMBER,
+        linewidth=1.7,
+        radius=0.014,
+    )
+    ax.text(
+        0.645,
+        0.724,
+        "CERTIFIED EXECUTION",
+        ha="center",
+        va="center",
+        fontsize=9.4,
+        weight="bold",
+        color=NAVY,
+    )
+    cert_steps = [
+        ("1", "Parse + type/schema", "valid operators and fields"),
+        ("2", "Bounded executor", "budgets + step trace"),
+        ("3", "Execution-derived gold", "non-empty + aligned"),
+    ]
+    for index, (number, heading, detail) in enumerate(cert_steps):
+        y = 0.644 - index * 0.092
+        ax.text(
+            0.584,
+            y,
+            number,
+            ha="center",
+            va="center",
+            fontsize=7.2,
+            weight="bold",
+            color=WHITE,
+            bbox={
+                "boxstyle": "circle,pad=0.28",
+                "facecolor": AMBER,
+                "edgecolor": AMBER,
+                "linewidth": 0.8,
+            },
+        )
+        ax.text(0.605, y + 0.012, heading, fontsize=7.5, weight="bold", color=NAVY, va="center")
+        ax.text(0.605, y - 0.018, detail, fontsize=6.5, color=SLATE, va="center")
+    ax.plot([0.58, 0.71], [0.407, 0.407], color="#E5C17F", linewidth=1.0)
+    ax.text(
+        0.645,
+        0.381,
+        "certificate + trace",
+        ha="center",
+        fontsize=7.0,
+        weight="bold",
+        color=NAVY,
+    )
+    ax.text(
+        0.645,
+        0.356,
+        "structured rejection or deterministic admission",
+        ha="center",
+        fontsize=5.9,
+        color=SLATE,
+    )
+
+    # Column 4: both adversarial pressure and cooperative updates live together.
+    add_box(
+        ax,
+        (0.765, 0.285),
+        0.21,
+        0.535,
+        "",
+        facecolor=LIGHT_GRAY,
+        edgecolor=NAVY,
+        linewidth=1.8,
+        radius=0.016,
+    )
+    ax.text(
+        0.87,
+        0.787,
+        "ADVERSARIAL CO-EVOLUTION",
+        ha="center",
+        va="center",
+        fontsize=9.8,
+        weight="bold",
+        color=NAVY,
+    )
+    add_box(
+        ax,
+        (0.787, 0.674),
+        0.166,
+        0.074,
+        "Frozen Solver  $S_t$\nattempts the question",
+        facecolor=WHITE,
+        edgecolor=BLUE,
+        textcolor=NAVY,
+        fontsize=7.5,
+        linewidth=1.2,
+        radius=0.01,
+        weight="bold",
+    )
+    ax.text(
+        0.87,
+        0.645,
+        "cannot see the Questioner's program or gold",
+        ha="center",
+        fontsize=6.2,
+        color=SLATE,
+    )
+    add_box(
+        ax,
+        (0.787, 0.535),
+        0.166,
+        0.078,
+        "CONDITIONAL DUEL\nsemantic success | Solver executes",
+        facecolor=LIGHT_AMBER,
+        edgecolor=AMBER,
+        textcolor=NAVY,
+        fontsize=7.0,
+        linewidth=1.1,
+        radius=0.01,
+        weight="bold",
+    )
+    add_arrow(ax, (0.87, 0.668), (0.87, 0.62), color=SLATE, linewidth=1.2)
+    ax.text(
+        0.87,
+        0.504,
+        "role-separated updates",
+        ha="center",
+        fontsize=6.8,
+        color=SLATE,
+        weight="bold",
+    )
+    add_box(
+        ax,
+        (0.783, 0.405),
+        0.08,
+        0.084,
+        "Questioner\n$Q_{t+1}$\nstaged reward",
+        facecolor=LIGHT_BLUE,
+        edgecolor=BLUE,
+        textcolor=NAVY,
+        fontsize=6.5,
+        linewidth=1.1,
+        radius=0.009,
+        weight="bold",
+    )
+    add_box(
+        ax,
+        (0.877, 0.405),
+        0.08,
+        0.084,
+        "Solver\n$S_{t+1}$\nadmitted tasks",
+        facecolor=LIGHT_TEAL,
+        edgecolor=TEAL,
+        textcolor=NAVY,
+        fontsize=6.5,
+        linewidth=1.1,
+        radius=0.009,
+        weight="bold",
+    )
+    add_arrow(ax, (0.85, 0.53), (0.823, 0.496), color=BLUE, linewidth=1.1)
+    add_arrow(ax, (0.89, 0.53), (0.917, 0.496), color=TEAL, linewidth=1.1)
+    ax.text(
+        0.87,
+        0.363,
+        "same round: admit → rebuild Solver data → update",
+        ha="center",
+        fontsize=6.0,
+        color=SLATE,
+    )
+    ax.text(
+        0.87,
+        0.326,
+        "controlled task archive\n+ replayable round state",
+        ha="center",
+        fontsize=6.1,
+        weight="bold",
+        color=NAVY,
+        linespacing=1.05,
+    )
+
+    # One clean left-to-right spine.
+    add_arrow(ax, (0.183, 0.555), (0.211, 0.555), color=NAVY, linewidth=1.8)
+    add_arrow(ax, (0.528, 0.555), (0.556, 0.555), color=NAVY, linewidth=1.8)
+    add_arrow(ax, (0.733, 0.555), (0.761, 0.555), color=NAVY, linewidth=1.8)
+    ax.text(0.197, 0.575, "emits", ha="center", fontsize=6.2, color=SLATE)
+    ax.text(0.542, 0.575, "execute", ha="center", fontsize=6.2, color=SLATE)
+    ax.text(0.747, 0.575, "challenge", ha="center", fontsize=6.2, color=SLATE)
+
+    # A single non-crossing feedback path explains the next-round co-evolution.
+    ax.plot(
+        [0.92, 0.92, 0.1025, 0.1025],
+        [0.278, 0.225, 0.225, 0.315],
+        color=NAVY,
+        linewidth=1.55,
+        solid_capstyle="round",
+    )
+    add_arrow(ax, (0.1025, 0.315), (0.1025, 0.326), color=NAVY, linewidth=1.55)
+    add_box(
+        ax,
+        (0.285, 0.19),
+        0.47,
+        0.055,
+        "NEXT ROUND: a stronger Solver raises the frontier • a stronger Questioner proposes harder certified tasks",
+        facecolor=WHITE,
+        edgecolor=NAVY,
+        textcolor=NAVY,
+        fontsize=7.3,
+        linewidth=1.1,
+        radius=0.01,
+        weight="bold",
+    )
+    ax.text(
+        0.5,
+        0.115,
+        "Outputs: verified graph-QA model  •  execution-derived task certificates and traces  •  controlled training-task archive",
+        ha="center",
+        va="center",
+        fontsize=8.6,
+        color=NAVY,
+        weight="bold",
+    )
+
+    save_bundle(fig, "fig2_curriculum_v3_architecture_dsl_coevolution")
+    plt.close(fig)
+
+
 def draw_patent_flow() -> None:
     fig, ax = plt.subplots(figsize=(13.333, 7.5))
     ax.set_xlim(0, 1)
@@ -364,4 +798,5 @@ def draw_patent_flow() -> None:
 
 if __name__ == "__main__":
     draw_related_work()
+    draw_curriculum_architecture()
     draw_patent_flow()

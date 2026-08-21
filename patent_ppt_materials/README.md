@@ -13,7 +13,7 @@ This directory contains English-language source material for preparing a patent-
    - Industrial Applicability;
    - Detectability and protection strategy.
 2. **figures/fig1_related_work_comparison.png** — prompt-based, tool-based, and executable-interface comparison.
-3. **figures/fig2_curriculum_v3_architecture_gpt_image_en_v2.png** — corrected English GPT Image architecture diagram for Curriculum v3.
+3. **figures/fig2_dsl_adversarial_coevolution_gpt_image_v2.png** — recommended GPT Image architecture diagram with a balanced mix of concise technical labels and restrained visual detail.
 4. **figures/fig3_patent_method_flow.png** — black-and-white claim-aligned method-flow draft.
 5. **02_technical_evidence_and_confirmations_en.md** — evidence ledger and inventor-confirmation questions.
 6. **03_related_work_and_search_notes_en.md** — related-work and search starting points.
@@ -21,8 +21,8 @@ This directory contains English-language source material for preparing a patent-
 ## Figure notes
 
 - Figures 1 and 3 are generated deterministically with Python/Matplotlib and are available as SVG/PDF plus PNG/TIFF.
-- Figure 2 was generated with GPT Image for a white 16:9 slide and should be manually checked before external use.
-- Earlier Chinese and first-pass English architecture images are retained only as references; the corrected English v2 image is the recommended asset.
+- The recommended Figure 2 was generated with GPT Image for a white 16:9 slide and should be manually checked before external use. The editable SVG/PDF version remains available as a structural fallback.
+- Earlier lane-heavy AI architecture images are retained only as references.
 - Figure labels and method order must be aligned with final claim terminology before filing.
 
 ## Recommended title

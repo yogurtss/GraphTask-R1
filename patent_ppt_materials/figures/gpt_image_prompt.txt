@@ -3,63 +3,53 @@ Asset type: rigorous English patent-PPT system architecture diagram, landscape 1
 Reference role: use the earlier architecture image only as a structural reference; recreate all labels in English.
 
 Title:
-“GraphTask-R1 Curriculum v3: Certified Executable-Graph Self-Evolution”
+“GraphTask-R1 Curriculum v3: DSL-Centered Adversarial Co-Evolution”
 
 Subtitle:
-“Questioner generation → execution certification and deterministic admission → same-round Solver learning → next-round co-evolution”
+“A Questioner proposes executable challenges; certified execution supplies gold; a Solver attempts and learns from them”
 
 Style:
 Clean white canvas, high-end academic and patent presentation, flat vector-like blocks, orthogonal arrows, consistent thin strokes, restrained navy/slate/muted-teal palette, amber only for validation gates. No 3D, gradients, shadows, decorative background, people, robots, brains, clouds, logos, watermarks, or performance claims.
 
 Composition:
-A 16:9 left-to-right system architecture with a top curriculum band, left input panel, three horizontal center lanes, right round-state panel, bottom output bar, and one feedback arrow to the next round. Keep all labels fully visible and minimize arrow crossings.
+A 16:9 left-to-right architecture with exactly four visual stations and one main horizontal arrow spine:
+1. Answer-free context and Questioner Q_t.
+2. A dominant executable graph DSL task-contract panel.
+3. One certified-execution gate.
+4. One adversarial co-evolution panel containing the frozen Solver duel and the two role-specific updates.
+Use only one non-crossing feedback path along the bottom for the next round. Do not use multiple horizontal lanes or a separate round-state sidebar.
 
 Top band: “STAGED CURRICULUM”
 1. “Stage 1 — Production: question + program format”
-2. “Stage 2 — Grounding: entities, relations, handles, execution”
+2. “Stage 2 — Grounding: entities, relations, execution”
 3. “Stage 3 — Frontier: conditional semantic difficulty”
 
-Left panel: “INSTANCE-SCOPED INPUTS & CONSTRAINTS”
-- Graph snapshot
-- Relation catalogue
-- Seed entities
-- Base tasks
-- Explicit random seed
-Footer: “Replayable state • JSON-serializable”
+Station 1: “QUESTIONER Q_t”
+- proposes one challenge from answer-free, instance-scoped context
+- graph snapshot, relation catalogue, required seed IDs, explicit random seed, bounded budgets
 
-Upper lane: “QUESTIONER PATH”
-Separate Questioner adapter
-→ One-shot {question, GraphScript v0.3}
-→ Parse + type/schema validation
-  ≤64 operations • SSA handles • relation whitelist
-→ Bounded graph executor
-  edge-visit budget • return budget • step trace
-→ Task certification
-  execution-derived gold • alignment • no answer leakage
-→ Candidate task buffer
+Station 2: “CURRENT DSL TASK CONTRACT — executable graph program”
+Show this exact outer shape prominently:
+{"question":"...?","program":{"ops":[...]}}
+Show a short operation chain using resolve_entity → follow → … → emit.
+Add four compact constraints: question + program • typed and bounded • catalogue-constrained • executable.
+Add: “No answer field — gold is never proposed by the model”.
 
-Middle lane: “EVALUATION & REWARD FEEDBACK”
-Frozen Solver evaluation
-→ Interface readiness = parse rate × execution rate given parse
-→ Semantic success measured only on executable samples
-→ Staged dense reward for Questioner
-Gate label:
-“Effective frontier weight = configured weight × interface readiness”
+Station 3: “CERTIFIED EXECUTION”
+1. Parse + type/schema
+2. Bounded executor with budgets and step trace
+3. Execution-derived gold with non-empty/alignment checks
+Footer: “certificate + trace • structured rejection or deterministic admission”
 
-Lower lane: “ARCHIVE & SOLVER PATH”
-Candidate task buffer
-→ Deterministic admission
-  difficulty window • structural novelty • textual novelty • structured rejection reason
-→ Persistent task archive
-→ Rebuild Solver dataset in the same round
-  base + historical + newly admitted tasks
-  easy-to-hard curriculum + easy replay
-→ Separate Solver adapter — GRPO update
+Station 4: “ADVERSARIAL CO-EVOLUTION”
+- Frozen Solver S_t attempts the natural-language question without seeing the Questioner program or gold.
+- Conditional duel: semantic success is measured only when the Solver program executes.
+- Separate Questioner Q_{t+1}: staged reward.
+- Separate Solver S_{t+1}: same-round admitted tasks.
+- Controlled task archive and replayable round state.
 
-Right panel: “ROUND STATE”
-- Updated Questioner adapter
-- Updated Solver adapter
-Feedback arrow: “NEXT ROUND”
+Bottom feedback:
+“NEXT ROUND: a stronger Solver raises the frontier • a stronger Questioner proposes harder certified tasks”
 
 Bottom bar:
 “OUTPUTS: verified graph-QA model • replayable task certificates and execution traces • controlled training-task archive”
@@ -67,7 +57,7 @@ Bottom bar:
 Typography:
 Highly legible English sans-serif with consistent title, group-header, block-label, and note hierarchy. Use no Chinese characters. Do not add or omit functional modules. Ensure all arrow directions are technically correct.
 
-Flow correction for the recommended v2 image:
+Flow invariants:
 - Certified candidate tasks feed frozen-Solver evaluation and deterministic admission.
 - The candidate-task buffer does not directly update the Questioner adapter.
 - Staged reward feedback is the direct update source for the updated Questioner adapter.

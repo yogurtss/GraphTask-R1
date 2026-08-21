@@ -10,11 +10,13 @@
 
 ## Fig. 2 — Curriculum v3 architecture
 
-- Core conclusion: Questioner generation, certified execution, deterministic admission and same-round Solver learning form a replayable closed loop with separate adapters.
+- Core conclusion: the current graph DSL is the executable interface through which the Questioner challenges the Solver, while certified tasks and conditional opponent feedback improve both role-specific adapters across rounds.
 - Archetype: schematic-led architecture.
-- Output: GPT Image PNG for a white 16:9 slide.
+- Hero evidence: the `{"question": ..., "program": {"ops": [...]}}` structure, catalogue-constrained executable graph operations, and execution-derived gold.
+- Supporting evidence: certified execution, conditional Solver evaluation, deterministic admission, same-round Solver learning, and separate next-round role states.
+- Output: white 16:9 slide; editable SVG/PDF plus 300 dpi PNG and 600 dpi TIFF.
 - Evidence: current project implementation and production configuration.
-- Reviewer risk: AI-rendered labels must be checked against the accompanying text before external use.
+- Reviewer risk: the diagram describes the implemented learning contract and direction of updates; it does not claim empirical superiority or guaranteed monotonic improvement.
 
 ## Fig. 3 — Patent method flow
 

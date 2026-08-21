@@ -1,0 +1,21 @@
+Use case: infographic-diagram edit
+Asset type: polished scientific paper / patent-presentation architecture figure, 16:9 landscape
+Input image: the first DSL-centered GPT Image figure is the edit target.
+
+Primary request:
+Revise the diagram so illustrations and icons occupy less area and the content feels slightly richer through concise technical words and short phrases. Preserve the same four-stage left-to-right architecture, palette, title and single NEXT ROUND return loop. Keep the result elegant and scan-friendly, not dense.
+
+Layout changes:
+Reduce the Questioner avatar, DSL code-window icon, certification shield and role avatars by roughly 25–35%. Use the recovered space for compact text cards or short annotations. Keep large station headings and generous margins. Maintain one clean horizontal arrow spine and no crossing arrows.
+
+Required content:
+1. QUESTIONER: keep "Answer-free graph context" and add "Graph snapshot", "Relation catalogue", "Seed entities" and "Explicit seed" beside small restrained input icons.
+2. DSL TASK: keep the exact code envelope {"question":"...?","program":{"ops":[...]}} and operation chain resolve_entity → follow → … → emit. Add "Question + executable program", "Catalog-constrained operations" and "No answer field".
+3. CERTIFIED EXECUTION: keep "Parse & validate", "Bounded execute" and "Execution-derived gold". Add "Schema-valid", "Budget-compliant" and "Gold = Execute(program)" as small secondary annotations aligned to those steps.
+4. ADVERSARIAL CO-EVOLUTION: keep "Questioner Q_t", "Solver S_t", "Conditional semantic challenge", "Q_{t+1}", "S_{t+1}" and "Certified task archive". Add "Solver sees question only", "Staged challenge reward", "Same-round learning" and "Separate role updates" in a tidy hierarchy.
+
+Style:
+Refined vector-like scientific infographic, warm-white background, deep navy and muted blue/teal with amber only for certification, thin strokes, compact rounded cards, subtle soft shadow and crisp modern sans-serif typography.
+
+Constraints:
+Render the specified phrases exactly and add no other prose. No DSL version number, SSA handle notation, operation-count badge, dense paragraph, crossing arrow, new process station, performance claim, logo or watermark. Gold must originate from certified execution, never from the Questioner. Change only icon-to-text balance and compact annotations; preserve the scientific meaning and overall visual identity.
