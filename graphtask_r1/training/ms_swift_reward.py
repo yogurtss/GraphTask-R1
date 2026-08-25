@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, cast
 
-from graphtask_r1.dsl import program_cost
+from graphtask_r1.dsl import canonical_signature, program_cost
 from graphtask_r1.evaluation import answer_metrics
 from graphtask_r1.generation import validate_proposal, verbalize
 from graphtask_r1.graph import backend_from_snapshot
@@ -33,7 +33,7 @@ from graphtask_r1.rewards.curriculum import (
     questioner_curriculum_reward,
     solver_curriculum_reward,
 )
-from graphtask_r1.schema import AnswerSet, TaskProposal
+from graphtask_r1.schema import AnswerSet, TaskProposal, parse_program
 from graphtask_r1.training.opponent import request_opponent
 from graphtask_r1.training.parsing import (
     decode_questioner_graphscript_output,
@@ -72,6 +72,55 @@ _QUESTION_STOPWORDS = frozenset(
 
 def _fraction(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
+
+
+_GRAPHSCRIPT_TO_PROGRAM_OPERATOR = {
+    "resolve_entity": "entity",
+    "all_entities": "all_entities",
+    "follow": "hop",
+    "intersect": "intersect",
+    "union": "union",
+    "filter_type": "filter_type",
+    "filter_literal": "filter_literal",
+    "filter_qualifier": "filter_qualifier",
+    "count": "count",
+    "query_attribute": "query_attribute",
+    "query_attribute_under_condition": "query_attribute_under_condition",
+    "query_attribute_qualifier": "query_attribute_qualifier",
+    "query_relation": "query_relation",
+    "query_relation_qualifier": "query_relation_qualifier",
+    "verify": "verify",
+    "select_between": "select_between",
+    "select_among": "select_among",
+}
+
+
+def _set_f1(predicted: set[str], reference: set[str]) -> float:
+    if not predicted and not reference:
+        return 1.0
+    overlap = len(predicted.intersection(reference))
+    precision = _fraction(overlap, len(predicted))
+    recall = _fraction(overlap, len(reference))
+    return 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+
+
+def _graphscript_structure_f1(script: object, info: dict[str, Any]) -> float:
+    """Compare generated operators with the hidden certified program structure."""
+
+    raw_reference = info.get("reference_operator_tags")
+    if raw_reference is None:
+        return 1.0
+    if not isinstance(raw_reference, list):
+        return 0.0
+    reference = {str(value) for value in raw_reference}
+    raw_ops = getattr(script, "ops", ())
+    predicted = {
+        mapped
+        for operation in raw_ops
+        if (mapped := _GRAPHSCRIPT_TO_PROGRAM_OPERATOR.get(str(operation.op)))
+        is not None
+    }
+    return _set_f1(predicted, reference)
 
 
 def _question_alignment(generated: str, canonical: str) -> tuple[float, float, float]:
@@ -232,6 +281,7 @@ def _questioner_milestones(values: dict[str, float]) -> QuestionerMilestones:
         answer_nonempty=values.get("answer_nonempty", 0.0),
         cardinality_valid=values.get("cardinality_valid", 0.0),
         question_program_alignment=values.get("question_program_alignment", 0.0),
+        target_structure_alignment=values.get("target_structure_alignment", 1.0),
         no_answer_leak=values.get("no_answer_leak", 0.0),
         certified=values.get("certified", 0.0),
     )
@@ -390,12 +440,36 @@ async def _compute_curriculum_questioner_score(
             frontier_sigma=frontier_sigma,
             rejection_reasons=("PROPOSAL_ROOT_MISMATCH",),
         )
+    except (KeyError, RuntimeError, TypeError):
+        # A generated program can pass the bounded GraphScript interpreter while
+        # still exercising a shape that the certification backend rejects. One
+        # bad rollout must be a scored rejection, not abort the whole GRPO job.
+        return _curriculum_questioner_result(
+            values,
+            stage=stage,
+            role_weight=role_weight,
+            frontier_target=frontier_target,
+            frontier_sigma=frontier_sigma,
+            rejection_reasons=("CERTIFIED_EXECUTION_ERROR",),
+        )
+    source_stratum = str(info.get("source_stratum") or "")
+    structure_alignment = (
+        target_structure_alignment(
+            source_stratum,
+            program=execution.program,
+            root_count=len(topic_ids),
+            answers=execution.answers,
+        )
+        if source_stratum
+        else {"target_alignment": 1.0}
+    )
     values.update(
         {
             "seed_coverage": 1.0,
             "executable_prefix_fraction": 1.0,
             "program_executable": 1.0,
             "answer_nonempty": float(bool(execution.answers.answers)),
+            "target_structure_alignment": structure_alignment["target_alignment"],
         }
     )
     extra_components.update(
@@ -404,6 +478,7 @@ async def _compute_curriculum_questioner_score(
             "graph_calls": float(execution.usage.graph_calls),
             "program_operators": float(execution.usage.operators),
             "passage_searches": float(execution.usage.passage_searches),
+            **structure_alignment,
         }
     )
     if question is None:
@@ -438,8 +513,7 @@ async def _compute_curriculum_questioner_score(
     )
     rejection_reasons = result.rejection_reasons
     eligible_for_opponent = (
-        stage != "production"
-        and result.executable
+        result.executable
         and result.answer_nonempty
         and result.cardinality_valid
         and not result.answer_leak
@@ -456,7 +530,7 @@ async def _compute_curriculum_questioner_score(
     if eligible_for_opponent:
         opponent_url = str(info.get("opponent_url") or "")
         if not opponent_url:
-            raise RuntimeError("Questioner grounding/frontier reward requires opponent_url")
+            raise RuntimeError("certified Questioner reward requires opponent_url")
         evaluation = await request_opponent(
             opponent_url,
             proposal=proposal,
@@ -474,6 +548,7 @@ async def _compute_curriculum_questioner_score(
                 _GROUNDING_ALLOWED_REJECTIONS if stage == "grounding" else frozenset()
             ),
             recover_invalid_tool_calls=True,
+            target_alignment_components=structure_alignment,
         )
         opponent = OpponentSignals(
             parse_rate=float(evaluation["program_parse_rate"]),
@@ -595,14 +670,28 @@ async def _compute_curriculum_tool_questioner_score(
             frontier_sigma=frontier_sigma,
             rejection_reasons=("EXECUTION_ERROR",),
         )
+    source_stratum = str(info.get("source_stratum") or "")
+    structure_alignment = (
+        target_structure_alignment(
+            source_stratum,
+            program=proposal.program,
+            root_count=len(proposal.topic_entities),
+            answers=answers,
+        )
+        if source_stratum
+        else {"target_alignment": 1.0}
+    )
     values.update(
         {
             "executable_prefix_fraction": 1.0,
             "program_executable": 1.0,
             "answer_nonempty": float(bool(answers.answers)),
+            "target_structure_alignment": structure_alignment["target_alignment"],
         }
     )
-    extra_components["program_cost"] = program_cost(proposal.program)
+    extra_components.update(
+        {"program_cost": program_cost(proposal.program), **structure_alignment}
+    )
     question = proposal.paraphrase.strip() if proposal.paraphrase is not None else None
     if not question:
         return _curriculum_questioner_result(
@@ -635,8 +724,7 @@ async def _compute_curriculum_tool_questioner_score(
         }
     )
     eligible_for_opponent = (
-        stage != "production"
-        and result.executable
+        result.executable
         and result.answer_nonempty
         and result.cardinality_valid
         and not result.answer_leak
@@ -653,7 +741,7 @@ async def _compute_curriculum_tool_questioner_score(
     if eligible_for_opponent:
         opponent_url = str(info.get("opponent_url") or "")
         if not opponent_url:
-            raise RuntimeError("Questioner grounding/frontier reward requires opponent_url")
+            raise RuntimeError("certified Questioner reward requires opponent_url")
         allowed_relations = tuple(str(value) for value in info.get("allowed_relations", []))
         evaluation = await request_opponent(
             opponent_url,
@@ -672,6 +760,7 @@ async def _compute_curriculum_tool_questioner_score(
                 _GROUNDING_ALLOWED_REJECTIONS if stage == "grounding" else frozenset()
             ),
             recover_invalid_tool_calls=True,
+            target_alignment_components=structure_alignment,
         )
         opponent = OpponentSignals(
             parse_rate=float(evaluation["program_parse_rate"]),
@@ -729,6 +818,8 @@ def _solver_milestones(values: dict[str, float]) -> SolverMilestones:
         budget_compliance=values.get("budget_compliance", 0.0),
         answer_present=values.get("answer_present", 0.0),
         answer_parse_valid=values.get("answer_parse_valid", 0.0),
+        program_structure_f1=values.get("program_structure_f1", 1.0),
+        program_exact_match=values.get("program_exact_match", 1.0),
         answer_f1=values.get("answer_f1", 0.0),
         exact_match=values.get("exact_match", 0.0),
     )
@@ -771,7 +862,13 @@ def _compute_curriculum_graphscript_solver_score(
     if raw_version not in {"0.1", "0.2", "0.3"}:
         raise ValueError(f"unsupported GraphScript version: {raw_version}")
     graphscript_version = cast(GraphScriptVersion, raw_version)
-    values = {"output_present": float(bool(solution_str.strip()))}
+    raw_reference_json = info.get("reference_program_json")
+    has_reference_program = isinstance(raw_reference_json, str)
+    values = {
+        "output_present": float(bool(solution_str.strip())),
+        "program_structure_f1": 0.0 if has_reference_program else 1.0,
+        "program_exact_match": 0.0 if has_reference_program else 1.0,
+    }
     extra_components: dict[str, float] = {}
     try:
         raw_program: object = json.loads(solution_str)
@@ -828,6 +925,7 @@ def _compute_curriculum_graphscript_solver_score(
             "valid_prefix_fraction": 1.0,
             "tool_call_attempted": 1.0,
             "valid_tool_call_fraction": 1.0,
+            "program_structure_f1": _graphscript_structure_f1(script, info),
         }
     )
     backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
@@ -853,6 +951,16 @@ def _compute_curriculum_graphscript_solver_score(
             rejection_reason=exc.reason_code,
         )
     metrics = answer_metrics(execution.answers, gold)
+    raw_reference_program = (
+        json.loads(raw_reference_json) if isinstance(raw_reference_json, str) else None
+    )
+    program_exact_match = 1.0
+    if isinstance(raw_reference_program, dict):
+        reference_program = parse_program(raw_reference_program)
+        program_exact_match = float(
+            canonical_signature(execution.program)
+            == canonical_signature(reference_program)
+        )
     values.update(
         {
             "successful_tool_call_fraction": 1.0,
@@ -861,6 +969,7 @@ def _compute_curriculum_graphscript_solver_score(
             "budget_compliance": 1.0,
             "answer_present": float(bool(execution.answers.answers)),
             "answer_parse_valid": 1.0,
+            "program_exact_match": program_exact_match,
             "answer_f1": float(metrics["f1"]),
             "exact_match": float(metrics["exact_match"]),
         }

@@ -1,41 +1,48 @@
-# Independent co-evolution experiment. legacy and frontier_v2 remain unchanged.
+# Default 4B KQAPro closed-loop run after an approximately 10k-row, 1:1
+# Solver/Questioner SFT. Run and promote one round at a time on a fixed held-out set.
 model_path: Qwen/Qwen3-4B-Instruct-2507
 model_type: qwen3
+response_prefix: '<think>\n\n</think>\n\n'
 initial_adapter: ${INITIAL_ADAPTER}
 base_tasks: ${BASE_TASKS}
-val_data: ${VAL_DATA}
 questioner_seeds: ${QUESTIONER_SEEDS}
 graph_snapshot: kqapro-v1
 selfplay_variant: curriculum_v3
 rounds: 3
-questioner_episodes: 192
-solver_episodes: 320
+questioner_episodes: 1024
+solver_episodes: 2048
 questioner_reward_weight: 1.0
 solver_reward_weight: 1.0
-opponent_samples: 8
+opponent_samples: 4
 
-# Round 1 learns the question+program contract, round 2 grounding/execution,
-# and round 3 conditional semantic frontier difficulty.
-curriculum_production_rounds: 1
-curriculum_grounding_rounds: 1
-curriculum_solver_fraction_start: 0.40
+# SFT establishes the syntax and grounding contract. All self-play rounds target
+# semantic frontier tasks, while replay preserves the certified base behavior.
+curriculum_production_rounds: 0
+curriculum_grounding_rounds: 0
+curriculum_solver_fraction_start: 1.0
 curriculum_replay_ratio: 0.30
-curriculum_question_alignment_min: 0.35
-frontier_target_start: 0.80
+curriculum_question_alignment_min: 0.40
+curriculum_max_seed_entities_start: 4
+curriculum_max_seed_entities_end: 4
+curriculum_min_archive_growth: 128
+frontier_target_start: 0.50
 frontier_target_end: 0.50
 frontier_sigma: 0.20
 
-# Only the frontier round uses these archive thresholds. Production does not admit
-# generated tasks; grounding keeps locally certified tasks without a difficulty gate.
-archive_min_pass_rate: 0.20
+# With four opponent samples, these bounds retain pass rates 0.25, 0.50, and 0.75.
+archive_min_pass_rate: 0.15
 archive_max_pass_rate: 0.85
-archive_min_novelty: 0.15
-base_ratio: 0.40
-archive_ratio: 0.25
-new_ratio: 0.35
+archive_min_novelty: 0.20
+archive_min_target_alignment: 0.65
+base_ratio: 0.65
+archive_ratio: 0.10
+new_ratio: 0.25
 seed: 42
 actor_gpus: "0,1,2"
 opponent_gpus: "3"
+allow_gpu_overlap: false
+use_vllm: true
+opponent_backend: sglang
 sglang_port: 30000
 opponent_port: 18080
 train_script: scripts/train_ms_swift_grpo.sh
@@ -48,18 +55,21 @@ relation_catalogs:
 max_follow_limit: 100
 max_edge_visits: 200
 max_returned_entities: 1000
-max_completion_tokens: 4096
-vllm_max_model_len: 32768
+max_completion_tokens: 768
+vllm_max_model_len: 16384
 vllm_gpu_memory_utilization: 0.6
 vllm_sleep_level: 1
 deepspeed: zero2
-rl_algorithm: reinforce_plus_plus
-micro_batch_size: 4
+rl_algorithm: grpo
+kl_beta: 0.002
+learning_rate: 7.0e-7
+micro_batch_size: 1
 eval_batch_size: 4
-validation_samples: 256
-gradient_accumulation_steps: 2
+validation_samples: null
+enable_grpo_validation: false
+gradient_accumulation_steps: 4
 steps_per_generation: 4
 rollout_n: 4
-save_steps: 20
-save_total_limit: 2
+save_steps: 64
+save_total_limit: 4
 program_profile: graphscript_v0_3

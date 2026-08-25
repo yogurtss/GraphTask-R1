@@ -79,6 +79,31 @@ def test_questioner_grounding_does_not_require_certification_for_credit() -> Non
     assert reward.components["curriculum_total"] == reward.total
 
 
+def test_questioner_grounding_keeps_dense_credit_but_gates_non_executable_code() -> None:
+    grounded = _grounded_questioner()
+    invalid = QuestionerMilestones(
+        **{**grounded.__dict__, "program_executable": 0.0}
+    )
+
+    reward = questioner_curriculum_reward(invalid, stage="grounding")
+
+    assert 0.0 < reward.total < 0.25
+    assert reward.components["execution_gate"] == 0.2
+    assert reward.components["gated_grounding_total"] == reward.total
+
+
+def test_questioner_grounding_rewards_hidden_target_structure_alignment() -> None:
+    aligned = _grounded_questioner()
+    mismatched = replace(aligned, target_structure_alignment=0.0)
+
+    aligned_reward = questioner_curriculum_reward(aligned, stage="grounding")
+    mismatched_reward = questioner_curriculum_reward(mismatched, stage="grounding")
+
+    assert aligned_reward.total > mismatched_reward.total
+    assert aligned_reward.components["milestone_target_structure_alignment"] == 1.0
+    assert mismatched_reward.components["milestone_target_structure_alignment"] == 0.0
+
+
 def test_questioner_frontier_ignores_semantic_outcome_until_interface_is_ready() -> None:
     milestones = _grounded_questioner()
     failed_semantics = questioner_curriculum_reward(
@@ -195,6 +220,8 @@ def test_solver_tool_reward_uses_call_success_before_answer_success() -> None:
     assert useful_calls.total > invalid_calls.total
     assert useful_calls.components["tool_contribution"] > 0.0
     assert useful_calls.components["solve_contribution"] == 0.0
+    assert invalid_calls.total < 0.25
+    assert useful_calls.total > 0.5
 
 
 def test_solver_solve_reward_is_dense_in_f1_and_exact_match() -> None:
@@ -218,9 +245,37 @@ def test_solver_solve_reward_is_dense_in_f1_and_exact_match() -> None:
     )
 
     assert wrong.total < partial.total < exact.total == pytest.approx(1.0)
+    assert wrong.total == pytest.approx(0.25)
+    assert wrong.components["semantic_gate"] == pytest.approx(0.2)
+    assert partial.components["semantic_gate"] == pytest.approx(0.6)
     assert partial.components["milestone_answer_f1"] == 0.5
     assert partial.components["solve_contribution"] > 0.0
     assert partial.components["curriculum_total"] == partial.total
+
+
+def test_solver_solve_reward_uses_certified_program_as_dense_signal() -> None:
+    ready = replace(
+        _syntax_ready_solver(),
+        tool_call_attempted=1.0,
+        valid_tool_call_fraction=1.0,
+        successful_tool_call_fraction=1.0,
+        evidence_progress=1.0,
+        execution_progress=1.0,
+        budget_compliance=1.0,
+        answer_present=1.0,
+        answer_parse_valid=1.0,
+        program_structure_f1=0.0,
+        program_exact_match=0.0,
+    )
+
+    wrong_structure = solver_curriculum_reward(ready, stage="solve")
+    matching_structure = solver_curriculum_reward(
+        replace(ready, program_structure_f1=1.0), stage="solve"
+    )
+
+    assert wrong_structure.total == pytest.approx(0.15)
+    assert matching_structure.total > wrong_structure.total
+    assert matching_structure.components["milestone_program_structure_f1"] == 1.0
 
 
 def test_curriculum_inputs_reject_non_normalized_metrics() -> None:

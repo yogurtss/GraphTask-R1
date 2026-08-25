@@ -20,11 +20,14 @@ from graphtask_r1.schema import (
 )
 from graphtask_r1.training.selfplay import (
     SelfPlayConfig,
+    _archive_round_size,
     _completed_phase_adapter,
+    _curriculum_max_seed_entities,
     _curriculum_phase,
     _curriculum_sample,
     _discover_curriculum_progress,
     _round_tasks,
+    _solver_episode_count,
     _write_phase_manifest,
     load_selfplay_config,
     run_self_play,
@@ -67,6 +70,58 @@ def test_curriculum_stages_advance_from_production_to_frontier() -> None:
         "grounding",
         "frontier",
     ]
+
+
+def test_questioner_root_curriculum_expands_only_after_grounding() -> None:
+    config = _config(
+        curriculum_max_seed_entities_start=1,
+        curriculum_max_seed_entities_end=2,
+    )
+
+    assert [_curriculum_max_seed_entities(config, value) for value in (1, 2, 3)] == [
+        1,
+        1,
+        2,
+    ]
+
+
+def test_solver_syntax_stage_can_use_a_bounded_maintenance_budget() -> None:
+    config = _config(
+        solver_episodes=64,
+        curriculum_production_solver_episodes=16,
+    )
+
+    assert [_solver_episode_count(config, value) for value in (1, 2, 3)] == [16, 64, 64]
+
+
+def test_archive_round_size_makes_closed_loop_gate_resume_safe(tmp_path: Path) -> None:
+    archive_path = tmp_path / "archive.sqlite"
+    backend = toy_graph()
+    first = certify_proposal(
+        TaskProposal(
+            topic_entities=("alice",),
+            program=Hop(input=Entity(entity_id="alice"), relation="works_at"),
+        ),
+        backend,
+        graph_snapshot="toy-v1",
+        round_index=1,
+    )
+    second = certify_proposal(
+        TaskProposal(
+            topic_entities=("bob",),
+            program=Hop(input=Entity(entity_id="bob"), relation="friend"),
+        ),
+        backend,
+        graph_snapshot="toy-v1",
+        round_index=2,
+    )
+    with TaskArchive(archive_path) as archive:
+        assert archive.add(first)
+        assert archive.add(second)
+
+    assert _archive_round_size(archive_path, 1) == 1
+    assert _archive_round_size(archive_path, 2) == 1
+    assert _archive_round_size(archive_path, 3) == 0
 
 
 def test_solver_curriculum_expands_the_visible_structural_band() -> None:
@@ -482,7 +537,8 @@ def test_curriculum_consumes_same_round_generated_tasks(tmp_path: Path) -> None:
     selected = _round_tasks(config, archive_path, round_index=2)
 
     assert len(selected) == 4
-    assert sum(task.task_id == generated.task_id for task in selected) == 2
+    assert sum(task.task_id == generated.task_id for task in selected) == 1
+    assert len({task.task_id for task in selected}) == 2
 
 
 def test_repository_curriculum_config_is_opt_in() -> None:
@@ -494,10 +550,43 @@ def test_repository_curriculum_config_is_opt_in() -> None:
     smoke = load_selfplay_config(
         root / "configs/training/selfplay_qwen3_0_6b_curriculum_v3_smoke.yaml"
     )
+    targeted_v2 = load_selfplay_config(
+        root / "configs/training/selfplay_qwen3_0_6b_kqapro_targeted_v2.yaml"
+    )
 
     assert legacy.selfplay_variant == "legacy"
     assert curriculum.selfplay_variant == "curriculum_v3"
-    assert curriculum.frontier_target_start == 0.8
+    assert curriculum.model_path == "Qwen/Qwen3-4B-Instruct-2507"
+    assert curriculum.questioner_episodes == 1024
+    assert curriculum.solver_episodes == 2048
+    assert curriculum.opponent_samples == 4
+    assert curriculum.curriculum_production_rounds == 0
+    assert curriculum.curriculum_grounding_rounds == 0
+    assert curriculum.frontier_target_start == 0.5
     assert curriculum.frontier_target_end == 0.5
     assert curriculum.curriculum_replay_ratio == 0.3
+    assert curriculum.archive_min_target_alignment == 0.65
+    assert curriculum.learning_rate == 7e-7
+    assert curriculum.kl_beta == 0.002
+    assert curriculum.val_data is None
+    assert curriculum.validation_samples is None
+    assert curriculum.enable_grpo_validation is False
+    assert curriculum.response_prefix == "<think>\\n\\n</think>\\n\\n"
     assert smoke.response_prefix == "<think>\\n\\n</think>\\n\\n"
+    assert targeted_v2.questioner_episodes == 192
+    assert targeted_v2.solver_episodes == 256
+    assert targeted_v2.enable_grpo_validation is True
+
+
+def test_selfplay_validation_requires_an_explicit_val_dataset() -> None:
+    with pytest.raises(
+        ValueError, match="val_data is required when enable_grpo_validation=true"
+    ):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "enable_grpo_validation": True,
+            }
+        )

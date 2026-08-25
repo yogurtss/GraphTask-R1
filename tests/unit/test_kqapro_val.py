@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -12,6 +12,7 @@ from graphtask_r1.evaluation.kqapro_val import (
     KQAProModelConfig,
     KQAProValConfig,
     OpenAICompletionClient,
+    assess_kqapro_promotion,
     compare_kqapro_val_metrics,
     evaluate_kqapro_val,
     inspect_kqapro_val,
@@ -114,6 +115,25 @@ def test_openai_client_omits_authorization_for_unauthenticated_local_model(
     assert client._request_headers("trace-local") == {"X-Trace-ID": "trace-local"}
 
 
+def test_openai_client_passes_configured_chat_template_kwargs(tmp_path: Path) -> None:
+    client = OpenAICompletionClient(
+        KQAProModelConfig(
+            model_url="http://127.0.0.1:18100",
+            model="local",
+            chat_template_kwargs={"enable_thinking": False},
+        ),
+        timeout_s=10,
+        retries=0,
+        cache_path=tmp_path / "cache.json",
+    )
+
+    payload = client._request_payload(
+        [{"role": "user", "content": "Question: test"}], seed=17
+    )
+
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
 def _script() -> str:
     return json.dumps(
         {
@@ -213,6 +233,37 @@ def test_single_model_eval_uses_tool_model_direct_fallback(tmp_path: Path) -> No
         assert rows[0]["model"] == stage
         assert rows[0]["inference_mode"] == "direct_fallback"
         assert rows[0]["rejection_reason"]["code"] == "GRAPHSCRIPT_PARSE_FAILED"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        lambda: f"<think></think>{_script()}",
+        lambda: f"<think>reasoning</think>\n{_script()}",
+    ],
+)
+def test_single_model_eval_accepts_graphscript_after_thinking_prefix(
+    tmp_path: Path, response: Callable[[], str]
+) -> None:
+    input_path, config = _fixture(tmp_path)
+    import asyncio
+
+    content = response()
+    summary = asyncio.run(
+        evaluate_kqapro_val(
+            input_path,
+            tmp_path / "thinking-prefix",
+            config,
+            model_stage="sft",
+            backend=toy_graph(),
+            client=FakeCompletionClient([content]),
+        )
+    )
+
+    row = read_records(tmp_path / "thinking-prefix/predictions.parquet")[0]
+    assert summary["overall"]["tool_success_rate"] == 1.0
+    assert row["tool_succeeded"] is True
+    assert row["raw_response"] == content
 
 
 def test_base_eval_never_attempts_graph_tool(
@@ -495,3 +546,83 @@ def test_compare_requires_distinct_compatible_runs(tmp_path: Path) -> None:
         compare_kqapro_val_metrics([path])
     with pytest.raises(ValueError, match="duplicate"):
         compare_kqapro_val_metrics([path, path])
+
+
+def test_promotion_gate_rejects_tool_gain_with_semantic_regression(
+    tmp_path: Path,
+) -> None:
+    def metric(path: Path, *, model: str, exact: float, tool: float) -> None:
+        write_json(
+            path,
+            {
+                "dataset": "kqapro",
+                "split": "val",
+                "graph_snapshot": "kqapro-v1",
+                "input": "val/tasks.parquet",
+                "examples": 64,
+                "model_id": model,
+                "overall": {
+                    "exact_match": exact,
+                    "f1": exact,
+                    "tool_success_rate": tool,
+                },
+            },
+        )
+
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    metric(baseline, model="sft", exact=3 / 64, tool=6 / 64)
+    metric(candidate, model="selfplay", exact=1 / 64, tool=9 / 64)
+
+    decision = assess_kqapro_promotion(
+        baseline,
+        candidate,
+        output_path=tmp_path / "promotion.json",
+        baseline_artifact="sft-adapter",
+        candidate_artifact="selfplay-adapter",
+    )
+
+    assert decision["promoted"] is False
+    assert decision["selected_artifact"] == "sft-adapter"
+    assert decision["gates"]["exact_match"] is False
+
+
+def test_promotion_gate_requires_non_regression_and_a_strict_gain(tmp_path: Path) -> None:
+    common = {
+        "dataset": "kqapro",
+        "split": "val",
+        "graph_snapshot": "kqapro-v1",
+        "input": "val/tasks.parquet",
+        "examples": 64,
+    }
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    write_json(
+        baseline,
+        {
+            **common,
+            "model_id": "sft",
+            "overall": {
+                "exact_match": 0.1,
+                "f1": 0.1,
+                "tool_success_rate": 0.2,
+            },
+        },
+    )
+    write_json(
+        candidate,
+        {
+            **common,
+            "model_id": "selfplay",
+            "overall": {
+                "exact_match": 0.1,
+                "f1": 0.1,
+                "tool_success_rate": 0.3,
+            },
+        },
+    )
+
+    decision = assess_kqapro_promotion(baseline, candidate)
+
+    assert decision["promoted"] is True
+    assert decision["selected_model_id"] == "selfplay"

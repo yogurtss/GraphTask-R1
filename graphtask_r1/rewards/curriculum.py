@@ -38,6 +38,7 @@ class QuestionerMilestones:
     answer_nonempty: float = 0.0
     cardinality_valid: float = 0.0
     question_program_alignment: float = 0.0
+    target_structure_alignment: float = 1.0
     no_answer_leak: float = 0.0
     certified: float = 0.0
 
@@ -76,6 +77,7 @@ class QuestionerRewardConfig:
     frontier_weight: float = 0.35
     frontier_target: float = 0.5
     frontier_sigma: float = 0.2
+    grounding_execution_floor: float = 0.2
 
     def __post_init__(self) -> None:
         _require_unit_interval(
@@ -89,6 +91,7 @@ class QuestionerRewardConfig:
         _require_unit_interval("frontier_target", self.frontier_target)
         if self.frontier_sigma <= 0.0:
             raise ValueError("frontier_sigma must be positive")
+        _require_unit_interval("grounding_execution_floor", self.grounding_execution_floor)
 
 
 _QUESTIONER_PRODUCTION_WEIGHTS = {
@@ -101,17 +104,18 @@ _QUESTIONER_PRODUCTION_WEIGHTS = {
 }
 
 _QUESTIONER_GROUNDING_WEIGHTS = {
-    "seed_coverage": 0.12,
-    "relation_valid_fraction": 0.08,
-    "handle_valid_fraction": 0.08,
-    "type_valid_fraction": 0.08,
-    "executable_prefix_fraction": 0.16,
+    "seed_coverage": 0.08,
+    "relation_valid_fraction": 0.06,
+    "handle_valid_fraction": 0.06,
+    "type_valid_fraction": 0.06,
+    "executable_prefix_fraction": 0.12,
     "program_executable": 0.14,
-    "answer_nonempty": 0.09,
-    "cardinality_valid": 0.05,
-    "question_program_alignment": 0.10,
-    "no_answer_leak": 0.05,
-    "certified": 0.05,
+    "answer_nonempty": 0.08,
+    "cardinality_valid": 0.04,
+    "question_program_alignment": 0.08,
+    "target_structure_alignment": 0.20,
+    "no_answer_leak": 0.04,
+    "certified": 0.04,
 }
 
 
@@ -133,6 +137,10 @@ def questioner_curriculum_reward(
     grounding_total = (
         grounding_production_weight * production + grounding_progress_weight * grounding
     )
+    execution_gate = policy.grounding_execution_floor + (
+        1.0 - policy.grounding_execution_floor
+    ) * milestones.program_executable
+    gated_grounding_total = grounding_total * execution_gate
 
     frontier_production_weight = policy.production_weight_in_frontier_base
     frontier_grounding_weight = 1.0 - frontier_production_weight
@@ -156,9 +164,10 @@ def questioner_curriculum_reward(
     )
     effective_frontier_weight = policy.frontier_weight * interface_readiness
     frontier_base_weight = 1.0 - effective_frontier_weight
-    frontier_total = (
+    frontier_total_ungated = (
         frontier_base_weight * frontier_base + effective_frontier_weight * raw_frontier
     )
+    frontier_total = frontier_total_ungated * execution_gate
 
     if stage == "production":
         total = production
@@ -166,19 +175,19 @@ def questioner_curriculum_reward(
         grounding_contribution = 0.0
         frontier_contribution = 0.0
     elif stage == "grounding":
-        total = grounding_total
-        production_contribution = grounding_production_weight * production
-        grounding_contribution = grounding_progress_weight * grounding
+        total = gated_grounding_total
+        production_contribution = execution_gate * grounding_production_weight * production
+        grounding_contribution = execution_gate * grounding_progress_weight * grounding
         frontier_contribution = 0.0
     else:
         total = frontier_total
         production_contribution = (
-            frontier_base_weight * frontier_production_weight * production
+            execution_gate * frontier_base_weight * frontier_production_weight * production
         )
         grounding_contribution = (
-            frontier_base_weight * frontier_grounding_weight * grounding
+            execution_gate * frontier_base_weight * frontier_grounding_weight * grounding
         )
-        frontier_contribution = effective_frontier_weight * raw_frontier
+        frontier_contribution = execution_gate * effective_frontier_weight * raw_frontier
 
     components = {
         **{f"milestone_{name}": value for name, value in values.items()},
@@ -188,6 +197,8 @@ def questioner_curriculum_reward(
         "production_score": production,
         "grounding_score": grounding,
         "grounding_total": grounding_total,
+        "execution_gate": execution_gate,
+        "gated_grounding_total": gated_grounding_total,
         "frontier_base_score": frontier_base,
         "opponent_parse_rate": parse_rate,
         "opponent_execution_rate_given_parse": execution_rate,
@@ -196,6 +207,7 @@ def questioner_curriculum_reward(
         "frontier_raw": raw_frontier,
         "frontier_weight_configured": policy.frontier_weight,
         "frontier_weight_effective": effective_frontier_weight,
+        "frontier_total_ungated": frontier_total_ungated,
         "production_contribution": production_contribution,
         "grounding_contribution": grounding_contribution,
         "frontier_contribution": frontier_contribution,
@@ -228,6 +240,10 @@ class SolverMilestones:
     budget_compliance: float = 0.0
     answer_present: float = 0.0
     answer_parse_valid: float = 0.0
+    # One means "not constrained" for legacy/tool datasets that do not carry
+    # a hidden certified reference program.
+    program_structure_f1: float = 1.0
+    program_exact_match: float = 1.0
     answer_f1: float = 0.0
     exact_match: float = 0.0
 
@@ -241,11 +257,15 @@ class SolverRewardConfig:
     syntax_weight_in_tool: float = 0.4
     syntax_weight_in_solve: float = 0.2
     tool_weight_in_solve: float = 0.3
+    execution_floor: float = 0.2
+    solve_semantic_floor: float = 0.2
 
     def __post_init__(self) -> None:
         _require_unit_interval("syntax_weight_in_tool", self.syntax_weight_in_tool)
         _require_unit_interval("syntax_weight_in_solve", self.syntax_weight_in_solve)
         _require_unit_interval("tool_weight_in_solve", self.tool_weight_in_solve)
+        _require_unit_interval("execution_floor", self.execution_floor)
+        _require_unit_interval("solve_semantic_floor", self.solve_semantic_floor)
         if self.syntax_weight_in_solve + self.tool_weight_in_solve > 1.0:
             raise ValueError("syntax_weight_in_solve + tool_weight_in_solve cannot exceed 1")
 
@@ -268,10 +288,16 @@ _SOLVER_TOOL_WEIGHTS = {
 }
 
 _SOLVER_SOLVE_WEIGHTS = {
-    "answer_present": 0.10,
-    "answer_parse_valid": 0.15,
-    "answer_f1": 0.55,
-    "exact_match": 0.20,
+    # Certified tasks already contain an executable gold program.  Use its
+    # structure as dense supervision instead of collapsing every wrong answer
+    # to the same reward.  Answer semantics still carry most of the weight so
+    # equivalent alternative programs are not rejected.
+    "answer_present": 0.05,
+    "answer_parse_valid": 0.05,
+    "program_structure_f1": 0.15,
+    "program_exact_match": 0.05,
+    "answer_f1": 0.45,
+    "exact_match": 0.25,
 }
 
 
@@ -292,12 +318,19 @@ def solver_curriculum_reward(
     tool_syntax_weight = policy.syntax_weight_in_tool
     tool_progress_weight = 1.0 - tool_syntax_weight
     tool_total = tool_syntax_weight * syntax + tool_progress_weight * tool
+    execution_gate = policy.execution_floor + (
+        1.0 - policy.execution_floor
+    ) * milestones.execution_progress
+    gated_tool_total = tool_total * execution_gate
     solve_syntax_weight = policy.syntax_weight_in_solve
     solve_tool_weight = policy.tool_weight_in_solve
     solve_answer_weight = 1.0 - solve_syntax_weight - solve_tool_weight
-    solve_total = (
-        solve_syntax_weight * syntax + solve_tool_weight * tool + solve_answer_weight * solve
-    )
+    solve_base = solve_syntax_weight * syntax + solve_tool_weight * tool
+    semantic_gate = policy.solve_semantic_floor + (
+        1.0 - policy.solve_semantic_floor
+    ) * milestones.answer_f1
+    gated_solve_base = semantic_gate * solve_base
+    solve_total = gated_solve_base + solve_answer_weight * solve
 
     if stage == "syntax":
         total = syntax
@@ -305,14 +338,14 @@ def solver_curriculum_reward(
         tool_contribution = 0.0
         solve_contribution = 0.0
     elif stage == "tool":
-        total = tool_total
-        syntax_contribution = tool_syntax_weight * syntax
-        tool_contribution = tool_progress_weight * tool
+        total = gated_tool_total
+        syntax_contribution = execution_gate * tool_syntax_weight * syntax
+        tool_contribution = execution_gate * tool_progress_weight * tool
         solve_contribution = 0.0
     else:
         total = solve_total
-        syntax_contribution = solve_syntax_weight * syntax
-        tool_contribution = solve_tool_weight * tool
+        syntax_contribution = semantic_gate * solve_syntax_weight * syntax
+        tool_contribution = semantic_gate * solve_tool_weight * tool
         solve_contribution = solve_answer_weight * solve
 
     components = {
@@ -324,6 +357,11 @@ def solver_curriculum_reward(
         "tool_score": tool,
         "solve_score": solve,
         "tool_total": tool_total,
+        "execution_gate": execution_gate,
+        "gated_tool_total": gated_tool_total,
+        "semantic_gate": semantic_gate,
+        "solve_base": solve_base,
+        "gated_solve_base": gated_solve_base,
         "solve_total": solve_total,
         "syntax_contribution": syntax_contribution,
         "tool_contribution": tool_contribution,

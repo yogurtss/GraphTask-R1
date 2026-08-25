@@ -20,6 +20,9 @@ from graphtask_r1.graphscript import GraphScriptError, execute_graphscript, pars
 from graphtask_r1.schema import AnswerSet, RelationInfo, TaskCertificate
 from graphtask_r1.training.prompts import relation_catalog_text, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
+from graphtask_r1.training.response_normalization import (
+    normalize_graphscript_response,
+)
 from graphtask_r1.utils import ProgressLogger, read_json, stable_hash, write_json, write_records
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +37,9 @@ class KQAProModelConfig(BaseModel):
     api_key: SecretStr | None = Field(default=None, min_length=1)
     model: str = Field(min_length=1)
     max_completion_tokens: int = Field(default=4_096, ge=1, le=40_960)
+    chat_template_kwargs: dict[str, bool | int | float | str | None] = Field(
+        default_factory=dict
+    )
 
 
 class KQAProValConfig(BaseModel):
@@ -125,6 +131,22 @@ class OpenAICompletionClient:
             )
         return headers
 
+    def _request_payload(
+        self, messages: Sequence[Mapping[str, str]], *, seed: int
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": [dict(message) for message in messages],
+            "temperature": self.temperature,
+            "seed": seed,
+            "max_tokens": self.config.max_completion_tokens,
+        }
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.config.chat_template_kwargs:
+            payload["chat_template_kwargs"] = dict(self.config.chat_template_kwargs)
+        return payload
+
     async def complete(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -138,15 +160,7 @@ class OpenAICompletionClient:
             raise ImportError(
                 "install aiohttp from requirements.txt for KQAPro evaluation"
             ) from exc
-        payload: dict[str, Any] = {
-            "model": self.config.model,
-            "messages": [dict(message) for message in messages],
-            "temperature": self.temperature,
-            "seed": seed,
-            "max_tokens": self.config.max_completion_tokens,
-        }
-        if self.top_p is not None:
-            payload["top_p"] = self.top_p
+        payload = self._request_payload(messages, seed=seed)
         cache_key = stable_hash(payload)
         async with self._lock:
             cached = self._cache.get(cache_key)
@@ -490,8 +504,9 @@ async def _evaluate_one(
         completion_tokens = completion.completion_tokens
         cache_hit = completion.cached
         try:
+            normalized_response = normalize_graphscript_response(completion.content)
             script = parse_graphscript(
-                completion.content, max_follow_limit=config.max_follow_limit
+                normalized_response, max_follow_limit=config.max_follow_limit
             )
             attempted_path = [
                 op.model_dump(mode="json", by_alias=True) for op in script.ops
@@ -1767,6 +1782,74 @@ def compare_kqapro_val_metrics(
     if output_path is not None:
         write_json(output_path, comparison)
     return comparison
+
+
+def assess_kqapro_promotion(
+    baseline_path: Path,
+    candidate_path: Path,
+    *,
+    output_path: Path | None = None,
+    baseline_artifact: str | None = None,
+    candidate_artifact: str | None = None,
+    min_exact_delta: float = 0.0,
+    min_f1_delta: float = 0.0,
+    min_tool_success_delta: float = 0.0,
+    require_strict_improvement: bool = True,
+) -> dict[str, Any]:
+    """Select a self-play candidate only when held-out metrics cannot regress."""
+
+    baseline = read_json(baseline_path)
+    candidate = read_json(candidate_path)
+    if not isinstance(baseline, dict) or not isinstance(candidate, dict):
+        raise ValueError("baseline and candidate metrics must be JSON objects")
+    invariant_fields = ("dataset", "split", "graph_snapshot", "input", "examples")
+    disagreements = [
+        field for field in invariant_fields if baseline.get(field) != candidate.get(field)
+    ]
+    if disagreements:
+        raise ValueError(
+            "promotion metrics are not from the same held-out contract: "
+            + ", ".join(disagreements)
+        )
+
+    baseline_metrics = baseline["overall"]
+    candidate_metrics = candidate["overall"]
+    thresholds = {
+        "exact_match": min_exact_delta,
+        "f1": min_f1_delta,
+        "tool_success_rate": min_tool_success_delta,
+    }
+    deltas = {
+        metric: float(candidate_metrics[metric]) - float(baseline_metrics[metric])
+        for metric in thresholds
+    }
+    gates = {
+        metric: delta >= thresholds[metric] for metric, delta in deltas.items()
+    }
+    strictly_better = any(delta > 0.0 for delta in deltas.values())
+    promoted = all(gates.values()) and (
+        strictly_better or not require_strict_improvement
+    )
+    decision = {
+        "promoted": promoted,
+        "selected": "candidate" if promoted else "baseline",
+        "selected_model_id": (
+            candidate.get("model_id") if promoted else baseline.get("model_id")
+        ),
+        "selected_artifact": (
+            candidate_artifact if promoted else baseline_artifact
+        ),
+        "baseline_metrics": str(baseline_path.resolve()),
+        "candidate_metrics": str(candidate_path.resolve()),
+        "thresholds": thresholds,
+        "deltas": deltas,
+        "gates": gates,
+        "strictly_better": strictly_better,
+        "require_strict_improvement": require_strict_improvement,
+    }
+    if output_path is not None:
+        write_json(output_path, decision)
+    return decision
 
 
 async def visualize_kqapro_val(

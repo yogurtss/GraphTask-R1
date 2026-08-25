@@ -30,6 +30,7 @@ from graphtask_r1.data import (
 )
 from graphtask_r1.evaluation import (
     KQAProValConfig,
+    assess_kqapro_promotion,
     compare_kqapro_val_metrics,
     evaluate_benchmark,
     evaluate_kqapro_val,
@@ -276,6 +277,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.1"
     )
     export_sft.add_argument("--relation-catalog", type=Path)
+    export_sft.add_argument(
+        "--questioner-contract",
+        choices=["program", "question_program"],
+        default="program",
+    )
     _add_common(export_sft)
 
     export_questioner_sft = data_actions.add_parser("export-questioner-sft")
@@ -289,6 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--graphscript-version", choices=["0.1", "0.2", "0.3"], default="0.3"
     )
     export_questioner_sft.add_argument("--relation-catalog", type=Path)
+    export_questioner_sft.add_argument(
+        "--questioner-contract",
+        choices=["program", "question_program"],
+        default="program",
+    )
     export_questioner_sft.add_argument("--seed", type=int, default=42)
     export_questioner_sft.add_argument("--dry-run", action="store_true")
 
@@ -442,6 +453,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", type=Path, default=Path("outputs/evaluation/kqapro-comparison.json")
     )
 
+    kqapro_promote = evaluate_actions.add_parser("kqapro-promote")
+    kqapro_promote.add_argument("--baseline", type=Path, required=True)
+    kqapro_promote.add_argument("--candidate", type=Path, required=True)
+    kqapro_promote.add_argument("--baseline-artifact")
+    kqapro_promote.add_argument("--candidate-artifact")
+    kqapro_promote.add_argument("--min-exact-delta", type=float, default=0.0)
+    kqapro_promote.add_argument("--min-f1-delta", type=float, default=0.0)
+    kqapro_promote.add_argument("--min-tool-success-delta", type=float, default=0.0)
+    kqapro_promote.add_argument("--allow-tie", action="store_true")
+    kqapro_promote.add_argument("--require-promotion", action="store_true")
+    kqapro_promote.add_argument(
+        "--output", type=Path, default=Path("outputs/evaluation/promotion.json")
+    )
+
     visualize = groups.add_parser("visualize")
     visualize_actions = visualize.add_subparsers(dest="action", required=True)
     kqapro_visualize = visualize_actions.add_parser("kqapro")
@@ -554,6 +579,7 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
         "lora_adapter_path": "LORA_ADAPTER_PATH",
         "interaction_mode": "INTERACTION_MODE",
         "graphscript_version": "GRAPHSCRIPT_VERSION",
+        "eval_strategy": "EVAL_STRATEGY",
     }
     selected_env: dict[str, str] = {}
     positive_integer_fields = {
@@ -643,6 +669,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command_started = perf_counter()
     LOGGER.info("command_started group=%s action=%s", args.group, args.action)
     result: object
+    exit_code = 0
     if args.group == "graph":
         started = perf_counter()
         backend = backend_from_snapshot(args.snapshot)
@@ -793,6 +820,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 interaction_mode=args.interaction_mode,
                 graphscript_version=args.graphscript_version,
                 relation_catalog=load_relation_catalog(args.relation_catalog),
+                questioner_contract=args.questioner_contract,
             )
             result = {"rows": rows, "output": str(args.output)}
     elif args.group == "data" and args.action == "export-questioner-sft":
@@ -814,6 +842,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 interaction_mode=args.interaction_mode,
                 graphscript_version=args.graphscript_version,
                 relation_catalog=load_relation_catalog(args.relation_catalog),
+                questioner_contract=args.questioner_contract,
             )
             result = {**metrics, "output": str(args.output)}
     elif args.group == "data" and args.action == "combine-sft":
@@ -976,6 +1005,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_path=args.output,
             baseline_stage=args.baseline_stage,
         )
+    elif args.group == "evaluate" and args.action == "kqapro-promote":
+        result = assess_kqapro_promotion(
+            args.baseline,
+            args.candidate,
+            output_path=args.output,
+            baseline_artifact=args.baseline_artifact,
+            candidate_artifact=args.candidate_artifact,
+            min_exact_delta=args.min_exact_delta,
+            min_f1_delta=args.min_f1_delta,
+            min_tool_success_delta=args.min_tool_success_delta,
+            require_strict_improvement=not args.allow_tie,
+        )
+        if args.require_promotion and not result["promoted"]:
+            exit_code = 2
     elif args.group == "evaluate":
         val_config = _load_kqapro_val_config(args.config)
         result = asyncio.run(
@@ -1028,7 +1071,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         perf_counter() - command_started,
     )
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

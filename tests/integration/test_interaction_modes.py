@@ -154,6 +154,18 @@ def test_graphscript_v02_grpo_uses_same_question_only_operator_contract(
     )
     row = pq.read_table(path).to_pylist()[0]
     assert row["extra_info"]["graphscript_version"] == "0.2"
+    assert json.loads(row["extra_info"]["reference_program_json"]) == {
+        "op": "hop",
+        "input": {
+            "op": "hop",
+            "input": {"op": "entity", "entity_id": "alice"},
+            "relation": "works_at",
+            "direction": "out",
+        },
+        "relation": "located_in",
+        "direction": "out",
+    }
+    assert row["extra_info"]["reference_operator_tags"] == ["entity", "hop"]
     assert "search_passage" in row["extra_info"]["operator_set"]
     assert "Topic entities" not in row["prompt"][1]["content"]
     assert "GraphScript v0.2" in row["prompt"][0]["content"]
@@ -310,6 +322,7 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert plan["train_environment"]["VLLM_SLEEP_LEVEL"] == "1"
     assert plan["train_environment"]["DEEPSPEED"] == "none"
     assert plan["train_environment"]["RL_ALGORITHM"] == "grpo"
+    assert plan["train_environment"]["LR"] == "2e-06"
     assert plan["train_environment"]["SAVE_STEPS"] == "20"
     assert plan["train_environment"]["SAVE_TOTAL_LIMIT"] == "2"
     assert "EVAL_ROLLOUT_N" not in plan["train_environment"]
@@ -1218,6 +1231,31 @@ def test_questioner_sft_has_independent_exact_count_and_combines_with_solver(
     roles = pq.read_table(mixed_path)["role"].to_pylist()
     assert roles.count("solver") == 5
     assert roles.count("questioner") == 2
+
+
+def test_questioner_sft_question_program_matches_curriculum_contract(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "questioner-contract.parquet"
+    task = TaskTrainingRecord.model_validate(_task().model_dump(mode="json"))
+
+    export_questioner_sft_dataset(
+        [task],
+        output_path,
+        count=1,
+        seed=7,
+        interaction_mode="graphscript",
+        graphscript_version="0.3",
+        relation_catalog=_catalog(),
+        questioner_contract="question_program",
+    )
+
+    messages = pq.read_table(output_path).to_pylist()[0]["messages"]
+    assert '"question":"...","program"' in messages[0]["content"]
+    output = json.loads(messages[-1]["content"])
+    assert output["question"] == task.question
+    assert output["program"]["version"] == "0.3"
+    assert output["program"]["ops"][0]["op"] == "resolve_entity"
 
 
 def test_questioner_sft_random_sample_is_deterministic_and_without_replacement(

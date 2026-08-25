@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping, Sized
 from pathlib import Path
 
+from graphtask_r1.dsl import operator_tags
 from graphtask_r1.generation import validate_proposal
 from graphtask_r1.graphscript import graphscript_operators
-from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal, TaskTrainingRecord
+from graphtask_r1.schema import (
+    RelationInfo,
+    TaskCertificate,
+    TaskProposal,
+    TaskTrainingRecord,
+    program_to_dict,
+)
 from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
 from graphtask_r1.training.relations import require_catalog_covers_program
 from graphtask_r1.utils import ParquetRowWriter, ProgressLogger
@@ -98,6 +106,15 @@ def export_role_dataset(
                 "max_edge_visits": max_edge_visits,
                 "max_returned_entities": max_returned_entities,
                 "program_profile": program_profile,
+                # Reward-side structural supervision.  This stays in
+                # ``extra_info`` and is never rendered into the Solver prompt.
+                "reference_program_json": json.dumps(
+                    program_to_dict(task.program),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "reference_operator_tags": list(operator_tags(task.program)),
                 "text_search_enabled": graph_snapshot.startswith("kilt-"),
                 "max_text_search_results": 3,
                 "max_passage_chars": 2_000,

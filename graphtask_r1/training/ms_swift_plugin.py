@@ -23,6 +23,7 @@ from graphtask_r1.schema import parse_program
 from graphtask_r1.training.json_compat import to_json_compatible
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
 from graphtask_r1.training.ms_swift_reward import compute_score
+from graphtask_r1.training.response_normalization import normalize_graphscript_response
 
 try:
     from swift.llm.dataset import DatasetMeta, RowPreprocessor, register_dataset
@@ -52,10 +53,9 @@ atexit.register(_destroy_distributed_process_group)
 
 
 def _reward_completion(text: str) -> str:
-    """Remove a template-prefilled empty Qwen thinking block before scoring."""
+    """Normalize the model response using the same contract as evaluation."""
 
-    prefix = "<think>\n\n</think>\n\n"
-    return text[len(prefix) :] if text.startswith(prefix) else text
+    return normalize_graphscript_response(text)
 
 
 class GraphTaskSFTPreprocessor(RowPreprocessor):  # type: ignore[misc]
@@ -75,10 +75,10 @@ def _register_data() -> None:
     if kind not in {"sft", "rl"}:
         raise ValueError("GRAPHTASK_MS_SWIFT_DATA_KIND must be 'sft' or 'rl'")
     train_path = os.environ.get("GRAPHTASK_MS_SWIFT_TRAIN_DATA", "")
-    val_path = os.environ.get("GRAPHTASK_MS_SWIFT_VAL_DATA", train_path)
+    val_path = os.environ.get("GRAPHTASK_MS_SWIFT_VAL_DATA", "")
     if not train_path:
         raise ValueError("GRAPHTASK_MS_SWIFT_TRAIN_DATA is required")
-    for path in {train_path, val_path}:
+    for path in {train_path, *([val_path] if val_path else [])}:
         if not Path(path).is_file():
             raise FileNotFoundError(path)
     preprocessor = GraphTaskSFTPreprocessor() if kind == "sft" else GraphTaskRLPreprocessor()
@@ -89,13 +89,14 @@ def _register_data() -> None:
             preprocess_func=preprocessor,
         )
     )
-    register_dataset(
-        DatasetMeta(
-            dataset_name="graphtask-val",
-            dataset_path=val_path,
-            preprocess_func=preprocessor,
+    if val_path:
+        register_dataset(
+            DatasetMeta(
+                dataset_name="graphtask-val",
+                dataset_path=val_path,
+                preprocess_func=preprocessor,
+            )
         )
-    )
 
 
 def _batch(value: object, size: int, *, default: object) -> list[object]:

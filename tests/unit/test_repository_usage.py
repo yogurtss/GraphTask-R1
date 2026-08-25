@@ -60,10 +60,45 @@ def test_ms_swift_sft_reads_existing_parquet_through_runtime_plugin() -> None:
     assert "graphtask_r1/training/ms_swift_plugin.py" in script
     assert ': "${MODEL_TYPE:=qwen3}"' in script
     assert '--model_type "$MODEL_TYPE"' in script
+    assert '--template "${TEMPLATE:-qwen3}"' in script
     assert 'MAX_LENGTH="${MAX_LENGTH:-32768}"' in script
     assert "MAX_LENGTH > 40960" in script
     assert "data export-sft" not in script
     assert "data prepare" not in script
+
+
+def test_ms_swift_sft_can_train_without_validation(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "args.txt"
+    fake_swift = fake_bin / "swift"
+    fake_swift.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE_ARGS"\n')
+    fake_swift.chmod(0o755)
+    fake_python = fake_bin / "python"
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_python.chmod(0o755)
+    train_data = tmp_path / "train.parquet"
+    train_data.touch()
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "CAPTURE_ARGS": str(capture),
+        "TRAIN_DATA": str(train_data),
+        "OUTPUT_DIR": str(tmp_path / "output"),
+        "EVAL_STRATEGY": "no",
+    }
+
+    subprocess.run(
+        ["bash", str(PROJECT_ROOT / "scripts/train_ms_swift_sft.sh")],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+    )
+
+    arguments = capture.read_text().splitlines()
+    assert arguments[arguments.index("--eval_strategy") + 1] == "no"
+    assert "--val_dataset" not in arguments
+    assert "--eval_steps" not in arguments
 
 
 def test_ms_swift_grpo_keeps_rollout_and_trainer_gpus_separate() -> None:
@@ -73,6 +108,7 @@ def test_ms_swift_grpo_keeps_rollout_and_trainer_gpus_separate() -> None:
     assert "TRAIN_CUDA_VISIBLE_DEVICES:-1,2,3" in trainer
     assert '--model_type "$MODEL_TYPE"' in rollout
     assert '--model_type "$MODEL_TYPE"' in trainer
+    assert '--template "${TEMPLATE:-qwen3}"' in trainer
     assert 'INTERACTION_MODE="${INTERACTION_MODE:-graphscript}"' in trainer
     assert "export INTERACTION_MODE" in trainer
     assert "--vllm_gpu_memory_utilization" in trainer
@@ -101,7 +137,11 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     script = PROJECT_ROOT / "scripts/train_ms_swift_grpo.sh"
 
     def launch(
-        mode: str, *, deepspeed: str = "none", algorithm: str = "grpo"
+        mode: str,
+        *,
+        deepspeed: str = "none",
+        algorithm: str = "grpo",
+        eval_strategy: str = "no",
     ) -> list[str]:
         capture = tmp_path / f"{mode}-{deepspeed}-{algorithm}.args"
         environment = {
@@ -115,6 +155,7 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
             "VLLM_MODE": mode,
             "DEEPSPEED": deepspeed,
             "RL_ALGORITHM": algorithm,
+            "EVAL_STRATEGY": eval_strategy,
         }
         subprocess.run(["bash", str(script)], cwd=PROJECT_ROOT, env=environment, check=True)
         return capture.read_text().splitlines()
@@ -127,6 +168,7 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     assert colocate[colocate.index("--advantage_estimator") + 1] == "grpo"
     assert colocate[colocate.index("--scale_rewards") + 1] == "group"
     assert colocate[colocate.index("--kl_in_reward") + 1] == "false"
+    assert colocate[colocate.index("--beta") + 1] == "0.001"
 
     reinforce = launch("colocate", algorithm="reinforce_plus_plus")
     assert reinforce[reinforce.index("--advantage_estimator") + 1] == (
@@ -134,12 +176,19 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     )
     assert reinforce[reinforce.index("--scale_rewards") + 1] == "batch"
     assert reinforce[reinforce.index("--kl_in_reward") + 1] == "true"
+    assert reinforce[reinforce.index("--beta") + 1] == "0.001"
     assert reinforce[reinforce.index("--log_entropy") + 1] == "true"
     assert reinforce[reinforce.index("--logging_steps") + 1] == "4"
     assert reinforce[reinforce.index("--eval_strategy") + 1] == "no"
     assert "--val_dataset" not in reinforce
     assert "--eval_steps" not in reinforce
     assert "--num_generations_eval" not in reinforce
+
+    evaluated = launch("colocate", eval_strategy="steps")
+    assert evaluated[evaluated.index("--eval_strategy") + 1] == "steps"
+    assert evaluated[evaluated.index("--val_dataset") + 1] == "graphtask-val"
+    assert evaluated[evaluated.index("--eval_steps") + 1] == "20"
+    assert evaluated[evaluated.index("--num_generations_eval") + 1] == "4"
 
     zero3 = launch("colocate", deepspeed="zero3")
     assert zero3[zero3.index("--deepspeed") + 1] == "zero3"

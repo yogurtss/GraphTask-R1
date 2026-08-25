@@ -65,13 +65,14 @@ class SelfPlayConfig(BaseModel):
     response_prefix: str | None = None
     initial_adapter: str
     base_tasks: Path
-    val_data: Path
+    val_data: Path | None = None
     questioner_seeds: Path
     graph_snapshot: str = "kqapro-v1"
     selfplay_variant: SelfPlayVariant = "legacy"
     rounds: int = Field(default=3, gt=0)
     questioner_episodes: int = Field(default=256, gt=0, le=4_096)
     solver_episodes: int = Field(default=256, gt=0)
+    curriculum_production_solver_episodes: int | None = Field(default=None, gt=0)
     questioner_reward_weight: float = Field(default=1.0, gt=0.0)
     solver_reward_weight: float = Field(default=1.0, gt=0.0)
     opponent_samples: int = Field(default=4, gt=0, le=64)
@@ -81,11 +82,15 @@ class SelfPlayConfig(BaseModel):
     archive_min_pass_rate: float = Field(default=0.25, ge=0.0, le=1.0)
     archive_max_pass_rate: float = Field(default=0.75, ge=0.0, le=1.0)
     archive_min_novelty: float = Field(default=0.25, ge=0.0, le=1.0)
+    archive_min_target_alignment: float = Field(default=0.0, ge=0.0, le=1.0)
     curriculum_production_rounds: int = Field(default=1, ge=0)
     curriculum_grounding_rounds: int = Field(default=1, ge=0)
     curriculum_solver_fraction_start: float = Field(default=0.4, gt=0.0, le=1.0)
     curriculum_replay_ratio: float = Field(default=0.3, ge=0.0, lt=1.0)
     curriculum_question_alignment_min: float = Field(default=0.35, ge=0.0, le=1.0)
+    curriculum_max_seed_entities_start: int = Field(default=1, gt=0)
+    curriculum_max_seed_entities_end: int = Field(default=2, gt=0)
+    curriculum_min_archive_growth: int = Field(default=1, ge=0)
     base_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     archive_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     new_ratio: float = Field(default=0.30, ge=0.0, le=1.0)
@@ -113,9 +118,14 @@ class SelfPlayConfig(BaseModel):
     vllm_sleep_level: Literal[0, 1, 2] = 1
     deepspeed: DeepSpeedStage = "none"
     rl_algorithm: RLAlgorithm = "grpo"
+    kl_beta: float = Field(default=0.001, gt=0.0)
+    learning_rate: float = Field(default=2e-6, gt=0.0)
     micro_batch_size: int = Field(default=4, gt=0)
     eval_batch_size: int = Field(default=8, gt=0)
     validation_samples: int | None = Field(default=256, gt=0)
+    enable_grpo_validation: bool = False
+    eval_steps: int = Field(default=20, gt=0)
+    eval_rollout_n: int = Field(default=4, gt=0)
     gradient_accumulation_steps: int = Field(default=2, gt=0)
     steps_per_generation: int = Field(default=4, gt=0)
     rollout_n: int = Field(default=4, gt=0)
@@ -143,6 +153,11 @@ class SelfPlayConfig(BaseModel):
             raise ValueError("base_ratio, archive_ratio, and new_ratio must sum to 1")
         if self.archive_min_pass_rate > self.archive_max_pass_rate:
             raise ValueError("archive_min_pass_rate cannot exceed archive_max_pass_rate")
+        if self.curriculum_max_seed_entities_start > self.curriculum_max_seed_entities_end:
+            raise ValueError(
+                "curriculum_max_seed_entities_start cannot exceed "
+                "curriculum_max_seed_entities_end"
+            )
         if self.opponent_backend == "transformers" and self.opponent_samples != 1:
             raise ValueError("the deterministic Transformers opponent requires opponent_samples=1")
         if self.vllm_max_model_len <= self.max_completion_tokens:
@@ -181,6 +196,12 @@ class SelfPlayConfig(BaseModel):
             raise ValueError("self-play generation batch must be divisible by rollout_n")
         if evaluation_batch % self.rollout_n:
             raise ValueError("self-play evaluation batch must be divisible by rollout_n")
+        if self.enable_grpo_validation and evaluation_batch % self.eval_rollout_n:
+            raise ValueError(
+                "self-play evaluation batch must be divisible by eval_rollout_n"
+            )
+        if self.enable_grpo_validation and self.val_data is None:
+            raise ValueError("val_data is required when enable_grpo_validation=true")
         return self
 
 
@@ -220,6 +241,22 @@ def _curriculum_progress(config: SelfPlayConfig, round_index: int) -> float:
     return (round_index - 1) / (config.rounds - 1)
 
 
+def _curriculum_max_seed_entities(config: SelfPlayConfig, round_index: int) -> int:
+    progress = _curriculum_progress(config, round_index)
+    span = config.curriculum_max_seed_entities_end - config.curriculum_max_seed_entities_start
+    return config.curriculum_max_seed_entities_start + round(progress * span)
+
+
+def _solver_episode_count(config: SelfPlayConfig, round_index: int) -> int:
+    if (
+        config.selfplay_variant == "curriculum_v3"
+        and _curriculum_phase(config, round_index) == "production"
+        and config.curriculum_production_solver_episodes is not None
+    ):
+        return config.curriculum_production_solver_episodes
+    return config.solver_episodes
+
+
 def _task_difficulty(task: SelfPlayTask) -> tuple[float, int, int, str]:
     return (
         program_cost(task.program),
@@ -248,6 +285,19 @@ def _curriculum_sample(
     frontier_pool = visible[split:] or visible
     replay_count = round(count * replay_ratio)
     frontier_count = count - replay_count
+    if count <= len(visible):
+        # Respect the requested mixture when both strata are large enough, but
+        # never oversample one small stratum while unused unique tasks remain
+        # in the other.
+        replay_count = min(replay_count, len(replay_pool))
+        frontier_count = min(frontier_count, len(frontier_pool))
+        selected = rng.sample(frontier_pool, frontier_count)
+        selected.extend(rng.sample(replay_pool, replay_count))
+        selected_ids = {task.task_id for task in selected}
+        remaining = [task for task in visible if task.task_id not in selected_ids]
+        selected.extend(rng.sample(remaining, count - len(selected)))
+        rng.shuffle(selected)
+        return selected
     selected = _sample(frontier_pool, frontier_count, rng)
     selected.extend(_sample(replay_pool, replay_count, rng))
     rng.shuffle(selected)
@@ -268,15 +318,29 @@ def _round_tasks(
     new = [task for task in archived if task.generation.get("round") == new_round]
     old = [task for task in archived if task not in new]
     rng = random.Random(config.seed + round_index)
-    base_count = round(config.solver_episodes * config.base_ratio)
-    archive_count = round(config.solver_episodes * config.archive_ratio)
-    new_count = max(0, config.solver_episodes - base_count - archive_count)
+    solver_episodes = _solver_episode_count(config, round_index)
+    base_count = round(solver_episodes * config.base_ratio)
+    archive_count = round(solver_episodes * config.archive_ratio)
+    new_count = max(0, solver_episodes - base_count - archive_count)
     if not new:
         base_count += new_count
         new_count = 0
     if not old:
         base_count += archive_count
         archive_count = 0
+    if config.selfplay_variant == "curriculum_v3":
+        # A ratio is a ceiling, not permission to repeat a tiny archive many
+        # times.  Repeating ten generated tasks into a quarter of the update
+        # caused the Solver to overfit simple self-play templates.  Consume
+        # every archived task at most once and backfill with the much larger
+        # certified base pool.
+        unique_new_count = min(new_count, len(new))
+        unique_archive_count = min(archive_count, len(old))
+        base_count += (new_count - unique_new_count) + (
+            archive_count - unique_archive_count
+        )
+        new_count = unique_new_count
+        archive_count = unique_archive_count
     if config.selfplay_variant == "curriculum_v3":
         progress = _curriculum_progress(config, round_index)
         visible_fraction = config.curriculum_solver_fraction_start + progress * (
@@ -361,6 +425,20 @@ def _assemble_dataset(
     )
     seed_table = pq.read_table(config.questioner_seeds)
     seed_rows = seed_table.to_pylist()
+    if config.selfplay_variant == "curriculum_v3":
+        max_seed_entities = _curriculum_max_seed_entities(config, round_index)
+        seed_rows = [
+            row
+            for row in seed_rows
+            if 0
+            < len(dict(row["extra_info"]).get("topic_entity_ids", []))
+            <= max_seed_entities
+        ]
+        if not seed_rows:
+            raise ValueError(
+                "questioner_seeds has no rows within the curriculum root limit "
+                f"of {max_seed_entities}"
+            )
     questioner_rng = random.Random(config.seed + 10_000 + round_index)
     seed_rows = (
         _sample(seed_rows, config.questioner_episodes, questioner_rng)
@@ -725,6 +803,13 @@ def _archive_size(path: Path) -> int:
         return len(archive.all())
 
 
+def _archive_round_size(path: Path, round_index: int) -> int:
+    with TaskArchive(path) as archive:
+        return sum(
+            task.generation.get("round") == round_index for task in archive.all()
+        )
+
+
 def _prepare_validation_dataset(
     source_path: Path,
     output_dir: Path,
@@ -876,32 +961,36 @@ def run_self_play(
             )
         resume = True
     output_dir.mkdir(parents=True, exist_ok=True)
-    validation_seed = config.seed + 20_000
-    validation = (
-        {
-            "source": str(config.val_data.resolve()),
-            "output": str(
-                (
-                    output_dir / "validation.parquet"
-                    if config.validation_samples is not None
-                    else config.val_data
-                ).resolve()
-            ),
-            "total_rows": None,
-            "selected_rows": config.validation_samples,
-            "max_samples": config.validation_samples,
-            "seed": validation_seed,
-            "selected_indices": None,
-        }
-        if dry_run
-        else _prepare_validation_dataset(
-            config.val_data,
-            output_dir,
-            max_samples=config.validation_samples,
-            seed=validation_seed,
+    validation: dict[str, Any] | None = None
+    validation_path: Path | None = None
+    if config.enable_grpo_validation:
+        assert config.val_data is not None
+        validation_seed = config.seed + 20_000
+        validation = (
+            {
+                "source": str(config.val_data.resolve()),
+                "output": str(
+                    (
+                        output_dir / "validation.parquet"
+                        if config.validation_samples is not None
+                        else config.val_data
+                    ).resolve()
+                ),
+                "total_rows": None,
+                "selected_rows": config.validation_samples,
+                "max_samples": config.validation_samples,
+                "seed": validation_seed,
+                "selected_indices": None,
+            }
+            if dry_run
+            else _prepare_validation_dataset(
+                config.val_data,
+                output_dir,
+                max_samples=config.validation_samples,
+                seed=validation_seed,
+            )
         )
-    )
-    validation_path = Path(str(validation["output"]))
+        validation_path = Path(str(validation["output"]))
     archive_path = output_dir / "archive.sqlite"
     manifest_path = output_dir / "manifest.json"
     completed = 0
@@ -1041,7 +1130,6 @@ def run_self_play(
             "MODEL_TYPE": config.model_type,
             "LORA_ADAPTER_PATH": str(adapter),
             "TRAIN_DATA": str(mixed_data.resolve()),
-            "VAL_DATA": str(validation_path),
             "NUM_GPUS": str(len(_gpu_ids(config.actor_gpus))),
             "MICRO_BATCH_SIZE": str(config.micro_batch_size),
             "EVAL_BATCH_SIZE": str(config.eval_batch_size),
@@ -1054,6 +1142,8 @@ def run_self_play(
             "VLLM_SLEEP_LEVEL": str(config.vllm_sleep_level),
             "DEEPSPEED": config.deepspeed,
             "RL_ALGORITHM": config.rl_algorithm,
+            "KL_BETA": str(config.kl_beta),
+            "LR": str(config.learning_rate),
             "USE_VLLM": str(config.use_vllm).lower(),
             "OUTPUT_DIR": str(round_dir.resolve()),
             "EXPERIMENT_NAME": f"graphtask-selfplay-r{round_index:03d}",
@@ -1066,6 +1156,16 @@ def run_self_play(
             "SEED": str(config.seed),
             "PYTHONUNBUFFERED": "1",
         }
+        if config.enable_grpo_validation:
+            assert validation_path is not None
+            train_overrides.update(
+                {
+                    "VAL_DATA": str(validation_path),
+                    "EVAL_STRATEGY": "steps",
+                    "EVAL_STEPS": str(config.eval_steps),
+                    "EVAL_ROLLOUT_N": str(config.eval_rollout_n),
+                }
+            )
         if config.selfplay_variant == "curriculum_v3":
             train_overrides["MULTI_TURN_SCHEDULER"] = "graphtask_curriculum_solver"
         if config.response_prefix is not None:
@@ -1134,12 +1234,17 @@ def run_self_play(
                 "questioner_prompts": (
                     counts["questioner"] if not dry_run else config.questioner_episodes
                 ),
-                "solver_prompts": counts["solver"] if not dry_run else config.solver_episodes,
+                "solver_prompts": (
+                    counts["solver"]
+                    if not dry_run
+                    else _solver_episode_count(config, round_index)
+                ),
                 "actor_completions_upper_bound": (
                     (
                         counts["questioner"] + counts["solver"]
                         if not dry_run
-                        else config.questioner_episodes + config.solver_episodes
+                        else config.questioner_episodes
+                        + _solver_episode_count(config, round_index)
                     )
                     * config.rollout_n
                 ),
@@ -1267,6 +1372,14 @@ def run_self_play(
                                 **train_env,
                                 "LORA_ADAPTER_PATH": str(phase_adapter),
                                 "TRAIN_DATA": str(phase_data.resolve()),
+                                # The fixed validation rows are Solver tasks;
+                                # evaluating them during a Questioner update
+                                # would measure the wrong policy.
+                                "EVAL_STRATEGY": (
+                                    train_env.get("EVAL_STRATEGY", "no")
+                                    if phase == "solver"
+                                    else "no"
+                                ),
                                 "OUTPUT_DIR": str(phase_dir.resolve()),
                                 "EXPERIMENT_NAME": (
                                     f"graphtask-selfplay-frontier-v2-r{round_index:03d}-{phase}"
@@ -1320,9 +1433,27 @@ def run_self_play(
                                     min_novelty=(
                                         0.0 if relaxed else config.archive_min_novelty
                                     ),
+                                    min_target_alignment=(
+                                        0.0
+                                        if relaxed
+                                        else config.archive_min_target_alignment
+                                    ),
                                 )
                                 admission_summary["curriculum_phase"] = curriculum_phase
+                                admission_summary["available_for_round"] = _archive_round_size(
+                                    archive_path, round_index
+                                )
                                 write_json(logs / "archive_admission.json", admission_summary)
+                                available = int(admission_summary["available_for_round"])
+                                if available < config.curriculum_min_archive_growth:
+                                    raise RuntimeError(
+                                        "self-play closed-loop gate failed before Solver update: "
+                                        f"round {round_index} has {available} archived tasks, "
+                                        "requires at least "
+                                        f"{config.curriculum_min_archive_growth}; inspect "
+                                        f"{logs / 'archive_admission.json'} and Questioner "
+                                        "reward diagnostics"
+                                    )
                                 counts["solver"] = _write_solver_dataset(
                                     config,
                                     archive_path,
@@ -1437,6 +1568,7 @@ def run_self_play(
                 min_pass_rate=config.archive_min_pass_rate,
                 max_pass_rate=config.archive_max_pass_rate,
                 min_novelty=config.archive_min_novelty,
+                min_target_alignment=config.archive_min_target_alignment,
             )
             write_json(logs / "archive_admission.json", admission_summary)
         archive_size_after = _archive_size(archive_path)

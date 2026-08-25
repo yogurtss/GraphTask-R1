@@ -96,11 +96,28 @@ def _choice(name: str | None) -> SimpleNamespace:
     return _choice_with_arguments(name)
 
 
-def test_reward_completion_removes_only_prefilled_empty_thinking(plugin: Any) -> None:
+def test_reward_completion_normalizes_optional_leading_thinking(plugin: Any) -> None:
     payload = '{"version":"0.1","ops":[]}'
 
     assert plugin._reward_completion(f"<think>\n\n</think>\n\n{payload}") == payload
-    assert plugin._reward_completion(f"<think>reason</think>{payload}") != payload
+    assert plugin._reward_completion(f"<think>reason</think>{payload}") == payload
+    assert plugin._reward_completion(payload) == payload
+
+
+def test_dataset_registration_does_not_require_validation_data(
+    plugin: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    train = tmp_path / "train.parquet"
+    train.touch()
+    registered: list[object] = []
+    monkeypatch.setattr(plugin, "register_dataset", registered.append)
+    monkeypatch.setenv("GRAPHTASK_MS_SWIFT_DATA_KIND", "sft")
+    monkeypatch.setenv("GRAPHTASK_MS_SWIFT_TRAIN_DATA", str(train))
+    monkeypatch.delenv("GRAPHTASK_MS_SWIFT_VAL_DATA", raising=False)
+
+    plugin._register_data()
+
+    assert [item.dataset_name for item in registered] == ["graphtask-train"]
 
 
 def test_distributed_cleanup_destroys_initialized_process_group(
@@ -557,6 +574,7 @@ def test_grpo_launcher_can_select_curriculum_scheduler() -> None:
     assert 'MULTI_TURN_SCHEDULER="${MULTI_TURN_SCHEDULER:-graphtask_solver}"' in launcher
     assert '--multi_turn_scheduler "$MULTI_TURN_SCHEDULER"' in launcher
     assert '--response_prefix "$RESPONSE_PREFIX"' in launcher
+    assert '--template "${TEMPLATE:-qwen3}"' in launcher
     assert 'TRAIN_DATA="${TRAIN_DATA:-${SOLVER_RL_TRAIN_DATA:-}}"' in launcher
 
 

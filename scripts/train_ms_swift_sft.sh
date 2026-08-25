@@ -10,7 +10,6 @@ fi
 : "${MODEL_PATH:=Qwen/Qwen3-4B-Instruct-2507}"
 : "${MODEL_TYPE:=qwen3}"
 : "${TRAIN_DATA:?Set TRAIN_DATA to an SFT parquet file}"
-: "${VAL_DATA:=$TRAIN_DATA}"
 : "${OUTPUT_DIR:=outputs/ms-swift-sft-qwen3-4b-cu124}"
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,25 +20,45 @@ if ! command -v swift >/dev/null 2>&1; then
   echo "ms-swift CLI not found; install ms-swift==3.10.3 in the CUDA 12.4 environment" >&2
   exit 2
 fi
-if [[ ! -f "$TRAIN_DATA" || ! -f "$VAL_DATA" ]]; then
-  echo "SFT parquet not found; generate it or fix TRAIN_DATA/VAL_DATA" >&2
+if [[ ! -f "$TRAIN_DATA" ]]; then
+  echo "SFT parquet not found; generate it or fix TRAIN_DATA" >&2
   exit 2
 fi
 
 python "$PROJECT_ROOT/scripts/validate_ms_swift_data.py" \
-  --kind sft --input "$TRAIN_DATA" "$VAL_DATA"
+  --kind sft --input "$TRAIN_DATA"
 
 export GRAPHTASK_MS_SWIFT_DATA_KIND=sft
 export GRAPHTASK_MS_SWIFT_TRAIN_DATA="$TRAIN_DATA"
-export GRAPHTASK_MS_SWIFT_VAL_DATA="$VAL_DATA"
 NUM_GPUS="${NUM_GPUS:-4}"
+EVAL_STRATEGY="${EVAL_STRATEGY:-no}"
+EVAL_ARGS=(--eval_strategy no)
+if [[ "$EVAL_STRATEGY" == "steps" ]]; then
+  : "${VAL_DATA:?Set VAL_DATA when EVAL_STRATEGY=steps}"
+  if [[ ! -f "$VAL_DATA" ]]; then
+    echo "SFT validation parquet not found: $VAL_DATA" >&2
+    exit 2
+  fi
+  python "$PROJECT_ROOT/scripts/validate_ms_swift_data.py" \
+    --kind sft --input "$VAL_DATA"
+  export GRAPHTASK_MS_SWIFT_VAL_DATA="$VAL_DATA"
+  EVAL_ARGS=(
+    --val_dataset graphtask-val
+    --eval_strategy steps
+    --eval_steps "${EVAL_STEPS:-100}"
+  )
+elif [[ "$EVAL_STRATEGY" != "no" ]]; then
+  echo "EVAL_STRATEGY must be no or steps" >&2
+  exit 2
+fi
 
 NPROC_PER_NODE="$NUM_GPUS" swift sft \
   --model "$MODEL_PATH" \
   --model_type "$MODEL_TYPE" \
+  --template "${TEMPLATE:-qwen3}" \
   --train_type lora \
   --dataset graphtask-train \
-  --val_dataset graphtask-val \
+  "${EVAL_ARGS[@]}" \
   --external_plugins "$PROJECT_ROOT/graphtask_r1/training/ms_swift_plugin.py" \
   --agent_template hermes \
   --torch_dtype bfloat16 \
@@ -58,7 +77,6 @@ NPROC_PER_NODE="$NUM_GPUS" swift sft \
   --dataset_num_proc "${DATASET_NUM_PROC:-1}" \
   --dataloader_num_workers "${DATALOADER_NUM_WORKERS:-1}" \
   --load_from_cache_file false \
-  --eval_steps "${EVAL_STEPS:-100}" \
   --save_steps "${SAVE_STEPS:-100}" \
   --save_total_limit "${SAVE_TOTAL_LIMIT:-2}" \
   --logging_steps "${LOGGING_STEPS:-5}" \

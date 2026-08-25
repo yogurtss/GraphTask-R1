@@ -14,7 +14,12 @@ from graphtask_r1.generation import compile_trace, validate_proposal
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import graphscript_operators, program_to_graphscript
 from graphtask_r1.schema import RelationInfo, TaskCertificate, TaskProposal, TaskTrainingRecord
-from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
+from graphtask_r1.training.prompts import (
+    GraphScriptVersion,
+    InteractionMode,
+    QuestionerContract,
+    role_prompt,
+)
 from graphtask_r1.training.questioner_context import (
     build_questioner_seed_context,
     render_questioner_seed_payload,
@@ -76,6 +81,7 @@ def _questioner_messages(
     interaction_mode: InteractionMode,
     graphscript_version: GraphScriptVersion,
     relation_catalog: tuple[RelationInfo, ...],
+    questioner_contract: QuestionerContract,
 ) -> list[dict[str, object]]:
     topic_ids = tuple(entity.entity_id for entity in task.topic_entities)
     proposal = TaskProposal(topic_entities=topic_ids, program=task.program)
@@ -99,13 +105,38 @@ def _questioner_messages(
             interaction_mode=interaction_mode,
             relation_catalog=relation_catalog,
             graphscript_version=graphscript_version,
+            questioner_contract=questioner_contract,
         )
     ]
     if interaction_mode == "graphscript":
         if graphscript_version == "0.1" and len(topic_ids) != 1:
             raise ValueError("GraphScript v0.1 SFT requires exactly one topic entity")
         script = program_to_graphscript(task.program, version=graphscript_version)
-        messages.append({"role": "assistant", "content": script.model_dump_json(by_alias=True)})
+        content = (
+            json.dumps(
+                {
+                    "question": task.question,
+                    "program": script.model_dump(mode="json", by_alias=True),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if questioner_contract == "question_program"
+            else script.model_dump_json(by_alias=True)
+        )
+        messages.append({"role": "assistant", "content": content})
+        return messages
+    if questioner_contract == "question_program":
+        content = json.dumps(
+            {
+                "question": task.question,
+                "topic_entities": list(topic_ids),
+                "program": task.program.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        messages.append({"role": "assistant", "content": f"<task>{content}</task>"})
         return messages
     messages.append(
         {
@@ -238,6 +269,7 @@ def export_sft_dataset(
     graphscript_version: GraphScriptVersion = "0.1",
     relation_catalog: tuple[RelationInfo, ...] = (),
     relation_catalogs: Mapping[str, tuple[RelationInfo, ...]] | None = None,
+    questioner_contract: QuestionerContract = "program",
 ) -> int:
     if total is None and isinstance(tasks, Sized):
         total = len(tasks)
@@ -293,6 +325,7 @@ def export_sft_dataset(
                             interaction_mode=interaction_mode,
                             graphscript_version=graphscript_version,
                             relation_catalog=task_catalog,
+                            questioner_contract=questioner_contract,
                         ),
                         "role": "questioner",
                         "task_id": task.task_id,
@@ -340,6 +373,7 @@ def export_questioner_sft_dataset(
     graphscript_version: GraphScriptVersion = "0.3",
     relation_catalog: tuple[RelationInfo, ...] = (),
     relation_catalogs: Mapping[str, tuple[RelationInfo, ...]] | None = None,
+    questioner_contract: QuestionerContract = "program",
 ) -> dict[str, int]:
     """Deterministically select target-structured Questioner-only SFT rows."""
     selected, sampling = select_questioner_tasks(
@@ -359,6 +393,7 @@ def export_questioner_sft_dataset(
         graphscript_version=graphscript_version,
         relation_catalog=relation_catalog,
         relation_catalogs=relation_catalogs,
+        questioner_contract=questioner_contract,
     )
     metric_names = (
         "scanned",

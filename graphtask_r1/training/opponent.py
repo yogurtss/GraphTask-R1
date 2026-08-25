@@ -19,6 +19,9 @@ from graphtask_r1.schema import Answer, AnswerSet, BenchmarkExample, RelationInf
 from graphtask_r1.training.parsing import parse_solver_output
 from graphtask_r1.training.prompts import GraphScriptVersion, InteractionMode, role_prompt
 from graphtask_r1.training.relations import load_relation_catalog
+from graphtask_r1.training.response_normalization import (
+    normalize_graphscript_response,
+)
 from graphtask_r1.utils import stable_hash
 
 TOOLS = [
@@ -91,6 +94,7 @@ async def request_opponent(
     generated_question: str | None = None,
     allowed_rejection_reasons: frozenset[str] = frozenset(),
     recover_invalid_tool_calls: bool = False,
+    target_alignment_components: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     try:
         import aiohttp
@@ -118,6 +122,10 @@ async def request_opponent(
         payload["allowed_rejection_reasons"] = sorted(allowed_rejection_reasons)
     if recover_invalid_tool_calls:
         payload["recover_invalid_tool_calls"] = True
+    if target_alignment_components is not None:
+        payload["target_alignment_components"] = {
+            str(key): float(value) for key, value in target_alignment_components.items()
+        }
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -402,7 +410,7 @@ class FrozenSolverService:
             message = await self._completion(messages, use_tools=False, **completion_kwargs)
             try:
                 script = parse_graphscript(
-                    str(message.get("content", "")),
+                    normalize_graphscript_response(str(message.get("content", ""))),
                     max_follow_limit=max_follow_limit or self.max_follow_limit,
                 )
                 if script.version != effective_version:
@@ -679,6 +687,15 @@ class FrozenSolverService:
             "novelty_textual": textual,
             "samples": samples,
         }
+        raw_alignment = payload.get("target_alignment_components", {})
+        if isinstance(raw_alignment, dict):
+            summary.update(
+                {
+                    str(key): float(value)
+                    for key, value in raw_alignment.items()
+                    if str(key).startswith("target_") and 0.0 <= float(value) <= 1.0
+                }
+            )
         task = task.model_copy(
             update={
                 "solver_stats": {

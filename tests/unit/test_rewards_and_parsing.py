@@ -158,8 +158,19 @@ def test_staged_archive_admission_is_deterministic_and_difficulty_gated(
     staged_path = tmp_path / "staged.sqlite"
     archive_path = tmp_path / "archive.sqlite"
     with TaskArchive(staged_path) as staged:
-        for task, pass_rate in zip(tasks, (0.0, 0.5, 1.0), strict=True):
-            assert staged.add(task.model_copy(update={"solver_stats": {"pass_rate": pass_rate}}))
+        for task, pass_rate, alignment in zip(
+            tasks, (0.0, 0.5, 1.0), (1.0, 0.8, 0.2), strict=True
+        ):
+            assert staged.add(
+                task.model_copy(
+                    update={
+                        "solver_stats": {
+                            "pass_rate": pass_rate,
+                            "target_alignment": alignment,
+                        }
+                    }
+                )
+            )
 
     summary = promote_staged_tasks(
         staged_path,
@@ -167,11 +178,16 @@ def test_staged_archive_admission_is_deterministic_and_difficulty_gated(
         min_pass_rate=0.25,
         max_pass_rate=0.75,
         min_novelty=0.0,
+        min_target_alignment=0.6,
     )
 
     assert summary["candidates"] == 3
     assert summary["accepted"] == 1
-    assert summary["reason_counts"] == {"TOO_EASY": 1, "TOO_HARD": 1}
+    assert summary["reason_counts"] == {
+        "TARGET_MISMATCH": 1,
+        "TOO_EASY": 1,
+        "TOO_HARD": 1,
+    }
     with TaskArchive(archive_path) as archive:
         promoted = archive.all()
     assert len(promoted) == 1

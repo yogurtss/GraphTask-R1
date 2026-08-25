@@ -24,6 +24,9 @@ from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import execute_graphscript, parse_graphscript
 from graphtask_r1.training.ms_swift_data import convert_rl_row
 from graphtask_r1.training.parsing import parse_task_proposal
+from graphtask_r1.training.response_normalization import (
+    normalize_graphscript_response,
+)
 from graphtask_r1.utils import write_json, write_records
 
 LOGGER = logging.getLogger(__name__)
@@ -455,16 +458,17 @@ async def visualize_sft_capability(
                         seed=generation_seed,
                     )
                     content = str(completion.content)
+                    normalized_content = normalize_graphscript_response(content)
                     components = await effective_scorer(
                         str(row["data_source"]),
-                        content,
+                        normalized_content,
                         str(row["ground_truth"]),
                         cast(dict[str, Any], row["extra_info"]),
                     )
                     artifact: dict[str, Any] = {}
                     if role == "questioner" and int(components.get("reward_stage", -1.0)) == 6:
                         artifact = _questioner_artifact(
-                            content,
+                            normalized_content,
                             cast(dict[str, Any], row["extra_info"]),
                             probe_backends,
                         )

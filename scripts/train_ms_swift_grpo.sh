@@ -51,6 +51,7 @@ case "$RL_ALGORITHM" in
       --advantage_estimator grpo
       --scale_rewards group
       --kl_in_reward false
+      --beta "${KL_BETA:-0.001}"
     )
     ;;
   reinforce_plus_plus)
@@ -58,6 +59,7 @@ case "$RL_ALGORITHM" in
       --advantage_estimator reinforce_plus_plus
       --scale_rewards batch
       --kl_in_reward true
+      --beta "${KL_BETA:-0.001}"
     )
     ;;
   *)
@@ -134,16 +136,35 @@ TEMPLATE_ARGS=()
 if [[ -n "${RESPONSE_PREFIX:-}" ]]; then
   TEMPLATE_ARGS=(--response_prefix "$RESPONSE_PREFIX")
 fi
+EVAL_STRATEGY="${EVAL_STRATEGY:-no}"
+EVAL_ARGS=(--eval_strategy no)
+if [[ "$EVAL_STRATEGY" == "steps" ]]; then
+  if [[ ! -f "$VAL_DATA" ]]; then
+    echo "Solver RL validation parquet not found: $VAL_DATA" >&2
+    exit 2
+  fi
+  export GRAPHTASK_MS_SWIFT_VAL_DATA="$VAL_DATA"
+  EVAL_ARGS=(
+    --val_dataset graphtask-val
+    --eval_strategy steps
+    --eval_steps "${EVAL_STEPS:-20}"
+    --num_generations_eval "${EVAL_ROLLOUT_N:-4}"
+  )
+elif [[ "$EVAL_STRATEGY" != "no" ]]; then
+  echo "EVAL_STRATEGY must be no or steps" >&2
+  exit 2
+fi
 
 NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --rlhf_type grpo \
   "${RL_ALGORITHM_ARGS[@]}" \
   --model "$MODEL_PATH" \
   --model_type "$MODEL_TYPE" \
+  --template "${TEMPLATE:-qwen3}" \
   --adapters "$LORA_ADAPTER_PATH" \
   --train_type lora \
   --dataset graphtask-train \
-  --eval_strategy no \
+  "${EVAL_ARGS[@]}" \
   --external_plugins "$PROJECT_ROOT/graphtask_r1/training/ms_swift_plugin.py" \
   --reward_funcs graphtask_score \
   --agent_template hermes \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -107,20 +108,43 @@ def test_question_program_contract_and_legacy_code_only_parser() -> None:
     assert '<task>{"question":"...","topic_entities"' in tool_prompt[0]["content"]
 
 
-def test_production_scores_question_and_code_without_calling_opponent(
+def test_production_stages_only_fully_certified_candidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def forbidden_opponent(*args: object, **kwargs: object) -> dict[str, float]:
-        del args, kwargs
-        raise AssertionError("production must not call the opponent")
+    calls: list[dict[str, object]] = []
 
-    monkeypatch.setattr(reward_module, "request_opponent", forbidden_opponent)
+    async def fake_opponent(*args: object, **kwargs: object) -> dict[str, float]:
+        del args
+        calls.append(kwargs)
+        return {
+            "pass_rate": 0.0,
+            "program_parse_rate": 1.0,
+            "execution_rate_given_parse": 1.0,
+            "semantic_success_given_execution": 0.0,
+            "novelty_structural": 1.0,
+            "novelty_textual": 1.0,
+        }
+
+    monkeypatch.setattr(reward_module, "request_opponent", fake_opponent)
+    monkeypatch.setattr(
+        reward_module,
+        "verify_task",
+        lambda *args, **kwargs: SimpleNamespace(
+            passed=True,
+            executable=True,
+            answer_nonempty=True,
+            cardinality_valid=True,
+            answer_leak=False,
+            rejection_reasons=(),
+        ),
+    )
+    production_info = {**_info("production"), "question_alignment_min": 0.0}
     wrapped = asyncio.run(
         compute_score(
             "graphtask/questioner",
             _wrapped("Where is Alice's workplace located?"),
             "{}",
-            _info("production"),
+            production_info,
         )
     )
     code_only = asyncio.run(
@@ -128,7 +152,7 @@ def test_production_scores_question_and_code_without_calling_opponent(
             "graphtask/questioner",
             json.dumps(_script()),
             "{}",
-            _info("production"),
+            production_info,
         )
     )
     truncated = asyncio.run(
@@ -139,7 +163,7 @@ def test_production_scores_question_and_code_without_calling_opponent(
                 '{"version":"0.1","ops":[{"op":"start","entity":"$seed"}'
             ),
             "{}",
-            _info("production"),
+            production_info,
         )
     )
 
@@ -150,6 +174,35 @@ def test_production_scores_question_and_code_without_calling_opponent(
     assert code_only["milestone_code_present"] == 1.0
     assert code_only["milestone_question_present"] == 0.0
     assert code_only["reject_missing_question"] == 1.0
+    assert len(calls) == 1
+    assert calls[0]["generated_question"] == "Where is Alice's workplace located?"
+    assert calls[0]["target_alignment_components"]["target_alignment"] == 1.0
+
+
+def test_curriculum_questioner_backend_certification_error_is_scored_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = toy_graph()
+
+    def reject_certification(*args: object, **kwargs: object) -> AnswerSet:
+        del args, kwargs
+        raise TypeError("unsupported generated program shape")
+
+    monkeypatch.setattr(reward_module, "backend_from_snapshot", lambda _: backend)
+    monkeypatch.setattr(backend, "execute_program", reject_certification)
+
+    result = asyncio.run(
+        compute_score(
+            "graphtask/questioner",
+            _wrapped("Where is Alice's workplace located?"),
+            "{}",
+            _info("frontier"),
+        )
+    )
+
+    assert result["executable"] == 0.0
+    assert result["reject_certified_execution_error"] == 1.0
+    assert result["score"] < 0.2
 
 
 def test_grounding_uses_generated_question_and_relaxes_only_quality_rejections(
@@ -171,12 +224,19 @@ def test_grounding_uses_generated_question_and_relaxes_only_quality_rejections(
 
     monkeypatch.setattr(reward_module, "request_opponent", fake_opponent)
     question = "Who is reached by following friend twice from Alice?"
+    info = {
+        **_info("grounding"),
+        "source_stratum": (
+            "roots=1-1|terminal=count|nodes=11+|"
+            "ops=count,filter_type|answers=literal"
+        ),
+    }
     score = asyncio.run(
         compute_score(
             "graphtask/questioner",
             _wrapped(question, first="friend", second="friend"),
             "{}",
-            _info("grounding"),
+            info,
         )
     )
 
@@ -187,6 +247,12 @@ def test_grounding_uses_generated_question_and_relaxes_only_quality_rejections(
     assert score["reject_shortcut_found"] == 1.0
     assert score["milestone_certified"] == 0.0
     assert 0.0 < score["milestone_question_program_alignment"] <= 1.0
+    assert 0.0 <= score["target_alignment"] < 1.0
+    assert captured["target_alignment_components"] == {
+        key.removeprefix("milestone_"): value
+        for key, value in score.items()
+        if key.startswith("target_")
+    }
     assert score["opponent_semantic_success_given_execution"] == 0.75
 
 

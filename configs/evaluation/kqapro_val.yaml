@@ -12,6 +12,8 @@ model:
   api_key: null
   model: ${KQAPRO_MODEL}
   max_completion_tokens: 4096
+  chat_template_kwargs:
+    enable_thinking: false
 
 seed: 42
 # Conservative defaults for one 4B model on a single GPU. Increase only after a bounded smoke.

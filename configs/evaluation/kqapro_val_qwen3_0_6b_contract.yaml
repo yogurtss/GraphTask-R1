@@ -1,21 +1,19 @@
-# Single-mode eval/visualization example for a deployed Qwen3-8B base or adapter.
+# Reproducible one-GPU comparison config for the bounded Qwen3-0.6B experiment.
+# SFT and self-play evaluations must use this same prompt and decoding contract.
 input_path: ${KQAPRO_DIR}/val/tasks.parquet
 relation_catalog: ${KQAPRO_DIR}/relation_catalog.json
 graph_snapshot: kqapro-v1
 graphscript_version: "0.3"
-
 model:
   model_url: ${KQAPRO_MODEL_URL}
-  # Set for hosted APIs; leave null for a local endpoint without authentication.
   api_key: null
   model: ${KQAPRO_MODEL}
-  max_completion_tokens: 4096
+  max_completion_tokens: 512
   chat_template_kwargs:
     enable_thinking: false
-
 seed: 42
-concurrency: 1
-request_timeout_s: 900
+concurrency: 2
+request_timeout_s: 180
 request_retries: 1
 max_follow_limit: 100
 max_edge_visits: 200

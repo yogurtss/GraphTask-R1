@@ -189,6 +189,8 @@ def test_questioner_sft_export_and_balanced_combine_options() -> None:
             "questioner.parquet",
             "--count",
             "2048",
+            "--questioner-contract",
+            "question_program",
             "--seed",
             "7",
         ]
@@ -197,6 +199,7 @@ def test_questioner_sft_export_and_balanced_combine_options() -> None:
     assert args.seed == 7
     assert args.graphscript_version == "0.3"
     assert args.interaction_mode == "graphscript"
+    assert args.questioner_contract == "question_program"
 
     combined = build_parser().parse_args(
         [
@@ -415,6 +418,21 @@ def test_kqapro_eval_and_visualization_cli_are_separate() -> None:
     assert comparison.metrics == [Path("base.json"), Path("base_tool.json")]
     assert comparison.baseline_stage == "base_tool"
 
+    promotion = build_parser().parse_args(
+        [
+            "evaluate",
+            "kqapro-promote",
+            "--baseline",
+            "sft.json",
+            "--candidate",
+            "selfplay.json",
+            "--require-promotion",
+        ]
+    )
+    assert promotion.baseline == Path("sft.json")
+    assert promotion.candidate == Path("selfplay.json")
+    assert promotion.require_promotion is True
+
 
 def test_training_launcher_defaults_to_ms_swift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -527,6 +545,20 @@ def test_ms_swift_profile_selects_ms_swift_launcher(tmp_path: Path) -> None:
     assert result["training_backend"] == "ms_swift"
     assert result["command"] == ["bash", "scripts/train_ms_swift_sft.sh"]
     assert result["environment"]["MODEL_TYPE"] == "qwen3"
+
+
+def test_4b_sft_profile_disables_training_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EVAL_STRATEGY", raising=False)
+    result = _launch_stage(
+        "sft",
+        Path("configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml"),
+        dry_run=True,
+    )
+
+    assert result["environment"]["EVAL_STRATEGY"] == "no"
+    assert "VAL_DATA" not in result["environment"]
 
 
 def test_non_ms_swift_training_backend_is_rejected(tmp_path: Path) -> None:

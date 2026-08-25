@@ -1,0 +1,72 @@
+# Larger, validation-gated continuation after the bounded 96-task diagnosis.
+model_path: ${SMOKE_MODEL_PATH}
+model_type: qwen3
+response_prefix: '<think>\n\n</think>\n\n'
+initial_adapter: ${INITIAL_ADAPTER}
+base_tasks: ${BASE_TASKS}
+val_data: ${VAL_DATA}
+questioner_seeds: ${QUESTIONER_SEEDS}
+graph_snapshot: kqapro-v1
+selfplay_variant: curriculum_v3
+rounds: 1
+questioner_episodes: 192
+solver_episodes: 256
+opponent_samples: 1
+
+curriculum_production_rounds: 0
+curriculum_grounding_rounds: 0
+curriculum_solver_fraction_start: 1.0
+curriculum_replay_ratio: 0.3
+curriculum_question_alignment_min: 0.35
+curriculum_max_seed_entities_start: 4
+curriculum_max_seed_entities_end: 4
+curriculum_min_archive_growth: 12
+frontier_target_start: 0.5
+frontier_target_end: 0.5
+frontier_sigma: 0.25
+archive_min_pass_rate: 0.0
+archive_max_pass_rate: 1.0
+archive_min_novelty: 0.0
+archive_min_target_alignment: 0.6
+
+# Generated examples are capped by the number of unique accepted tasks. Any
+# unavailable new-task quota is backfilled from the certified base pool.
+base_ratio: 0.8
+archive_ratio: 0.0
+new_ratio: 0.2
+seed: 62
+
+actor_gpus: "0"
+opponent_gpus: "0"
+allow_gpu_overlap: true
+use_vllm: false
+opponent_backend: transformers
+opponent_device: cuda:0
+opponent_port: 18080
+train_script: scripts/train_ms_swift_grpo.sh
+
+interaction_mode: graphscript
+graphscript_version: "0.3"
+relation_catalog: ${KQAPRO_RELATION_CATALOG}
+relation_catalogs:
+  kqapro-v1: ${KQAPRO_RELATION_CATALOG}
+max_follow_limit: 100
+max_edge_visits: 200
+max_returned_entities: 1000
+max_completion_tokens: 512
+vllm_max_model_len: 16384
+deepspeed: none
+rl_algorithm: grpo
+kl_beta: 0.001
+micro_batch_size: 1
+eval_batch_size: 4
+validation_samples: 64
+enable_grpo_validation: true
+eval_steps: 128
+eval_rollout_n: 4
+gradient_accumulation_steps: 1
+steps_per_generation: 4
+rollout_n: 4
+save_steps: 64
+save_total_limit: 4
+program_profile: graphscript_v0_3

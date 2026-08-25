@@ -6,6 +6,8 @@ model:
   api_key: null
   model: ${SFT_PROBE_MODEL}
   max_completion_tokens: 4096
+  chat_template_kwargs:
+    enable_thinking: false
 
 # Both inputs use the RL row schema so the probe executes the exact training prompt and reward.
 questioner_input: ${QUESTIONER_SEEDS}

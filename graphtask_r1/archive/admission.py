@@ -14,12 +14,15 @@ def promote_staged_tasks(
     min_pass_rate: float,
     max_pass_rate: float,
     min_novelty: float,
+    min_target_alignment: float = 0.0,
 ) -> dict[str, Any]:
     """Deterministically gate one round's candidates into the persistent archive."""
     if not 0.0 <= min_pass_rate <= max_pass_rate <= 1.0:
         raise ValueError("archive pass-rate bounds must satisfy 0 <= min <= max <= 1")
     if not 0.0 <= min_novelty <= 1.0:
         raise ValueError("archive min_novelty must be between 0 and 1")
+    if not 0.0 <= min_target_alignment <= 1.0:
+        raise ValueError("archive min_target_alignment must be between 0 and 1")
 
     with TaskArchive(staged_path) as staged:
         candidates = sorted(
@@ -33,6 +36,7 @@ def promote_staged_tasks(
     with TaskArchive(archive_path) as archive:
         for task in candidates:
             pass_rate = float(task.solver_stats.get("pass_rate", 0.0))
+            target_alignment = float(task.solver_stats.get("target_alignment", 1.0))
             structural, textual = archive.novelty(task.program_signature, task.question)
             novelty = 0.5 * (structural + textual)
             reasons: list[str] = []
@@ -44,6 +48,8 @@ def promote_staged_tasks(
                 reasons.append("DUPLICATE_SIGNATURE")
             if novelty < min_novelty:
                 reasons.append("LOW_NOVELTY")
+            if target_alignment < min_target_alignment:
+                reasons.append("TARGET_MISMATCH")
 
             if not reasons:
                 admission = {
@@ -78,6 +84,7 @@ def promote_staged_tasks(
                     "novelty_structural": structural,
                     "novelty_textual": textual,
                     "novelty": novelty,
+                    "target_alignment": target_alignment,
                     "reason_codes": reasons,
                 }
             )
@@ -91,6 +98,7 @@ def promote_staged_tasks(
             "min_pass_rate": min_pass_rate,
             "max_pass_rate": max_pass_rate,
             "min_novelty": min_novelty,
+            "min_target_alignment": min_target_alignment,
         },
         "decisions": decisions,
     }
