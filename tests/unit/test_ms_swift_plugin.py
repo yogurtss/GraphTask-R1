@@ -104,6 +104,14 @@ def test_reward_completion_normalizes_optional_leading_thinking(plugin: Any) -> 
     assert plugin._reward_completion(payload) == payload
 
 
+def test_reward_completion_preserves_questioner_envelope(plugin: Any) -> None:
+    payload = (
+        '{"question":"Who?","program":{"version":"0.3","ops":[]}}'
+    )
+
+    assert plugin._reward_completion(f"</tool_call>{payload}") == payload
+
+
 def test_dataset_registration_does_not_require_validation_data(
     plugin: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

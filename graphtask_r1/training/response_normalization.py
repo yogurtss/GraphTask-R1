@@ -9,8 +9,22 @@ _THINK_PREFIX_PATTERN = re.compile(
 )
 
 
-def _extract_graphscript_json(text: str) -> str | None:
-    """Return the first complete JSON object shaped like GraphScript."""
+def _is_graphscript_payload(payload: object) -> bool:
+    return (
+        isinstance(payload, dict)
+        and "version" in payload
+        and isinstance(payload.get("ops"), list)
+    )
+
+
+def _is_questioner_envelope(payload: object) -> bool:
+    """Recognize the Questioner contract without discarding its question."""
+
+    return isinstance(payload, dict) and _is_graphscript_payload(payload.get("program"))
+
+
+def _extract_structured_response_json(text: str) -> str | None:
+    """Return the first complete Solver payload or Questioner envelope."""
 
     decoder = json.JSONDecoder()
     search_from = 0
@@ -23,24 +37,24 @@ def _extract_graphscript_json(text: str) -> str | None:
         except json.JSONDecodeError:
             search_from = object_start + 1
             continue
-        if (
-            isinstance(payload, dict)
-            and "version" in payload
-            and isinstance(payload.get("ops"), list)
-        ):
+        # Check the outer Questioner envelope before looking at nested objects.
+        # Otherwise scanning would return only its GraphScript ``program`` and
+        # silently drop the generated question used by Questioner rewards.
+        if _is_questioner_envelope(payload) or _is_graphscript_payload(payload):
             return text[object_start:object_end]
-        # Continue one character later so nested GraphScript objects can also
-        # be discovered inside an unrelated outer object.
+        # Continue one character later so structured responses nested inside an
+        # unrelated wrapper can still be discovered.
         search_from = object_start + 1
 
 
 def normalize_graphscript_response(text: str) -> str:
-    """Extract GraphScript JSON from a possibly wrapped model response.
+    """Extract structured JSON from a possibly wrapped model response.
 
     Serving stacks and models may prepend thinking text, tool-call delimiters,
-    markdown, or other diagnostics.  The schema parser remains responsible for
-    validating the extracted object's version and operations.
+    markdown, or other diagnostics. Solver GraphScript objects are extracted
+    directly, while Questioner question/program envelopes remain intact. The
+    role-specific parser remains responsible for full schema validation.
     """
 
     normalized = _THINK_PREFIX_PATTERN.sub("", text, count=1).strip()
-    return _extract_graphscript_json(normalized) or normalized
+    return _extract_structured_response_json(normalized) or normalized

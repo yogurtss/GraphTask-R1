@@ -45,6 +45,20 @@ from graphtask_r1.training.response_normalization import normalize_graphscript_r
             '{"wrapper":{"version":"0.3","ops":[]}}',
             '{"version":"0.3","ops":[]}',
         ),
+        (
+            '{"question":"Who?","program":{"version":"0.3","ops":[]}}',
+            '{"question":"Who?","program":{"version":"0.3","ops":[]}}',
+        ),
+        (
+            '</tool_call>noise {"question":"Who?","program":'
+            '{"version":"0.3","ops":[]}} trailing text',
+            '{"question":"Who?","program":{"version":"0.3","ops":[]}}',
+        ),
+        (
+            'metadata={"request":1}; result={"question":"Who?","program":'
+            '{"version":"0.3","ops":[]}}',
+            '{"question":"Who?","program":{"version":"0.3","ops":[]}}',
+        ),
     ],
 )
 def test_normalize_graphscript_response(raw: str, expected: str) -> None:
