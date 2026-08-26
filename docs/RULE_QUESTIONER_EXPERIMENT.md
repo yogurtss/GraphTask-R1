@@ -38,6 +38,35 @@ PYTHONPATH=. python scripts/experiment_path_sampler.py \
 
 ## 2. 同时生成独立 SFT 和 self-play 数据
 
+上面的 N=1,000 用于比较采样策略。4B 正式流程先把 `family_balanced` 候选池扩大到 10,000 次
+尝试，使严格认证后的唯一样本足以支持约 5,000 条 Questioner SFT 和 4,096 条 self-play seeds：
+
+```bash
+PYTHONPATH=. python scripts/experiment_path_sampler.py \
+  --graph-db data/processed/kqapro/kqapro-v03-full-audit/graph.sqlite \
+  --reference-tasks data/processed/kqapro/kqapro-v03-full-audit/train/tasks.parquet \
+  --relation-catalog data/processed/kqapro/kqapro-v03-full-audit/relation_catalog.json \
+  --attempts 10000 --seed 42 \
+  --output-dir outputs/experiments/rule-path-sampler-n10000
+```
+
+4B 默认数据规模使用主流程约 10k 行的 1:1 mixed SFT，并生成 4,096 条 Program-first seeds：
+
+```bash
+PYTHONPATH=. python scripts/prepare_rule_questioner_data.py \
+  --graph-db data/processed/kqapro/kqapro-v03-full-audit/graph.sqlite \
+  --reference-tasks data/processed/kqapro/kqapro-v03-full-audit/train/tasks.parquet \
+  --candidates outputs/experiments/rule-path-sampler-n10000/family_balanced/candidates.jsonl \
+  --baseline-mixed-sft outputs/sft-data/preflight/mixed-train-accepted.parquet \
+  --selfplay-count 4096 --opponent-samples 4 --seed 42 \
+  --output-dir outputs/experiments/rule-questioner-4b-large/data
+```
+
+省略 `--sft-count` 时，脚本从 baseline mixed SFT 自动读取实际 Questioner 行数并等量替换，因此
+即使 5,000 条源任务认证后有少量 shortfall，仍能保持 Solver 行完全不变且维持严格 1:1 A/B。
+
+下面的 188/64 命令保留为 0.6B bounded A/B，不作为新的默认规模：
+
 ```bash
 PYTHONPATH=. python scripts/prepare_rule_questioner_data.py \
   --graph-db data/processed/kqapro/kqapro-v03-full-audit/graph.sqlite \
@@ -94,3 +123,44 @@ round 1 可将门槛设为 `[0, 1]` 接收全部认证题，后续再切回 `[0.
 这个 64 题结果显示没有精度退化且略有提升，但差异只有一个样本，不能视为统计显著。新模型的
 主要剩余问题是 GraphScript schema/执行质量，而不是开头的 `</tool_call>`：本次 PT 部署中该前缀
 出现 0 次，失败主要为 `NON_JSON`、`INVALID_SCHEMA` 和实体解析错误。
+
+## 5. 六阶段 self-play 脚本
+
+Program-first 4B 数据准备和约 10k mixed SFT 完成后，先设置六阶段配置引用的路径：
+
+```bash
+export INITIAL_ADAPTER=$PWD/outputs/sft/qwen3-4b-kqapro-v03/v0/checkpoint-625
+export BASE_TASKS=$PWD/outputs/sft-data/tasks/train.parquet
+export QUESTIONER_SEEDS=$PWD/outputs/experiments/rule-questioner-4b-large/data/questioner-selfplay.parquet
+export KQAPRO_RELATION_CATALOG=$PWD/data/processed/kqapro/kqapro-v03-full-audit/relation_catalog.json
+export GRAPHTASK_KQAPRO_DB=$PWD/data/processed/kqapro/kqapro-v03-full-audit/graph.sqlite
+```
+
+然后用一个 Bash 进程依次启动三轮 Questioner/Solver，共六个彼此独立的 Python 进程：
+
+```bash
+bash scripts/run_rule_questioner_selfplay_phases.sh \
+  configs/training/selfplay_qwen3_4b_rule_questioner_large.yaml \
+  outputs/selfplay/rule-questioner-qwen3-4b-10k
+```
+
+不传参数时，脚本默认就是上面的 4B 配置和输出目录。该配置每轮运行 1,024 个 Questioner
+episode、2,048 个 Solver episode，使用 4 路 opponent/rollout；默认 GPU 拓扑为 3 张 actor GPU
+加 1 张独立 SGLang opponent GPU。0.6B/64 条配置仍可通过显式传入
+`configs/training/selfplay_qwen3_0_6b_kqapro_contract_large.yaml` 使用。
+
+4B 配置将 `curriculum_min_archive_growth=128` 作为观测目标，不再把它当作必须精确达到的固定
+数量：有 1--127 条新任务时记录 `shortfall_allowed`；本轮为 0 时记录 `empty_backfill`，并以
+certified base pool 回填 Solver 数据继续运行。两种情况都会保留结构化 admission/rejection
+统计，便于区分 `TOO_HARD`、`TARGET_MISMATCH` 等根因。格式损坏、Program-first 固定程序缺失、
+Questioner 阶段未完成等契约错误仍会中止，避免悄悄训练错误数据。
+
+脚本会在启动前检查 adapter、base tasks、Program-first Questioner seeds、relation catalog 和 graph
+DB。六阶段的顺序、失败后的继续策略和 phase manifest 恢复规则与
+`scripts/run_selfplay_curriculum_phases.sh` 相同；整个脚本可安全重跑，已完成阶段会自动 no-op。
+不要并发启动两个脚本实例，因为六阶段共享 archive、manifest、GPU 和 opponent 端口。
+
+该脚本负责训练阶段隔离，不会把最后 checkpoint 自动视为最佳 checkpoint。每轮 Solver 完成后仍应
+按照 `docs/KQAPRO_TRAINING.md` 的固定 held-out 流程运行 `kqapro-promote
+--require-promotion`；只有 exact match、F1、tool success 均不退化且至少一项严格提升时，才将
+该 Solver 作为下一轮或最终模型。

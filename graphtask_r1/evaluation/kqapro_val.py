@@ -1803,8 +1803,17 @@ def assess_kqapro_promotion(
     if not isinstance(baseline, dict) or not isinstance(candidate, dict):
         raise ValueError("baseline and candidate metrics must be JSON objects")
     invariant_fields = ("dataset", "split", "graph_snapshot", "input", "examples")
+
+    def invariant_value(metrics: dict[str, Any], field: str) -> object:
+        value = metrics.get(field)
+        if field == "input" and isinstance(value, str):
+            return str(Path(value).resolve())
+        return value
+
     disagreements = [
-        field for field in invariant_fields if baseline.get(field) != candidate.get(field)
+        field
+        for field in invariant_fields
+        if invariant_value(baseline, field) != invariant_value(candidate, field)
     ]
     if disagreements:
         raise ValueError(

@@ -10,6 +10,7 @@ from graphtask_r1.experiments.rule_questioner import (
     build_rule_questioner_mixed_sft,
     export_rule_questioner_rl,
     export_rule_questioner_sft,
+    rule_questioner_replacement_count,
 )
 from graphtask_r1.graph import backend_from_snapshot
 
@@ -22,7 +23,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-tasks", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--sft-count", type=int, required=True)
+    parser.add_argument(
+        "--sft-count",
+        type=int,
+        help=(
+            "Questioner SFT rows to export. When omitted with --baseline-mixed-sft, "
+            "use its exact Questioner row count."
+        ),
+    )
     parser.add_argument(
         "--baseline-mixed-sft",
         type=Path,
@@ -41,11 +49,18 @@ def main() -> None:
     os.environ["GRAPHTASK_KQAPRO_DB"] = str(args.graph_db)
     backend = backend_from_snapshot("kqapro-v1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    sft_count = args.sft_count
+    if sft_count is None:
+        if args.baseline_mixed_sft is None:
+            raise ValueError(
+                "set --sft-count when --baseline-mixed-sft is not provided"
+            )
+        sft_count = rule_questioner_replacement_count(args.baseline_mixed_sft)
     sft = export_rule_questioner_sft(
         args.reference_tasks,
         args.output_dir / "questioner-sft.parquet",
         backend=backend,
-        count=args.sft_count,
+        count=sft_count,
         seed=args.seed,
     )
     rl = export_rule_questioner_rl(

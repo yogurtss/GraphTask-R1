@@ -14,6 +14,7 @@ from graphtask_r1.experiments.rule_questioner import (
     export_rule_questioner_sft,
     promote_rule_questioner_candidates,
     rule_questioner_messages,
+    rule_questioner_replacement_count,
 )
 from graphtask_r1.generation import certify_proposal, verbalize
 from graphtask_r1.graph import toy_graph
@@ -198,6 +199,7 @@ def test_mixed_sft_replaces_only_questioner_rows(tmp_path: Path) -> None:
 
     rows = pq.read_table(output).to_pylist()
     assert metrics["solver_rows"] == 1
+    assert rule_questioner_replacement_count(baseline) == 1
     assert {row["task_id"] for row in rows} == {"solver-kept", "task-1"}
     assert next(row for row in rows if row["role"] == "solver") == solver.to_pylist()[0]
 

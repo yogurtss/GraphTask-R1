@@ -626,3 +626,35 @@ def test_promotion_gate_requires_non_regression_and_a_strict_gain(tmp_path: Path
 
     assert decision["promoted"] is True
     assert decision["selected_model_id"] == "selfplay"
+
+
+def test_promotion_gate_normalizes_relative_and_absolute_input_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_path = tmp_path / "val" / "tasks.parquet"
+    input_path.parent.mkdir()
+    input_path.touch()
+    common = {
+        "dataset": "kqapro",
+        "split": "val",
+        "graph_snapshot": "kqapro-v1",
+        "examples": 64,
+        "overall": {
+            "exact_match": 0.1,
+            "f1": 0.1,
+            "tool_success_rate": 0.2,
+        },
+    }
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    write_json(baseline, {**common, "input": str(input_path.resolve())})
+    write_json(candidate, {**common, "input": "val/tasks.parquet"})
+
+    decision = assess_kqapro_promotion(
+        baseline,
+        candidate,
+        require_strict_improvement=False,
+    )
+
+    assert decision["promoted"] is True

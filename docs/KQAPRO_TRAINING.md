@@ -219,8 +219,15 @@ python -m graphtask_r1.cli train self-play \
 
 配置内已经包含 `learning_rate`，并设置 `enable_grpo_validation: false`；self-play 不要求手动
 `export LR`，也不读取 `VAL_DATA`。SFT 已经建立格式和 grounding 能力，因此三轮全部使用
-frontier reward；每轮至少需要新增 128 条通过执行、难度、新颖性和目标一致性门槛的 archive
-task，否则在 Solver 更新前失败，避免没有新训练信号的伪闭环。
+frontier reward；每轮以新增 128 条通过执行、难度、新颖性和目标一致性门槛的 archive task
+为目标。若本轮有合格任务但少于 128 条，运行会在 `archive_admission.json` 中记录
+`growth_gate.status=shortfall_allowed` 并继续；Solver 将每条新增任务至多使用一次，其余配额由
+certified base pool 回填。本轮新增任务为 0 时记录 `growth_gate.status=empty_backfill`，同样回填
+base pool 并继续，但保留所有结构化拒绝原因用于排查，不再因为固定 archive 数目打断六阶段流程。
+Solver 更新后还要求 on-policy rollout 的执行成功率至少为 10%；不足时会记录
+`solver_signal_gate.status=insufficient` 并阻止该 checkpoint 进入下一轮。每轮仍须用同一固定
+held-out 集运行 `kqapro-promote --require-promotion`；exact match、F1、tool success 任一回退，
+或三项全部仅打平，都会继续使用进入本轮前的 Solver。
 
 完成第一轮并在固定 held-out eval 上晋级后，再继续下一轮：
 

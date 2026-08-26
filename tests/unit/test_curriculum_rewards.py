@@ -192,6 +192,23 @@ def test_solver_syntax_reward_distinguishes_partial_outputs() -> None:
     assert partial.components["stage_syntax"] == 1.0
 
 
+def test_solver_syntax_reward_caps_truncated_json_prefix_credit() -> None:
+    truncated = solver_curriculum_reward(
+        SolverMilestones(
+            output_present=1.0,
+            schema_fraction=0.4,
+            valid_operation_fraction=0.4,
+            valid_prefix_fraction=0.4,
+        ),
+        stage="syntax",
+    )
+    complete = solver_curriculum_reward(_syntax_ready_solver(), stage="syntax")
+
+    assert truncated.total < 0.05
+    assert complete.total == pytest.approx(1.0)
+    assert truncated.components["syntax_validity_gate"] == pytest.approx(0.1)
+
+
 def test_solver_tool_reward_uses_call_success_before_answer_success() -> None:
     syntax = _syntax_ready_solver()
     invalid_calls = solver_curriculum_reward(
@@ -245,9 +262,9 @@ def test_solver_solve_reward_is_dense_in_f1_and_exact_match() -> None:
     )
 
     assert wrong.total < partial.total < exact.total == pytest.approx(1.0)
-    assert wrong.total == pytest.approx(0.25)
-    assert wrong.components["semantic_gate"] == pytest.approx(0.2)
-    assert partial.components["semantic_gate"] == pytest.approx(0.6)
+    assert wrong.total == pytest.approx(0.65)
+    assert wrong.components["solve_execution_gate"] == pytest.approx(1.0)
+    assert partial.components["solve_execution_gate"] == pytest.approx(1.0)
     assert partial.components["milestone_answer_f1"] == 0.5
     assert partial.components["solve_contribution"] > 0.0
     assert partial.components["curriculum_total"] == partial.total
@@ -273,9 +290,18 @@ def test_solver_solve_reward_uses_certified_program_as_dense_signal() -> None:
         replace(ready, program_structure_f1=1.0), stage="solve"
     )
 
-    assert wrong_structure.total == pytest.approx(0.15)
+    assert wrong_structure.total == pytest.approx(0.55)
     assert matching_structure.total > wrong_structure.total
     assert matching_structure.components["milestone_program_structure_f1"] == 1.0
+
+
+def test_solver_solve_reward_rejects_non_executable_syntax() -> None:
+    syntactically_complete = _syntax_ready_solver()
+    reward = solver_curriculum_reward(syntactically_complete, stage="solve")
+
+    assert reward.total == 0.0
+    assert reward.components["syntax_score"] == pytest.approx(1.0)
+    assert reward.components["solve_execution_gate"] == 0.0
 
 
 def test_curriculum_inputs_reject_non_normalized_metrics() -> None:

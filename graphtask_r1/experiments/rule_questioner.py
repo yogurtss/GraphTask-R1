@@ -295,6 +295,23 @@ def build_rule_questioner_mixed_sft(
     return metrics
 
 
+def rule_questioner_replacement_count(baseline_mixed_path: Path) -> int:
+    """Return the exact Questioner count required for a controlled mixed-SFT A/B."""
+
+    baseline = pq.read_table(baseline_mixed_path, columns=["role"])
+    roles = baseline["role"].to_pylist()
+    unexpected = sorted({str(role) for role in roles if role not in {"solver", "questioner"}})
+    if unexpected:
+        raise ValueError(
+            "baseline mixed SFT contains roles other than solver/questioner: "
+            + ", ".join(unexpected)
+        )
+    count = sum(1 for role in roles if role == "questioner")
+    if count < 1:
+        raise ValueError("baseline mixed SFT contains no Questioner rows")
+    return count
+
+
 def promote_rule_questioner_candidates(
     staged_path: Path,
     archive_path: Path,
