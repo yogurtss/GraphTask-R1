@@ -1070,6 +1070,12 @@ async def compute_score(
         raise ValueError(f"unsupported interaction mode: {raw_mode}")
     interaction_mode = cast(InteractionMode, raw_mode)
     if data_source == "graphtask/questioner":
+        if str(info.get("questioner_reward_variant", "legacy")) == "rule_program_question_v1":
+            from graphtask_r1.experiments.rule_questioner import (
+                compute_rule_questioner_score,
+            )
+
+            return await compute_rule_questioner_score(solution_str, info)
         if str(info.get("questioner_reward_variant", "legacy")) == "curriculum_v3":
             return await (
                 _compute_curriculum_questioner_score(
