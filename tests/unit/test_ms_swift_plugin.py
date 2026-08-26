@@ -105,11 +105,24 @@ def test_reward_completion_normalizes_optional_leading_thinking(plugin: Any) -> 
 
 
 def test_reward_completion_preserves_questioner_envelope(plugin: Any) -> None:
-    payload = (
-        '{"question":"Who?","program":{"version":"0.3","ops":[]}}'
-    )
+    payload = '{"question":"Who?","program":{"version":"0.3","ops":[]}}'
 
-    assert plugin._reward_completion(f"</tool_call>{payload}") == payload
+    assert plugin._reward_completion(f"<think>reason</think>{payload}") == payload
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '</tool_call>{"version":"0.3","ops":[]}',
+        'prefix {"version":"0.3","ops":[]} trailing',
+        '```json\n{"version":"0.3","ops":[]}\n```',
+        '</tool_call>{"question":"Who?","program":{"version":"0.3","ops":[]}}',
+    ],
+)
+def test_reward_completion_does_not_repair_actor_wrappers(
+    plugin: Any, response: str
+) -> None:
+    assert plugin._reward_completion(response) == response
 
 
 def test_dataset_registration_does_not_require_validation_data(

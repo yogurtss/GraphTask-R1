@@ -47,6 +47,16 @@ def _extract_structured_response_json(text: str) -> str | None:
         search_from = object_start + 1
 
 
+def normalize_reward_response(text: str) -> str:
+    """Remove only the framework-injected thinking prefix for strict rewards.
+
+    Training rewards must continue to see model-generated wrappers, prose, and
+    suffixes so format violations are penalized instead of silently repaired.
+    """
+
+    return _THINK_PREFIX_PATTERN.sub("", text, count=1).strip()
+
+
 def normalize_graphscript_response(text: str) -> str:
     """Extract structured JSON from a possibly wrapped model response.
 
@@ -56,5 +66,5 @@ def normalize_graphscript_response(text: str) -> str:
     role-specific parser remains responsible for full schema validation.
     """
 
-    normalized = _THINK_PREFIX_PATTERN.sub("", text, count=1).strip()
+    normalized = normalize_reward_response(text)
     return _extract_structured_response_json(normalized) or normalized

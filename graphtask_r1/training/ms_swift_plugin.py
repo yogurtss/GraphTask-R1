@@ -23,7 +23,7 @@ from graphtask_r1.schema import parse_program
 from graphtask_r1.training.json_compat import to_json_compatible
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
 from graphtask_r1.training.ms_swift_reward import compute_score
-from graphtask_r1.training.response_normalization import normalize_graphscript_response
+from graphtask_r1.training.response_normalization import normalize_reward_response
 
 try:
     from swift.llm.dataset import DatasetMeta, RowPreprocessor, register_dataset
@@ -53,9 +53,9 @@ atexit.register(_destroy_distributed_process_group)
 
 
 def _reward_completion(text: str) -> str:
-    """Normalize the model response using the same contract as evaluation."""
+    """Remove framework thinking text without repairing actor output."""
 
-    return normalize_graphscript_response(text)
+    return normalize_reward_response(text)
 
 
 class GraphTaskSFTPreprocessor(RowPreprocessor):  # type: ignore[misc]

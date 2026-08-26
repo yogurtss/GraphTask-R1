@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from graphtask_r1.training.response_normalization import normalize_graphscript_response
+from graphtask_r1.training.response_normalization import (
+    normalize_graphscript_response,
+    normalize_reward_response,
+)
 
 
 @pytest.mark.parametrize(
@@ -91,3 +94,29 @@ def test_only_one_leading_thinking_block_is_removed() -> None:
 )
 def test_non_graphscript_content_is_not_extracted(response: str) -> None:
     assert normalize_graphscript_response(response) == response
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            '<think>reason</think>{"version":"0.3","ops":[]}',
+            '{"version":"0.3","ops":[]}',
+        ),
+        (
+            '<think>reason</think>{"question":"Who?","program":'
+            '{"version":"0.3","ops":[]}}',
+            '{"question":"Who?","program":{"version":"0.3","ops":[]}}',
+        ),
+        (
+            '</tool_call>{"version":"0.3","ops":[]}',
+            '</tool_call>{"version":"0.3","ops":[]}',
+        ),
+        (
+            'prefix {"version":"0.3","ops":[]} trailing',
+            'prefix {"version":"0.3","ops":[]} trailing',
+        ),
+    ],
+)
+def test_reward_normalization_remains_format_strict(raw: str, expected: str) -> None:
+    assert normalize_reward_response(raw) == expected
