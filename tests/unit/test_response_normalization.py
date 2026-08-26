@@ -21,6 +21,30 @@ from graphtask_r1.training.response_normalization import normalize_graphscript_r
             '<think>reasoning</think>{"version":"0.3","ops":[]}',
             '{"version":"0.3","ops":[]}',
         ),
+        (
+            '</tool_call>{"version":"0.3","ops":[]}',
+            '{"version":"0.3","ops":[]}',
+        ),
+        (
+            '<think>reasoning</think>\n</tool_call>  {"version":"0.3","ops":[]}',
+            '{"version":"0.3","ops":[]}',
+        ),
+        (
+            'arbitrary prefix <tag> noise {"version":"0.3","ops":[]} trailing text',
+            '{"version":"0.3","ops":[]}',
+        ),
+        (
+            '```json\n{"version":"0.3","ops":[]}\n```',
+            '{"version":"0.3","ops":[]}',
+        ),
+        (
+            'metadata={"request":1}; result={"version":"0.3","ops":[]}',
+            '{"version":"0.3","ops":[]}',
+        ),
+        (
+            '{"wrapper":{"version":"0.3","ops":[]}}',
+            '{"version":"0.3","ops":[]}',
+        ),
     ],
 )
 def test_normalize_graphscript_response(raw: str, expected: str) -> None:
@@ -37,3 +61,19 @@ def test_only_one_leading_thinking_block_is_removed() -> None:
     assert normalize_graphscript_response(response) == (
         '<think>second</think>{"version":"0.3"}'
     )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "</tool_call>",
+        "</tool_call>not-json",
+        '<tool_call>{"version":"0.3"}</tool_call>',
+        '</tool_call>[{"version":"0.3"}]',
+        'prefix {"version":"0.3","ops":"not-a-list"}',
+        'prefix {"ops":[]}',
+        'prefix {"version":"0.3","ops":[}',
+    ],
+)
+def test_non_graphscript_content_is_not_extracted(response: str) -> None:
+    assert normalize_graphscript_response(response) == response
