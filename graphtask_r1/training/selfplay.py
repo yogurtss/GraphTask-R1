@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -49,8 +49,12 @@ DeepSpeedStage = Literal[
 ]
 RLAlgorithm = Literal["grpo", "reinforce_plus_plus"]
 SelfPlayVariant = Literal["legacy", "frontier_v2", "curriculum_v3"]
+QuestionerRewardVariant = Literal[
+    "legacy", "frontier_v2", "curriculum_v3", "rule_program_question_v1"
+]
 CurriculumPhase = Literal["production", "grounding", "frontier"]
 UpdatePhase = Literal["questioner", "solver"]
+ArchiveEmptyPolicy = Literal["block", "base_backfill"]
 
 
 def _gpu_ids(value: str) -> tuple[str, ...]:
@@ -69,8 +73,9 @@ class SelfPlayConfig(BaseModel):
     questioner_seeds: Path
     graph_snapshot: str = "kqapro-v1"
     selfplay_variant: SelfPlayVariant = "legacy"
+    questioner_reward_variant: QuestionerRewardVariant | None = None
     rounds: int = Field(default=3, gt=0)
-    questioner_episodes: int = Field(default=256, gt=0, le=4_096)
+    questioner_episodes: int = Field(default=256, gt=0)
     solver_episodes: int = Field(default=256, gt=0)
     curriculum_production_solver_episodes: int | None = Field(default=None, gt=0)
     questioner_reward_weight: float = Field(default=1.0, gt=0.0)
@@ -91,6 +96,10 @@ class SelfPlayConfig(BaseModel):
     curriculum_max_seed_entities_start: int = Field(default=1, gt=0)
     curriculum_max_seed_entities_end: int = Field(default=2, gt=0)
     curriculum_min_archive_growth: int = Field(default=1, ge=0)
+    curriculum_archive_empty_policy: ArchiveEmptyPolicy = "block"
+    curriculum_min_solver_execution_rate: float = Field(
+        default=0.1, ge=0.0, le=1.0
+    )
     base_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     archive_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
     new_ratio: float = Field(default=0.30, ge=0.0, le=1.0)
@@ -148,6 +157,13 @@ class SelfPlayConfig(BaseModel):
             raise ValueError(
                 f"{self.interaction_mode} mode requires "
                 f"program_profile={expected_profile}"
+            )
+        if (
+            self.questioner_reward_variant == "rule_program_question_v1"
+            and self.selfplay_variant != "curriculum_v3"
+        ):
+            raise ValueError(
+                "rule_program_question_v1 requires selfplay_variant=curriculum_v3"
             )
         if abs(self.base_ratio + self.archive_ratio + self.new_ratio - 1.0) > 1e-9:
             raise ValueError("base_ratio, archive_ratio, and new_ratio must sum to 1")
@@ -449,6 +465,25 @@ def _assemble_dataset(
     )
     for row in seed_rows:
         extra = dict(row["extra_info"])
+        questioner_reward_variant = (
+            config.questioner_reward_variant or config.selfplay_variant
+        )
+        preserve_rule_prompt = questioner_reward_variant == "rule_program_question_v1"
+        if preserve_rule_prompt:
+            missing = [
+                field
+                for field in ("fixed_program_json", "fixed_graphscript_json")
+                if not extra.get(field)
+            ]
+            if missing:
+                raise ValueError(
+                    "rule_program_question_v1 seed is missing required fields: "
+                    + ", ".join(missing)
+                )
+            if extra.get("questioner_reward_variant") != questioner_reward_variant:
+                raise ValueError(
+                    "rule_program_question_v1 config requires matching Program-first seeds"
+                )
         topic_ids = [str(value) for value in extra.get("topic_entity_ids", [])]
         raw_seed_context = extra.get("seed_context")
         prompt_relation_catalog = relation_catalog
@@ -486,7 +521,7 @@ def _assemble_dataset(
                 "max_returned_entities": config.max_returned_entities,
                 "program_profile": config.program_profile,
                 "role_weight": config.questioner_reward_weight,
-                "questioner_reward_variant": config.selfplay_variant,
+                "questioner_reward_variant": questioner_reward_variant,
                 "frontier_target": _frontier_target(config, round_index),
                 "frontier_sigma": config.frontier_sigma,
             }
@@ -503,22 +538,25 @@ def _assemble_dataset(
                 }
             )
         row["extra_info"] = extra
-        payload = (
-            render_questioner_seed_payload(raw_seed_context)
-            if isinstance(raw_seed_context, list) and raw_seed_context
-            else "Explore from these seed entities and construct one certified task: "
-            + ", ".join(topic_ids)
-        )
-        row["prompt"] = role_prompt(
-            "questioner",
-            payload,
-            interaction_mode=config.interaction_mode,
-            relation_catalog=prompt_relation_catalog,
-            graphscript_version=config.graphscript_version,
-            questioner_contract=(
-                "question_program" if config.selfplay_variant == "curriculum_v3" else "program"
-            ),
-        )
+        if not preserve_rule_prompt:
+            payload = (
+                render_questioner_seed_payload(raw_seed_context)
+                if isinstance(raw_seed_context, list) and raw_seed_context
+                else "Explore from these seed entities and construct one certified task: "
+                + ", ".join(topic_ids)
+            )
+            row["prompt"] = role_prompt(
+                "questioner",
+                payload,
+                interaction_mode=config.interaction_mode,
+                relation_catalog=prompt_relation_catalog,
+                graphscript_version=config.graphscript_version,
+                questioner_contract=(
+                    "question_program"
+                    if config.selfplay_variant == "curriculum_v3"
+                    else "program"
+                ),
+            )
         row.pop("agent_name", None)
         row.pop("tools_kwargs", None)
     questioner_table = pa.Table.from_pylist(seed_rows)
@@ -810,8 +848,13 @@ def _archive_round_size(path: Path, round_index: int) -> int:
         )
 
 
-def _archive_growth_gate(*, available: int, configured_minimum: int) -> dict[str, Any]:
-    """Keep a non-empty closed loop while allowing a bounded admission shortfall."""
+def _archive_growth_gate(
+    *,
+    available: int,
+    configured_minimum: int,
+    empty_policy: ArchiveEmptyPolicy = "block",
+) -> dict[str, Any]:
+    """Apply the configured archive target without hiding admission shortfalls."""
     if available < 0 or configured_minimum < 0:
         raise ValueError("archive growth counts must be non-negative")
     shortfall = max(0, configured_minimum - available)
@@ -819,8 +862,8 @@ def _archive_growth_gate(*, available: int, configured_minimum: int) -> dict[str
         status = "disabled"
         passed = True
     elif available == 0:
-        status = "empty_blocked"
-        passed = False
+        status = "empty_backfill" if empty_policy == "base_backfill" else "empty_blocked"
+        passed = empty_policy == "base_backfill"
     elif shortfall:
         status = "shortfall_allowed"
         passed = True
@@ -831,7 +874,51 @@ def _archive_growth_gate(*, available: int, configured_minimum: int) -> dict[str
         "configured_minimum": configured_minimum,
         "available": available,
         "shortfall": shortfall,
+        "empty_policy": empty_policy,
         "status": status,
+        "passed": passed,
+    }
+
+
+def _solver_signal_gate(
+    round_metrics: Mapping[str, Any], *, minimum_execution_rate: float
+) -> dict[str, Any]:
+    """Reject Solver updates whose rollouts contain too little execution signal."""
+    if not 0.0 <= minimum_execution_rate <= 1.0:
+        raise ValueError("minimum_execution_rate must be between 0 and 1")
+    roles = round_metrics.get("roles")
+    solver = roles.get("solver") if isinstance(roles, Mapping) else None
+    samples = solver.get("samples") if isinstance(solver, Mapping) else None
+    means = solver.get("means") if isinstance(solver, Mapping) else None
+    raw_rate = (
+        means.get("milestone_execution_progress")
+        if isinstance(means, Mapping)
+        else None
+    )
+    sample_count = int(samples) if isinstance(samples, int) and samples >= 0 else 0
+    execution_rate = float(raw_rate) if isinstance(raw_rate, int | float) else None
+    available = execution_rate is not None and sample_count > 0
+    passed = minimum_execution_rate == 0.0 or (
+        execution_rate is not None
+        and sample_count > 0
+        and execution_rate >= minimum_execution_rate
+    )
+    return {
+        "minimum_execution_rate": minimum_execution_rate,
+        "samples": sample_count,
+        "execution_rate": execution_rate,
+        "effective_executions": (
+            sample_count * execution_rate if execution_rate is not None else None
+        ),
+        "status": (
+            "disabled"
+            if minimum_execution_rate == 0.0
+            else "satisfied"
+            if passed
+            else "insufficient"
+            if available
+            else "unavailable"
+        ),
         "passed": passed,
     }
 
@@ -1247,7 +1334,7 @@ def run_self_play(
             "max_completion_tokens": config.max_completion_tokens,
             "reward_metrics_dir": str(reward_metrics_dir),
             "questioner_reward": {
-                "variant": config.selfplay_variant,
+                "variant": config.questioner_reward_variant or config.selfplay_variant,
                 "frontier_target": _frontier_target(config, round_index),
                 "frontier_sigma": config.frontier_sigma,
                 "curriculum_phase": (
@@ -1473,6 +1560,7 @@ def run_self_play(
                                 growth_gate = _archive_growth_gate(
                                     available=available,
                                     configured_minimum=config.curriculum_min_archive_growth,
+                                    empty_policy=config.curriculum_archive_empty_policy,
                                 )
                                 admission_summary["growth_gate"] = growth_gate
                                 write_json(logs / "archive_admission.json", admission_summary)
@@ -1494,6 +1582,13 @@ def run_self_play(
                                         available,
                                         config.curriculum_min_archive_growth,
                                         growth_gate["shortfall"],
+                                    )
+                                if growth_gate["status"] == "empty_backfill":
+                                    LOGGER.warning(
+                                        "selfplay_archive_empty round=%d; continuing with "
+                                        "certified base-pool backfill because "
+                                        "curriculum_archive_empty_policy=base_backfill",
+                                        round_index,
                                     )
                                 counts["solver"] = _write_solver_dataset(
                                     config,
@@ -1629,9 +1724,24 @@ def run_self_play(
         )
         if admission_summary is not None:
             round_metrics["archive_admission"] = admission_summary
+        solver_signal_gate: dict[str, Any] | None = None
+        if config.selfplay_variant == "curriculum_v3":
+            solver_signal_gate = _solver_signal_gate(
+                round_metrics,
+                minimum_execution_rate=config.curriculum_min_solver_execution_rate,
+            )
+            round_metrics["solver_signal_gate"] = solver_signal_gate
         metrics_summary_path = logs / "metrics_summary.json"
         write_json(metrics_summary_path, round_metrics)
         report_artifacts = write_selfplay_report(output_dir)
+        if solver_signal_gate is not None and not solver_signal_gate["passed"]:
+            raise RuntimeError(
+                "self-play Solver signal gate failed after training: "
+                f"round {round_index} execution_rate="
+                f"{solver_signal_gate['execution_rate']} requires at least "
+                f"{solver_signal_gate['minimum_execution_rate']}; keep the incoming "
+                "Solver checkpoint and increase rollout count or improve SFT grounding"
+            )
         write_json(
             round_dir / "manifest.json",
             {

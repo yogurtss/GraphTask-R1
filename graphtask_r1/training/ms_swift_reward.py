@@ -791,8 +791,11 @@ async def _compute_curriculum_tool_questioner_score(
 def _solver_curriculum_stage(info: dict[str, Any]) -> SolverCurriculumStage:
     raw_stage = str(info.get("curriculum_phase", "production"))
     mapped = {
-        "production": "syntax",
-        "grounding": "tool",
+        # These three names describe the Questioner curriculum.  Solver starts
+        # from an SFT checkpoint and always trains on certified tasks, so
+        # regressing it to syntax-only reward makes incomplete programs optimal.
+        "production": "solve",
+        "grounding": "solve",
         "frontier": "solve",
         "syntax": "syntax",
         "tool": "tool",
@@ -834,17 +837,26 @@ def _curriculum_solver_result(
     extra_components: dict[str, float] | None = None,
 ) -> dict[str, float]:
     reward = solver_curriculum_reward(_solver_milestones(values), stage=stage)
+    rejection_penalty = (
+        solver_rejection_reward(rejection_reason).total
+        if rejection_reason is not None
+        else 0.0
+    )
+    total = reward.total + rejection_penalty
     rejection = (
         {f"reject_{rejection_reason.lower()}": 1.0}
         if rejection_reason is not None
         else {}
     )
     return {
-        "score": reward.total * role_weight,
-        "raw_score": reward.total,
+        "score": total * role_weight,
+        "raw_score": total,
         "f1": values.get("answer_f1", 0.0),
         "exact_match": values.get("exact_match", 0.0),
         **reward.components,
+        "reward_before_rejection": reward.total,
+        "rejection_penalty": rejection_penalty,
+        "curriculum_total": total,
         **rejection,
         **(extra_components or {}),
     }
@@ -1070,6 +1082,12 @@ async def compute_score(
         raise ValueError(f"unsupported interaction mode: {raw_mode}")
     interaction_mode = cast(InteractionMode, raw_mode)
     if data_source == "graphtask/questioner":
+        if str(info.get("questioner_reward_variant", "legacy")) == "rule_program_question_v1":
+            from graphtask_r1.experiments.rule_questioner import (
+                compute_rule_questioner_score,
+            )
+
+            return await compute_rule_questioner_score(solution_str, info)
         if str(info.get("questioner_reward_variant", "legacy")) == "curriculum_v3":
             return await (
                 _compute_curriculum_questioner_score(

@@ -25,6 +25,7 @@ curriculum_question_alignment_min: 0.25
 curriculum_max_seed_entities_start: 1
 curriculum_max_seed_entities_end: 2
 curriculum_min_archive_growth: 4
+curriculum_min_solver_execution_rate: 0.1
 frontier_target_start: 0.8
 frontier_target_end: 0.5
 frontier_sigma: 0.25

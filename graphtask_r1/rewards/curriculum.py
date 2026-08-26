@@ -258,14 +258,18 @@ class SolverRewardConfig:
     syntax_weight_in_solve: float = 0.2
     tool_weight_in_solve: float = 0.3
     execution_floor: float = 0.2
-    solve_semantic_floor: float = 0.2
+    syntax_invalid_json_floor: float = 0.1
+    solve_execution_floor: float = 0.0
 
     def __post_init__(self) -> None:
         _require_unit_interval("syntax_weight_in_tool", self.syntax_weight_in_tool)
         _require_unit_interval("syntax_weight_in_solve", self.syntax_weight_in_solve)
         _require_unit_interval("tool_weight_in_solve", self.tool_weight_in_solve)
         _require_unit_interval("execution_floor", self.execution_floor)
-        _require_unit_interval("solve_semantic_floor", self.solve_semantic_floor)
+        _require_unit_interval(
+            "syntax_invalid_json_floor", self.syntax_invalid_json_floor
+        )
+        _require_unit_interval("solve_execution_floor", self.solve_execution_floor)
         if self.syntax_weight_in_solve + self.tool_weight_in_solve > 1.0:
             raise ValueError("syntax_weight_in_solve + tool_weight_in_solve cannot exceed 1")
 
@@ -315,9 +319,17 @@ def solver_curriculum_reward(
     tool = _weighted_score(values, _SOLVER_TOOL_WEIGHTS)
     solve = _weighted_score(values, _SOLVER_SOLVE_WEIGHTS)
 
+    # Invalid or length-truncated JSON may contain many plausible operator names.
+    # Keep a small construction signal for a dedicated syntax curriculum, but do
+    # not let such prefixes compete with a complete JSON program.
+    syntax_validity_gate = policy.syntax_invalid_json_floor + (
+        1.0 - policy.syntax_invalid_json_floor
+    ) * milestones.json_valid
+    gated_syntax_total = syntax * syntax_validity_gate
+
     tool_syntax_weight = policy.syntax_weight_in_tool
     tool_progress_weight = 1.0 - tool_syntax_weight
-    tool_total = tool_syntax_weight * syntax + tool_progress_weight * tool
+    tool_total = tool_syntax_weight * gated_syntax_total + tool_progress_weight * tool
     execution_gate = policy.execution_floor + (
         1.0 - policy.execution_floor
     ) * milestones.execution_progress
@@ -325,16 +337,23 @@ def solver_curriculum_reward(
     solve_syntax_weight = policy.syntax_weight_in_solve
     solve_tool_weight = policy.tool_weight_in_solve
     solve_answer_weight = 1.0 - solve_syntax_weight - solve_tool_weight
-    solve_base = solve_syntax_weight * syntax + solve_tool_weight * tool
-    semantic_gate = policy.solve_semantic_floor + (
-        1.0 - policy.solve_semantic_floor
-    ) * milestones.answer_f1
-    gated_solve_base = semantic_gate * solve_base
-    solve_total = gated_solve_base + solve_answer_weight * solve
+    solve_base = solve_syntax_weight * gated_syntax_total + solve_tool_weight * tool
+    solve_total_ungated = solve_base + solve_answer_weight * solve
+    # A certified Solver task is useful supervision only when its predicted
+    # program actually executes.  Exact answers remain a safe escape hatch for
+    # tool-mode tasks that legitimately need no graph call.
+    solve_execution_progress = max(
+        milestones.execution_progress,
+        milestones.exact_match,
+    )
+    solve_execution_gate = policy.solve_execution_floor + (
+        1.0 - policy.solve_execution_floor
+    ) * solve_execution_progress
+    solve_total = solve_execution_gate * solve_total_ungated
 
     if stage == "syntax":
-        total = syntax
-        syntax_contribution = syntax
+        total = gated_syntax_total
+        syntax_contribution = gated_syntax_total
         tool_contribution = 0.0
         solve_contribution = 0.0
     elif stage == "tool":
@@ -344,9 +363,11 @@ def solver_curriculum_reward(
         solve_contribution = 0.0
     else:
         total = solve_total
-        syntax_contribution = semantic_gate * solve_syntax_weight * syntax
-        tool_contribution = semantic_gate * solve_tool_weight * tool
-        solve_contribution = solve_answer_weight * solve
+        syntax_contribution = (
+            solve_execution_gate * solve_syntax_weight * gated_syntax_total
+        )
+        tool_contribution = solve_execution_gate * solve_tool_weight * tool
+        solve_contribution = solve_execution_gate * solve_answer_weight * solve
 
     components = {
         **{f"milestone_{name}": value for name, value in values.items()},
@@ -354,14 +375,16 @@ def solver_curriculum_reward(
         "stage_tool": float(stage == "tool"),
         "stage_solve": float(stage == "solve"),
         "syntax_score": syntax,
+        "syntax_validity_gate": syntax_validity_gate,
+        "gated_syntax_total": gated_syntax_total,
         "tool_score": tool,
         "solve_score": solve,
         "tool_total": tool_total,
         "execution_gate": execution_gate,
         "gated_tool_total": gated_tool_total,
-        "semantic_gate": semantic_gate,
+        "solve_execution_gate": solve_execution_gate,
         "solve_base": solve_base,
-        "gated_solve_base": gated_solve_base,
+        "solve_total_ungated": solve_total_ungated,
         "solve_total": solve_total,
         "syntax_contribution": syntax_contribution,
         "tool_contribution": tool_contribution,

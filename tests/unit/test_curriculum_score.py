@@ -377,15 +377,14 @@ def test_curriculum_solver_keeps_dense_syntax_and_solve_ordering() -> None:
         )
     )
 
-    assert (
-        0.0
-        < non_json["raw_score"]
-        < truncated_json["raw_score"]
-        < partial_json["raw_score"]
-        < valid["raw_score"]
-    )
+    assert non_json["raw_score"] == -1.0
+    assert truncated_json["raw_score"] == -1.0
+    assert partial_json["raw_score"] == -0.75
+    assert valid["raw_score"] > 0.0
     assert truncated_json["milestone_valid_prefix_fraction"] > 0.0
-    assert non_json["stage_syntax"] == 1.0
+    assert non_json["stage_solve"] == 1.0
+    assert non_json["solve_execution_gate"] == 0.0
+    assert non_json["rejection_penalty"] == -1.0
     assert partial_json["reject_invalid_schema"] == 1.0
 
     solve_info = {**info, "curriculum_phase": "frontier"}
