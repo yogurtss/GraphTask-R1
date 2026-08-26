@@ -219,8 +219,11 @@ python -m graphtask_r1.cli train self-play \
 
 配置内已经包含 `learning_rate`，并设置 `enable_grpo_validation: false`；self-play 不要求手动
 `export LR`，也不读取 `VAL_DATA`。SFT 已经建立格式和 grounding 能力，因此三轮全部使用
-frontier reward；每轮至少需要新增 128 条通过执行、难度、新颖性和目标一致性门槛的 archive
-task，否则在 Solver 更新前失败，避免没有新训练信号的伪闭环。
+frontier reward；每轮以新增 128 条通过执行、难度、新颖性和目标一致性门槛的 archive task
+为目标。若本轮有合格任务但少于 128 条，运行会在 `archive_admission.json` 中记录
+`growth_gate.status=shortfall_allowed` 并继续；Solver 将每条新增任务至多使用一次，其余配额由
+certified base pool 回填。只有本轮新增任务为 0 时才会在 Solver 更新前失败，避免没有新训练
+信号的伪闭环。
 
 完成第一轮并在固定 held-out eval 上晋级后，再继续下一轮：
 

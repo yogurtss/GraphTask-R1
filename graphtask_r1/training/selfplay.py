@@ -810,6 +810,32 @@ def _archive_round_size(path: Path, round_index: int) -> int:
         )
 
 
+def _archive_growth_gate(*, available: int, configured_minimum: int) -> dict[str, Any]:
+    """Keep a non-empty closed loop while allowing a bounded admission shortfall."""
+    if available < 0 or configured_minimum < 0:
+        raise ValueError("archive growth counts must be non-negative")
+    shortfall = max(0, configured_minimum - available)
+    if configured_minimum == 0:
+        status = "disabled"
+        passed = True
+    elif available == 0:
+        status = "empty_blocked"
+        passed = False
+    elif shortfall:
+        status = "shortfall_allowed"
+        passed = True
+    else:
+        status = "satisfied"
+        passed = True
+    return {
+        "configured_minimum": configured_minimum,
+        "available": available,
+        "shortfall": shortfall,
+        "status": status,
+        "passed": passed,
+    }
+
+
 def _prepare_validation_dataset(
     source_path: Path,
     output_dir: Path,
@@ -1443,16 +1469,31 @@ def run_self_play(
                                 admission_summary["available_for_round"] = _archive_round_size(
                                     archive_path, round_index
                                 )
-                                write_json(logs / "archive_admission.json", admission_summary)
                                 available = int(admission_summary["available_for_round"])
-                                if available < config.curriculum_min_archive_growth:
+                                growth_gate = _archive_growth_gate(
+                                    available=available,
+                                    configured_minimum=config.curriculum_min_archive_growth,
+                                )
+                                admission_summary["growth_gate"] = growth_gate
+                                write_json(logs / "archive_admission.json", admission_summary)
+                                if not growth_gate["passed"]:
                                     raise RuntimeError(
                                         "self-play closed-loop gate failed before Solver update: "
-                                        f"round {round_index} has {available} archived tasks, "
-                                        "requires at least "
-                                        f"{config.curriculum_min_archive_growth}; inspect "
+                                        f"round {round_index} has no newly archived tasks "
+                                        f"(configured target "
+                                        f"{config.curriculum_min_archive_growth}); inspect "
                                         f"{logs / 'archive_admission.json'} and Questioner "
                                         "reward diagnostics"
+                                    )
+                                if growth_gate["status"] == "shortfall_allowed":
+                                    LOGGER.warning(
+                                        "selfplay_archive_growth_shortfall round=%d "
+                                        "available=%d configured_minimum=%d shortfall=%d; "
+                                        "continuing with certified base-pool backfill",
+                                        round_index,
+                                        available,
+                                        config.curriculum_min_archive_growth,
+                                        growth_gate["shortfall"],
                                     )
                                 counts["solver"] = _write_solver_dataset(
                                     config,

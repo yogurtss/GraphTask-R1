@@ -20,6 +20,7 @@ from graphtask_r1.schema import (
 )
 from graphtask_r1.training.selfplay import (
     SelfPlayConfig,
+    _archive_growth_gate,
     _archive_round_size,
     _completed_phase_adapter,
     _curriculum_max_seed_entities,
@@ -122,6 +123,21 @@ def test_archive_round_size_makes_closed_loop_gate_resume_safe(tmp_path: Path) -
     assert _archive_round_size(archive_path, 1) == 1
     assert _archive_round_size(archive_path, 2) == 1
     assert _archive_round_size(archive_path, 3) == 0
+
+
+def test_archive_growth_gate_allows_nonzero_shortfall_but_blocks_empty_round() -> None:
+    shortfall = _archive_growth_gate(available=72, configured_minimum=128)
+    empty = _archive_growth_gate(available=0, configured_minimum=128)
+
+    assert shortfall == {
+        "configured_minimum": 128,
+        "available": 72,
+        "shortfall": 56,
+        "status": "shortfall_allowed",
+        "passed": True,
+    }
+    assert empty["status"] == "empty_blocked"
+    assert empty["passed"] is False
 
 
 def test_solver_curriculum_expands_the_visible_structural_band() -> None:
@@ -565,6 +581,7 @@ def test_repository_curriculum_config_is_opt_in() -> None:
     assert curriculum.frontier_target_start == 0.5
     assert curriculum.frontier_target_end == 0.5
     assert curriculum.curriculum_replay_ratio == 0.3
+    assert curriculum.curriculum_min_archive_growth == 128
     assert curriculum.archive_min_target_alignment == 0.65
     assert curriculum.learning_rate == 7e-7
     assert curriculum.kl_beta == 0.002
