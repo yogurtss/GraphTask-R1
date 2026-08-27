@@ -36,6 +36,7 @@ from graphtask_r1.schema import (
     Union,
     Verify,
 )
+from graphtask_r1.utils import ProgressLogger
 from graphtask_r1.verification import verify_task
 
 SamplingStrategy = Literal["naive_path", "bounded_path", "family_balanced"]
@@ -255,7 +256,13 @@ class ExperimentalPathSampler:
         self.allowed_relations = allowed_relations
         self.config = config
 
-    def run(self, *, strategy: SamplingStrategy, attempts: int) -> SamplingExperiment:
+    def run(
+        self,
+        *,
+        strategy: SamplingStrategy,
+        attempts: int,
+        progress: ProgressLogger | None = None,
+    ) -> SamplingExperiment:
         if attempts < 1:
             raise ValueError("attempts must be positive")
         rng = random.Random(self.config.seed)
@@ -264,6 +271,9 @@ class ExperimentalPathSampler:
         family_attempts: Counter[str] = Counter()
         proposal_trials = 0
         constructed = 0
+        strict_certified = 0
+        if progress is not None:
+            progress.start(strategy=strategy, seed=self.config.seed)
         for attempt in range(attempts):
             family = self._family(strategy, attempt, rng)
             family_attempts[family] += 1
@@ -282,14 +292,41 @@ class ExperimentalPathSampler:
                     rejections[exc.reason] += 1
                     continue
                 candidates.append(candidate)
+                strict_certified += int(candidate.strict_certified)
                 break
+            if progress is not None:
+                completed = attempt + 1
+                progress.update(
+                    completed,
+                    strategy=strategy,
+                    family=family,
+                    proposal_trials=proposal_trials,
+                    constructed=constructed,
+                    candidates=len(candidates),
+                    strict_certified=strict_certified,
+                    rejected_trials=sum(rejections.values()),
+                    sampling_success_rate=round(len(candidates) / completed, 4),
+                    strict_certification_rate=round(strict_certified / completed, 4),
+                )
+        if progress is not None:
+            progress.finish(
+                attempts,
+                strategy=strategy,
+                proposal_trials=proposal_trials,
+                constructed=constructed,
+                candidates=len(candidates),
+                strict_certified=strict_certified,
+                rejected_trials=sum(rejections.values()),
+                sampling_success_rate=round(len(candidates) / attempts, 4),
+                strict_certification_rate=round(strict_certified / attempts, 4),
+            )
         return SamplingExperiment(
             strategy=strategy,
             attempts=attempts,
             proposal_trials=proposal_trials,
             constructed=constructed,
             sampling_successes=len(candidates),
-            strict_certification_successes=sum(value.strict_certified for value in candidates),
+            strict_certification_successes=strict_certified,
             candidates=tuple(candidates),
             rejection_counts=dict(sorted(rejections.items())),
             family_attempts=dict(sorted(family_attempts.items())),

@@ -325,6 +325,7 @@ def test_graphscript_selfplay_dry_run_selects_mode(tmp_path: Path) -> None:
     assert plan["train_environment"]["LR"] == "2e-06"
     assert plan["train_environment"]["SAVE_STEPS"] == "20"
     assert plan["train_environment"]["SAVE_TOTAL_LIMIT"] == "2"
+    assert plan["train_environment"]["EVAL_STRATEGY"] == "no"
     assert "EVAL_ROLLOUT_N" not in plan["train_environment"]
     assert plan["train_environment"]["VLLM_MODE"] == "colocate"
     assert plan["deepspeed"] == "none"

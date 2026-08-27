@@ -1268,6 +1268,8 @@ def run_self_play(
             "GRAPHTASK_REWARD_METRICS_DIR": str(reward_metrics_dir.resolve()),
             "SEED": str(config.seed),
             "PYTHONUNBUFFERED": "1",
+            # Disabled validation must override any stale parent-shell setting.
+            "EVAL_STRATEGY": "no",
         }
         if config.enable_grpo_validation:
             assert validation_path is not None

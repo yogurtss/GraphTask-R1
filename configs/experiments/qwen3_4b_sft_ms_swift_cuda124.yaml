@@ -4,6 +4,7 @@ model_type: qwen3
 train_data: ${SFT_TRAIN_DATA}
 output_dir: ${SFT_OUTPUT_DIR}
 eval_strategy: "no"
+force_disable_validation: true
 num_gpus: 4
 micro_batch_size: 1
 eval_batch_size: 1

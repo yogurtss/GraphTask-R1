@@ -6,6 +6,8 @@ model_type: qwen3
 response_prefix: '<think>\n\n</think>\n\n'
 initial_adapter: ${INITIAL_ADAPTER}
 base_tasks: ${BASE_TASKS}
+# Held-out val is evaluated only after training, never inside SFT/self-play updates.
+val_data: null
 questioner_seeds: ${QUESTIONER_SEEDS}
 graph_snapshot: kqapro-v1
 selfplay_variant: curriculum_v3
