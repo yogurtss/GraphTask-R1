@@ -755,6 +755,9 @@ def test_repository_curriculum_config_is_opt_in() -> None:
     assert rule_questioner_4b.questioner_reward_variant == RULE_QUESTIONER_VARIANT
     assert rule_questioner_4b.opponent_backend == "sglang"
     assert rule_questioner_4b.deepspeed == "zero2"
+    assert rule_questioner_4b.val_data is None
+    assert rule_questioner_4b.validation_samples is None
+    assert rule_questioner_4b.enable_grpo_validation is False
 
 
 def test_selfplay_validation_requires_an_explicit_val_dataset() -> None:

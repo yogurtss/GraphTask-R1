@@ -260,14 +260,29 @@ def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
 
 def test_rule_questioner_guide_builds_required_snapshot_before_sampling() -> None:
     guide = (PROJECT_ROOT / "docs/RULE_QUESTIONER_EXPERIMENT.md").read_text()
+    main_readme = (PROJECT_ROOT / "README.md").read_text()
 
     data_prepare = guide.index("python -m graphtask_r1.cli data prepare")
     sampler = guide.index("python scripts/experiment_path_sampler.py")
     assert data_prepare < sampler
     assert "kqapro-v03-full-audit/graph.sqlite" in guide
     assert "--output-dir \"$KQAPRO_DIR\"" in guide
-    assert "data build-relation-catalog" in guide
+    prerequisite_section = guide[guide.index("## 0.") : guide.index("## 1.")]
+    assert "--train-sample-size 5000" in prerequisite_section
+    assert "--train-sample-size 20000" not in prerequisite_section
+    assert "KQAPRO_SMOKE_DIR" not in prerequisite_section
+    assert "QUESTIONER_COUNT_OVERRIDE" not in prerequisite_section
+    assert 'test -s "$SFT_DATA_DIR/relation_catalog.json"' in prerequisite_section
     assert "scripts/prepare_mixed_sft_data.sh" in guide
+    assert "--strategies family_balanced" in guide
+    assert "## 3. 使用 Program-first mixed SFT 训练 4B" in guide
+    assert "python -m graphtask_r1.cli train sft" in guide
+    assert "SFT_TRAIN_DATA=$RULE_QUESTIONER_DATA/mixed-sft.parquet" in guide
+    assert "checkpoint-625" not in guide
+    assert guide.index("## 3. 使用 Program-first mixed SFT 训练 4B") < guide.index(
+        "## 6. 六阶段 self-play 脚本"
+    )
+    assert "docs/RULE_QUESTIONER_EXPERIMENT.md" in main_readme
 
 
 def test_cli_logs_to_stderr_and_keeps_json_on_stdout() -> None:

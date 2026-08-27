@@ -19,7 +19,8 @@ def test_rule_questioner_phase_script_runs_all_six_phases(tmp_path: Path) -> Non
     fake_python = fake_bin / "python"
     fake_python.write_text(
         "#!/usr/bin/env bash\n"
-        'printf \'%s\\n\' "$*" >> "$CAPTURE_ARGS"\n'
+        'printf \'EVAL_STRATEGY=%s VAL_DATA=%s ARGS=%s\\n\' '
+        '"${EVAL_STRATEGY:-}" "${VAL_DATA:-}" "$*" >> "$CAPTURE_ARGS"\n'
     )
     fake_python.chmod(0o755)
 
@@ -40,6 +41,8 @@ def test_rule_questioner_phase_script_runs_all_six_phases(tmp_path: Path) -> Non
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "CAPTURE_ARGS": str(capture),
         "INITIAL_ADAPTER": str(adapter),
+        "EVAL_STRATEGY": "steps",
+        "VAL_DATA": str(tmp_path / "stale-val.parquet"),
         **{name: str(path) for name, path in required_files.items()},
     }
     output_dir = tmp_path / "selfplay"
@@ -64,10 +67,12 @@ def test_rule_questioner_phase_script_runs_all_six_phases(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     commands = capture.read_text().splitlines()
     assert len(commands) == 6
+    assert all(command.startswith("EVAL_STRATEGY=no VAL_DATA= ARGS=") for command in commands)
     assert "--round-index 1 --phase questioner" in commands[0]
     assert "--round-index 1 --phase solver" in commands[1]
     assert "--round-index 3 --phase solver" in commands[-1]
     assert "all six commands completed successfully" in result.stdout
+    assert "training-time validation: disabled" in result.stdout
 
 
 def test_rule_questioner_phase_script_rejects_missing_inputs(tmp_path: Path) -> None:

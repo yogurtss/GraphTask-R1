@@ -65,6 +65,7 @@ make test
 ## 文档入口
 
 - [KQAPro：从原始数据到 SFT、GRPO、self-play](docs/KQAPRO_TRAINING.md)
+- [Program-first Rule Questioner：数据、SFT 与六阶段 self-play](docs/RULE_QUESTIONER_EXPERIMENT.md)
 - [Curriculum v3 设计与 A/B](docs/SELFPLAY_CURRICULUM_V3.md)
 - [模型评测与路径可视化](docs/KQAPRO_EVAL_VIS_README.md)
 - [GraphScript 与 tool 模式](docs/INTERACTION_MODES.md)

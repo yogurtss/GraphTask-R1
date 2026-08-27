@@ -607,6 +607,12 @@ def _launch_stage(stage: str, config_path: Path, *, dry_run: bool) -> dict[str, 
                 raise ValueError(f"{target} must be a positive integer") from exc
             if parsed < 1 or str(parsed) != selected_env[target]:
                 raise ValueError(f"{target} must be a positive integer")
+    force_disable_validation = config.get("force_disable_validation", False)
+    if not isinstance(force_disable_validation, bool):
+        raise ValueError("force_disable_validation must be a boolean")
+    if force_disable_validation:
+        selected_env["EVAL_STRATEGY"] = "no"
+        selected_env.pop("VAL_DATA", None)
     scale_lr = config.get("scale_learning_rate_with_micro_batch", False)
     if not isinstance(scale_lr, bool):
         raise ValueError("scale_learning_rate_with_micro_batch must be a boolean")

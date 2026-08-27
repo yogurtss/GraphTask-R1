@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 from typing import cast
@@ -16,6 +17,9 @@ from graphtask_r1.experiments.path_sampling import (
 )
 from graphtask_r1.graph import backend_from_snapshot
 from graphtask_r1.training.relations import load_relation_catalog
+from graphtask_r1.utils import ProgressLogger
+
+LOGGER = logging.getLogger("graphtask_r1.experiment_path_sampler")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,6 +40,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bounded-retries", type=int, default=4)
     parser.add_argument("--family-retries", type=int, default=16)
     parser.add_argument(
+        "--progress-interval-s",
+        type=float,
+        default=5.0,
+        help="Seconds between structured progress messages on stderr (default: 5).",
+    )
+    parser.add_argument(
         "--strategies",
         default="naive_path,bounded_path,family_balanced",
         help="Comma-separated strategies: naive_path,bounded_path,family_balanced",
@@ -45,11 +55,28 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     if args.attempts < 1:
         raise SystemExit("--attempts must be positive")
+    if args.progress_interval_s <= 0:
+        raise SystemExit("--progress-interval-s must be positive")
     os.environ["GRAPHTASK_KQAPRO_DB"] = str(args.graph_db)
+    LOGGER.info(
+        "loading_reference_profile input=%s relation_catalog=%s",
+        args.reference_tasks,
+        args.relation_catalog,
+    )
     reference = load_reference_profile(args.reference_tasks)
     relations = load_relation_catalog(args.relation_catalog)
+    LOGGER.info(
+        "reference_profile_loaded rows=%d seed_entities=%d relations=%d",
+        reference.rows,
+        len(reference.seed_entities),
+        len(relations),
+    )
     config = PathSamplingConfig(
         seed=args.seed,
         max_depth=args.max_depth,
@@ -73,14 +100,25 @@ def main() -> None:
         raise SystemExit(f"unknown strategies: {', '.join(invalid)}")
     strategies = tuple(cast(SamplingStrategy, value) for value in raw_strategies)
     experiments = tuple(
-        sampler.run(strategy=strategy, attempts=args.attempts) for strategy in strategies
+        sampler.run(
+            strategy=strategy,
+            attempts=args.attempts,
+            progress=ProgressLogger(
+                f"data.rule_path_sampler.{strategy}",
+                total=args.attempts,
+                interval_s=args.progress_interval_s,
+            ),
+        )
+        for strategy in strategies
     )
+    LOGGER.info("writing_experiment output_dir=%s", args.output_dir)
     comparison = write_experiment(
         args.output_dir,
         config=config,
         reference=reference,
         experiments=experiments,
     )
+    LOGGER.info("experiment_written output_dir=%s", args.output_dir)
     print(json.dumps(comparison, ensure_ascii=False, indent=2, sort_keys=True))
 
 

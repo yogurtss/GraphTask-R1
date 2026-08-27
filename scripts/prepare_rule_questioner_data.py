@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from graphtask_r1.experiments.rule_questioner import (
     rule_questioner_replacement_count,
 )
 from graphtask_r1.graph import backend_from_snapshot
+
+LOGGER = logging.getLogger("graphtask_r1.prepare_rule_questioner_data")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,7 +49,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     os.environ["GRAPHTASK_KQAPRO_DB"] = str(args.graph_db)
+    LOGGER.info("loading_graph database=%s", args.graph_db)
     backend = backend_from_snapshot("kqapro-v1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     sft_count = args.sft_count
@@ -56,12 +64,30 @@ def main() -> None:
                 "set --sft-count when --baseline-mixed-sft is not provided"
             )
         sft_count = rule_questioner_replacement_count(args.baseline_mixed_sft)
+    LOGGER.info(
+        "exporting_questioner_sft input=%s requested=%d output=%s",
+        args.reference_tasks,
+        sft_count,
+        args.output_dir / "questioner-sft.parquet",
+    )
     sft = export_rule_questioner_sft(
         args.reference_tasks,
         args.output_dir / "questioner-sft.parquet",
         backend=backend,
         count=sft_count,
         seed=args.seed,
+    )
+    LOGGER.info(
+        "questioner_sft_exported scanned=%s eligible=%s selected=%s",
+        sft["scanned"],
+        sft["eligible"],
+        sft["selected"],
+    )
+    LOGGER.info(
+        "exporting_questioner_selfplay input=%s requested=%s output=%s",
+        args.candidates,
+        args.selfplay_count,
+        args.output_dir / "questioner-selfplay.parquet",
     )
     rl = export_rule_questioner_rl(
         args.candidates,
@@ -74,13 +100,30 @@ def main() -> None:
         round_index=args.round_index,
         seed=args.seed,
     )
+    LOGGER.info(
+        "questioner_selfplay_exported scanned=%s selected=%s rejected_uncertified=%s",
+        rl["scanned"],
+        rl["selected"],
+        rl["rejected_uncertified"],
+    )
     mixed = None
     if args.baseline_mixed_sft is not None:
+        LOGGER.info(
+            "building_mixed_sft baseline=%s output=%s",
+            args.baseline_mixed_sft,
+            args.output_dir / "mixed-sft.parquet",
+        )
         mixed = build_rule_questioner_mixed_sft(
             args.baseline_mixed_sft,
             args.output_dir / "questioner-sft.parquet",
             args.output_dir / "mixed-sft.parquet",
             seed=args.seed,
+        )
+        LOGGER.info(
+            "mixed_sft_built solver_rows=%s questioner_rows=%s total=%s",
+            mixed["solver_rows"],
+            mixed["replacement_questioner_rows"],
+            mixed["total"],
         )
     print(
         json.dumps(

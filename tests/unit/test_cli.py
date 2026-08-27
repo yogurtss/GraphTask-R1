@@ -550,7 +550,8 @@ def test_ms_swift_profile_selects_ms_swift_launcher(tmp_path: Path) -> None:
 def test_4b_sft_profile_disables_training_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("EVAL_STRATEGY", raising=False)
+    monkeypatch.setenv("EVAL_STRATEGY", "steps")
+    monkeypatch.setenv("VAL_DATA", "stale-val.parquet")
     result = _launch_stage(
         "sft",
         Path("configs/experiments/qwen3_4b_sft_ms_swift_cuda124.yaml"),
@@ -559,6 +560,14 @@ def test_4b_sft_profile_disables_training_validation(
 
     assert result["environment"]["EVAL_STRATEGY"] == "no"
     assert "VAL_DATA" not in result["environment"]
+
+
+def test_force_disable_validation_must_be_boolean(tmp_path: Path) -> None:
+    config = tmp_path / "sft.yaml"
+    config.write_text("force_disable_validation: never\n")
+
+    with pytest.raises(ValueError, match="force_disable_validation must be a boolean"):
+        _launch_stage("sft", config, dry_run=True)
 
 
 def test_non_ms_swift_training_backend_is_rejected(tmp_path: Path) -> None:

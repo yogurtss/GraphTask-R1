@@ -40,11 +40,16 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
 fi
 
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+# This experiment performs held-out evaluation only after training. Prevent stale
+# shell variables from enabling ms-swift validation in any of the six phases.
+export EVAL_STRATEGY=no
+unset VAL_DATA EVAL_STEPS EVAL_ROLLOUT_N
 
 printf '[rule-selfplay] config: %s\n' "$CONFIG_PATH"
 printf '[rule-selfplay] output: %s\n' "$OUTPUT_PATH"
 printf '[rule-selfplay] questioner seeds: %s\n' "$QUESTIONER_SEEDS"
 printf '[rule-selfplay] graph DB: %s\n' "$GRAPHTASK_KQAPRO_DB"
+printf '[rule-selfplay] training-time validation: disabled\n'
 
 exec bash "$PROJECT_ROOT/scripts/run_selfplay_curriculum_phases.sh" \
   "$CONFIG_PATH" "$OUTPUT_PATH"
