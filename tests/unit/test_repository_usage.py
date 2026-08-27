@@ -258,6 +258,18 @@ def test_documented_mainline_runs_selfplay_directly_from_sft() -> None:
     assert "QUESTIONER_COUNT_OVERRIDE=2048" in kqapro_guide
 
 
+def test_rule_questioner_guide_builds_required_snapshot_before_sampling() -> None:
+    guide = (PROJECT_ROOT / "docs/RULE_QUESTIONER_EXPERIMENT.md").read_text()
+
+    data_prepare = guide.index("python -m graphtask_r1.cli data prepare")
+    sampler = guide.index("python scripts/experiment_path_sampler.py")
+    assert data_prepare < sampler
+    assert "kqapro-v03-full-audit/graph.sqlite" in guide
+    assert "--output-dir \"$KQAPRO_DIR\"" in guide
+    assert "data build-relation-catalog" in guide
+    assert "scripts/prepare_mixed_sft_data.sh" in guide
+
+
 def test_cli_logs_to_stderr_and_keeps_json_on_stdout() -> None:
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)

@@ -14,6 +14,121 @@ gold answer 只来自认证程序的执行结果。SFT 和 RL 都不会把 answe
 completion 也不再生成程序。独立变体名为 `rule_program_question_v1`，只有数据行显式携带这个变体时，
 `ms_swift_reward.py` 才分派到新 reward；现有数据和默认路径不变。
 
+## 0. 先生成依赖数据
+
+后续命令不会隐式下载或转换 KQAPro。第一次运行时，必须先生成
+`data/processed/kqapro/kqapro-v03-full-audit/graph.sqlite`、`train/tasks.parquet` 和
+`relation_catalog.json`。文件名是 `graph.sqlite`，不是 `graph.slite`。
+
+所有命令都从仓库根目录执行，并显式固定输入、输出和 seed：
+
+```bash
+export PYTHONPATH=$PWD
+export KQAPRO_RAW=$PWD/data/raw/kqa_pro
+export KQAPRO_DIR=$PWD/data/processed/kqapro/kqapro-v03-full-audit
+export KQAPRO_SMOKE_DIR=$PWD/data/processed/kqapro/kqapro-v03-rule-smoke
+export SFT_DATA_DIR=$PWD/outputs/sft-data
+```
+
+### 0.1 下载原始 KQAPro
+
+`KQAPRO_RAW` 中需要有 `kb.json`、`train.json`、`val.json` 和 `test.json`。本地尚无这些文件时执行：
+
+```bash
+python -m pip install huggingface_hub
+python -m graphtask_r1.cli data fetch \
+  --dataset kqapro --raw-dir "$PWD/data/raw"
+
+test -s "$KQAPRO_RAW/kb.json"
+test -s "$KQAPRO_RAW/train.json"
+test -s "$KQAPRO_RAW/val.json"
+test -s "$KQAPRO_RAW/test.json"
+```
+
+已有原始数据时跳过下载，只需令 `KQAPRO_RAW` 指向包含上述四个文件的目录。
+
+### 0.2 先跑 bounded smoke
+
+先用 20 条 train/val 数据验证图构建、KoPL 转换、程序执行和 trace replay。smoke 产物与正式目录
+隔离，不会污染正式快照：
+
+```bash
+python -m graphtask_r1.cli data prepare \
+  --dataset kqapro \
+  --raw-dir "$KQAPRO_RAW" \
+  --output-dir "$KQAPRO_SMOKE_DIR" \
+  --splits train,val --limit 20 --train-sample-size 20 \
+  --verification-mode full --trace-mode canonical \
+  --seed 42 --workers 1
+```
+
+### 0.3 生成正式图、任务和 relation catalog
+
+下面生成本实验约定路径中的 `graph.sqlite`，从 train 分层抽取 20,000 条作为规则采样的参考池，
+并处理完整 val。`source` 模式仍会执行认证程序并以执行结果生成 gold answer；规则采样得到的新候选
+还会在第 1 节单独做严格认证。目录名中的 `full-audit` 是实验快照名，不等同于
+`--verification-mode full`。
+
+```bash
+python -m graphtask_r1.cli data prepare \
+  --dataset kqapro \
+  --raw-dir "$KQAPRO_RAW" \
+  --output-dir "$KQAPRO_DIR" \
+  --splits train,val --train-sample-size 20000 \
+  --verification-mode source --trace-mode none \
+  --max-witness-facts 0 --seed 42 --workers 1
+
+export GRAPHTASK_KQAPRO_DB="$KQAPRO_DIR/graph.sqlite"
+
+python -m graphtask_r1.cli data audit \
+  --input "$KQAPRO_DIR/train/tasks.parquet" --kind task --deep \
+  --training-view-output "$KQAPRO_DIR/train/training_tasks.parquet"
+
+python -m graphtask_r1.cli data audit \
+  --input "$KQAPRO_DIR/val/tasks.parquet" --kind task --deep \
+  --training-view-output "$KQAPRO_DIR/val/training_tasks.parquet"
+
+python -m graphtask_r1.cli data build-relation-catalog \
+  --input "$KQAPRO_DIR/train/training_tasks.parquet" \
+  --scope graph --output "$KQAPRO_DIR/relation_catalog.json"
+
+test -s "$KQAPRO_DIR/graph.sqlite"
+test -s "$KQAPRO_DIR/train/tasks.parquet"
+test -s "$KQAPRO_DIR/relation_catalog.json"
+```
+
+`data prepare` 检测到来源哈希和转换器版本一致时会复用已有 `graph.sqlite`；只有明确需要重建图时才
+添加 `--rebuild-graph`。只运行第 1 节的采样对比，到这里数据就已齐全。
+
+### 0.4 生成 4B A/B 所需的 baseline mixed SFT
+
+第 2 节的 4B 命令还依赖 `outputs/sft-data/preflight/mixed-train-accepted.parquet`。以下流程从上面的
+20,000 条参考池中确定性选出约 5,000 条 Solver 和 5,000 条 Questioner，完成 deep audit、导出、
+1:1 混合和真实 ms-swift 模板长度预检：
+
+```bash
+export TRAIN_TASKS="$KQAPRO_DIR/train/tasks.parquet"
+export VAL_TASKS="$KQAPRO_DIR/val/tasks.parquet"
+export WORK_DIR="$SFT_DATA_DIR"
+export GRAPH_DB_PATH="$KQAPRO_DIR/graph.sqlite"
+export MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
+export MODEL_TYPE=qwen3
+export SOLVER_RATIO=1
+export QUESTIONER_RATIO=1
+export QUESTIONER_COUNT_OVERRIDE=5000
+export MAX_LENGTH=32768
+export SELFPLAY_SEED_COUNT=4096
+export SEED=42
+
+bash scripts/prepare_mixed_sft_data.sh
+
+test -s "$SFT_DATA_DIR/preflight/mixed-train-accepted.parquet"
+```
+
+模板预检需要能够加载 `MODEL_PATH`。如果模型尚未缓存，这一步会下载模型相关文件；它不是生成
+`graph.sqlite` 的前置条件。脚本不会通过重复行凑数，实际通过认证/预检的行数以
+`outputs/sft-data/sft_data.env` 和 preflight summary 为准。
+
 ## 1. 采样实验
 
 ```bash
