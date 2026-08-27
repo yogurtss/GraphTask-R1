@@ -333,7 +333,7 @@ def test_base_direct_rejects_answer_with_extra_prose(tmp_path: Path) -> None:
     assert row["rejection_reason"]["code"] == "DIRECT_INFERENCE_FAILED"
 
 
-def test_base_tool_gets_function_examples_and_does_not_fallback(tmp_path: Path) -> None:
+def test_base_tool_gets_function_examples_and_falls_back_to_base(tmp_path: Path) -> None:
     input_path, config = _fixture(tmp_path)
     import asyncio
 
@@ -361,8 +361,10 @@ def test_base_tool_gets_function_examples_and_does_not_fallback(tmp_path: Path) 
     assert '"op":"follow"' in messages[2]["content"]
     assert "Allowed relation catalog" in messages[-1]["content"]
 
-    failure_client = FakeCompletionClient(["not-json"])
-    asyncio.run(
+    failure_client = FakeCompletionClient(
+        ["not-json", '<answer>["Bob"]</answer>']
+    )
+    failed_summary = asyncio.run(
         evaluate_kqapro_val(
             input_path,
             tmp_path / "base-tool-failed",
@@ -373,9 +375,19 @@ def test_base_tool_gets_function_examples_and_does_not_fallback(tmp_path: Path) 
         )
     )
     failed = read_records(tmp_path / "base-tool-failed/predictions.parquet")[0]
-    assert len(failure_client.calls) == 1
-    assert failed["inference_mode"] == "graphscript"
-    assert failed["fallback_used"] is False
+    assert failed_summary["overall"]["exact_match"] == 1.0
+    assert failed_summary["overall"]["tool_success_rate"] == 0.0
+    assert failed_summary["overall"]["fallback_rate"] == 1.0
+    assert len(failure_client.calls) == 2
+    assert failure_client.calls[1]["messages"][-1]["content"] == (
+        "Question: Who is <Alice>'s friend?"
+    )
+    assert failure_client.calls[1]["trace_id"].endswith(":base_tool:fallback")
+    assert failed["inference_mode"] == "direct_fallback"
+    assert failed["fallback_used"] is True
+    assert failed["tool_succeeded"] is False
+    assert failed["predicted_answers"] == ["Bob"]
+    assert failed["primary_raw_response"] == "not-json"
     assert failed["rejection_reason"]["code"] == "GRAPHSCRIPT_PARSE_FAILED"
 
 

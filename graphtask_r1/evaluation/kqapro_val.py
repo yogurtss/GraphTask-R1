@@ -624,7 +624,7 @@ async def _evaluate_one(
         }
     except (TypeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
         primary_reason = primary_reason or _reason("MODEL_REQUEST_FAILED", exc)
-        if model_name in {"sft", "grpo"}:
+        if model_name in {"base_tool", "sft", "grpo"}:
             try:
                 fallback = await _direct_result(
                     task,

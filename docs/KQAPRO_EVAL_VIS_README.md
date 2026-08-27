@@ -3,7 +3,8 @@
 本文说明如何独立运行以下四种评测模式：
 
 1. `base`：原始基础模型，严格直接回答问题；
-2. `base_tool`：同一个原始基础模型，用带函数说明与 few-shot 示例的 prompt 生成 GraphScript；
+2. `base_tool`：同一个原始基础模型，先用带函数说明与 few-shot 示例的 prompt 生成 GraphScript，
+   失败时回退到 `base` 的严格直接回答 prompt；
 3. `sft`：SFT checkpoint，优先生成并执行 GraphScript，失败时回退为直接回答；
 4. `grpo`：GRPO checkpoint，优先生成并执行 GraphScript，失败时同样回退为直接回答。
 
@@ -33,7 +34,7 @@
 | `--model-stage` | 首次推理 | 工具路径失败后 | 是否执行 KQAPro 图 |
 | --- | --- | --- | --- |
 | `base` | 直接回答 prompt | 不适用 | 否 |
-| `base_tool` | 带函数说明/few-shot 的 GraphScript v0.3 | 不回退，保留工具失败 | 是 |
+| `base_tool` | 带函数说明/few-shot 的 GraphScript v0.3 | 回退到同一 base 模型直接回答 | 是 |
 | `sft` | GraphScript v0.3 | 同一模型直接回答 | 是 |
 | `grpo` | GraphScript v0.3 | 同一模型直接回答 | 是 |
 
@@ -217,8 +218,9 @@ export KQAPRO_MODEL=Qwen/Qwen3-4B-Instruct-2507
 
 `base_tool` 使用同一个 base 服务，但会读取 relation catalog，并给原模型提供全部 GraphScript
 函数的签名/语义、handle 规则，以及 follow、query attribute、all entities + count、literal filter
-四类示例。它执行模型生成的代码，但失败时不回退直接回答，以便单独测量“未训练原模型生成代码并
-使用工具”的能力。`--model-stage` 控制的是评测协议，不只是结果标签。
+四类示例。模型请求、GraphScript 解析、版本检查或执行失败时，它会用同一个 base 服务和严格直接
+回答 prompt 再请求一次；首次工具失败原因、原始响应和尝试过的 operator path 仍会保留，便于分别
+统计工具能力与 fallback 后的最终准确率。`--model-stage` 控制的是评测协议，不只是结果标签。
 
 ## 5. 部署 SFT 模型
 
@@ -419,7 +421,7 @@ terminal_failures=0 cache_hits=0 bar="[░░░░░░░░░░░░░�
 - `pending`：尚未完成（包含正在请求和等待 semaphore）的样本；
 - `correct`：当前最终回答正确数；
 - `tool_successes`：GraphScript 首次成功执行数；
-- `fallbacks`：SFT/GRPO 已进入直接回答回退的样本数；
+- `fallbacks`：`base_tool`/SFT/GRPO 已进入直接回答回退的样本数；
 - `terminal_failures`：主路径和回退都没有产生答案的样本数；
 - `cache_hits`：从当前输出目录响应 cache 复用的样本数。
 - `bar`：20 格终端文本进度条；精确进度仍以 `completed/total/percent` 为准。
@@ -583,8 +585,8 @@ cache/<stage>.json       # 可重放模型响应缓存
 - `by_operator`：按 certified gold program operator family 分桶的结果。
 
 `predictions.parquet` 还保留结构化 `rejection_reason`、原始模型响应、GraphScript steps、执行
-support triples、图预算和 trace 相关信息。SFT/GRPO 回退后仍会保留主路径的失败原因；如果主程序
-已经解析成功，其尝试过的 operator path 也会保留。
+support triples、图预算和 trace 相关信息。`base_tool`/SFT/GRPO 回退后仍会保留主路径的失败原因；
+如果主程序已经解析成功，其尝试过的 operator path 也会保留。
 
 ## 12. 任意汇总两个或更多模式
 
