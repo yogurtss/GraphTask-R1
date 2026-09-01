@@ -279,3 +279,143 @@ DB。六阶段的顺序、失败后的继续策略和 phase manifest 恢复规�
 按照 `docs/KQAPRO_TRAINING.md` 的固定 held-out 流程运行 `kqapro-promote
 --require-promotion`；只有 exact match、F1、tool success 均不退化且至少一项严格提升时，才将
 该 Solver 作为下一轮或最终模型。
+
+## 7. 排查 Program-first seeds 缺少固定程序
+
+### 7.1 典型报错
+
+Rule self-play 在组装 Questioner 数据集时会检查每一行 `extra_info`。以下报错表示输入的 seed
+不符合 `rule_program_question_v1` 的数据契约：
+
+```text
+rule_program_question_v1 seed is missing required fields: fixed_program_json, fixed_graphscript_json
+```
+
+也可能只列出其中一个字段，或报：
+
+```text
+rule_program_question_v1 config requires matching Program-first seeds
+```
+
+这不是 SFT checkpoint 损坏。普通 Questioner seed 只提供实体和邻域，让模型现场生成问题及程序；
+Rule Questioner 则先离线采样并认证程序，训练时只让模型生成 `{"question":"..."}`。因此 Rule reward
+必须从每行 seed 读取固定程序，才能检查问题/程序对齐、重新认证任务并调用 opponent。
+
+### 7.2 常见原因
+
+1. `QUESTIONER_SEEDS` 仍指向主流程的 `questioner-seeds.parquet`，而不是第 2 节生成的
+   `questioner-selfplay.parquet`。
+2. 远程服务器更新了代码，但复用了更新前已经生成的 Parquet。`git pull` 不会迁移 `outputs/`
+   下的数据文件。
+3. 数据准备命令中断，或者复制/同步时拿到了旧文件、空文件或不完整文件。
+4. 配置启用了 `questioner_reward_variant: rule_program_question_v1`，但 seed 来自 `legacy`、
+   `frontier_v2` 或普通 `curriculum_v3` 流程。
+5. 手工合并或转换 Parquet 时丢失了 `extra_info` 的嵌套字段，或者字段值变成空字符串/null。
+
+旧流程能够使用普通 seed，是因为旧 reward 会解析模型本轮生成的 GraphScript/Program；它不需要
+预先固定程序。Rule 流程改变了训练目标，不能把旧 seed 直接当作 Rule seed 使用。启动前的严格
+检查用于尽早中止错误训练；删除检查只会把失败推迟到 reward 计算阶段，或者造成错误的奖励信号。
+
+### 7.3 先确认实际输入文件
+
+```bash
+printf 'QUESTIONER_SEEDS=%s\n' "$QUESTIONER_SEEDS"
+test -s "$QUESTIONER_SEEDS"
+readlink -f "$QUESTIONER_SEEDS"
+```
+
+Rule 4B 正式流程应指向类似下面的路径：
+
+```text
+outputs/experiments/rule-questioner-4b-large/data/questioner-selfplay.parquet
+```
+
+不要指向：
+
+```text
+outputs/sft-data/.../questioner-seeds.parquet
+outputs/experiments/rule-questioner-4b-large/data/questioner-sft.parquet
+outputs/experiments/rule-questioner-4b-large/data/mixed-sft.parquet
+```
+
+如果服务器上有多个同名文件，可以先列出候选及时间：
+
+```bash
+find outputs -type f -name 'questioner-selfplay.parquet' -printf '%TY-%Tm-%Td %TH:%TM %s %p\n' \
+  | sort
+```
+
+### 7.4 验证所有 seed 行
+
+只检查文件存在还不够；下面的命令会检查每一行的两个固定字段和 reward variant：
+
+```bash
+python - <<'PY'
+import os
+
+import pyarrow.parquet as pq
+
+path = os.environ["QUESTIONER_SEEDS"]
+rows = pq.read_table(path, columns=["extra_info"]).to_pylist()
+bad = []
+for index, row in enumerate(rows):
+    info = row["extra_info"] or {}
+    if (
+        not info.get("fixed_program_json")
+        or not info.get("fixed_graphscript_json")
+        or info.get("questioner_reward_variant") != "rule_program_question_v1"
+    ):
+        bad.append(index)
+
+print("path:", path)
+print("rows:", len(rows))
+print("invalid rows:", len(bad))
+print("invalid examples:", bad[:10])
+assert rows, "seed file is empty"
+assert not bad, "seed file is not a complete rule_program_question_v1 dataset"
+PY
+```
+
+4B 默认数据的预期结果为 `rows: 4096`、`invalid rows: 0`。如果字段完整但仍报 variant 不匹配，
+确认没有在启动 self-play 前把 `QUESTIONER_SEEDS` 重新赋值为其他文件。
+
+### 7.5 重新生成 Rule seeds
+
+字段确实缺失时，使用第 1 节生成的严格认证候选重新导出，建议写入新目录而不是覆盖旧数据：
+
+```bash
+PYTHONPATH=. python scripts/prepare_rule_questioner_data.py \
+  --graph-db data/processed/kqapro/kqapro-v03-full-audit/graph.sqlite \
+  --reference-tasks data/processed/kqapro/kqapro-v03-full-audit/train/tasks.parquet \
+  --candidates outputs/experiments/rule-path-sampler-n10000/family_balanced/candidates.jsonl \
+  --baseline-mixed-sft outputs/sft-data/preflight/mixed-train-accepted.parquet \
+  --selfplay-count 4096 --opponent-samples 4 --seed 42 \
+  --output-dir outputs/experiments/rule-questioner-4b-large/data-v2
+
+export QUESTIONER_SEEDS=$PWD/outputs/experiments/rule-questioner-4b-large/data-v2/questioner-selfplay.parquet
+```
+
+生成后重新执行第 7.4 节的逐行检查。若 `candidates.jsonl` 不存在，先执行第 1 节的 N=10,000
+`family_balanced` 采样命令；不要从普通 seed 猜测或伪造固定程序。
+
+### 7.6 是否需要重新训练 SFT
+
+仅重新生成 `questioner-selfplay.parquet` **不需要**重新训练 SFT。固定程序字段是 self-play reward
+所需的 episode 元数据，不是 SFT checkpoint 的组成部分。只要 `INITIAL_ADAPTER` 原本由第 3 节的
+Program-first `mixed-sft.parquet` 训练得到，就可以继续使用：
+
+```bash
+test -f "$INITIAL_ADAPTER/adapter_config.json"
+```
+
+只有现有 adapter 使用的是普通/旧版 mixed SFT，或者无法确认其训练数据来源时，才应重新执行第 3
+节。数据修复后建议使用新的 self-play 输出目录，避免旧 phase manifest 与新 seed/config 混用：
+
+```bash
+bash scripts/run_rule_questioner_selfplay_phases.sh \
+  configs/training/selfplay_qwen3_4b_rule_questioner_large.yaml \
+  outputs/selfplay/rule-questioner-qwen3-4b-10k-v2
+```
+
+如果必须继续旧版“模型同时生成问题和程序”的实验，应配套使用旧 seed、旧 Questioner adapter 和
+对应的 `legacy`/`curriculum_v3` reward 配置；这属于另一个实验，不等价于 Rule Program-first。
