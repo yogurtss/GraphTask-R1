@@ -529,8 +529,10 @@ def test_curriculum_solver_reward_receives_scheduler_rollout_infos(
         solution_str: str,
         ground_truth: str,
         extra_info: dict[str, object],
+        *,
+        backend: object | None = None,
     ) -> dict[str, float]:
-        del data_source, solution_str, ground_truth
+        del data_source, solution_str, ground_truth, backend
         captured.append(extra_info)
         return {"score": 0.25, "raw_score": 0.25}
 
@@ -586,6 +588,49 @@ def test_curriculum_solver_reward_receives_scheduler_rollout_infos(
         rollout_infos=[{"calls": 9}],
     )
     assert "solver_rollout" not in captured[1]
+
+
+def test_ms_swift_reward_reuses_backend_per_snapshot(
+    plugin: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[tuple[str, object]] = []
+    received: list[object] = []
+
+    def fake_backend_from_snapshot(snapshot: str) -> object:
+        backend = object()
+        created.append((snapshot, backend))
+        return backend
+
+    async def fake_compute_score(
+        data_source: str,
+        solution_str: str,
+        ground_truth: str,
+        extra_info: dict[str, object],
+        *,
+        backend: object | None = None,
+    ) -> dict[str, float]:
+        del data_source, solution_str, ground_truth, extra_info
+        assert backend is not None
+        received.append(backend)
+        return {"score": 0.25, "raw_score": 0.25}
+
+    monkeypatch.setattr(plugin, "backend_from_snapshot", fake_backend_from_snapshot)
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+    reward = plugin.GraphTaskReward()
+    kwargs = {
+        "data_source": ["graphtask/questioner", "graphtask/questioner"],
+        "ground_truth": ["{}", "{}"],
+        "extra_info": [
+            {"graph_snapshot": "kqapro-v1"},
+            {"graph_snapshot": "kqapro-v1"},
+        ],
+    }
+
+    assert reward(["one", "two"], **kwargs) == [0.25, 0.25]
+    assert reward(["three", "four"], **kwargs) == [0.25, 0.25]
+    assert len(created) == 1
+    assert len(received) == 4
+    assert all(backend is received[0] for backend in received)
 
 
 def test_grpo_launcher_can_select_curriculum_scheduler() -> None:

@@ -427,3 +427,40 @@ bash scripts/run_rule_questioner_selfplay_phases.sh \
 
 如果必须继续旧版“模型同时生成问题和程序”的实验，应配套使用旧 seed、旧 Questioner adapter 和
 对应的 `legacy`/`curriculum_v3` reward 配置；这属于另一个实验，不等价于 Rule Program-first。
+
+## 8. GPU 长时间空闲与本地验证性能
+
+Rule Questioner 的一次 reward 不只是 SGLang 推理。actor 生成问题后，训练进程还要同步执行问题解析、
+固定 Program 的自然语言对齐、Program 执行、必要性检查、bounded shortcut 搜索和答案泄漏检查；这些
+步骤会读取 KQAPro SQLite，属于 CPU/磁盘路径。通过认证后才会请求 opponent；opponent 返回的
+GraphScript 还要执行本地图工具。archive 的查重、追加和 SQLite commit 也会耗时，若数据库或输出目录
+位于 NFS/并行文件系统，短写入和 `fsync` 的尾延迟会更加明显。因此 actor 和 opponent GPU 同时出现
+零利用率并不等价于死锁，可能只是训练进程正在验证、等待 SQL/I/O 或提交 archive。
+
+当前实现做了两项不改变 reward 语义的优化：
+
+- 每个 ms-swift reward 实例按 `graph_snapshot` 复用只读图后端，不再为每个 completion 重建 SQLite
+  连接；DDP 的每个 rank 仍持有独立实例和连接。
+- `verify_task` 在一次 SQLite 验证内启用 task-scoped 查询缓存，复用程序执行、实体信息和捷径搜索中
+  的重复只读查询；退出验证后立即清空，不跨任务保存环境状态。
+
+本机使用 64 条 `questioner-selfplay.parquet` 真实 KQAPro seed、关闭 opponent HTTP，并使用同一批
+canonical question 做了三轮 mini 对照。结果摘要哈希均为 `5d856445dc4249f5`、总 reward 均为
+`32.0`。去掉首轮文件缓存预热后，优化前两轮为 `3.506/3.450 s`，优化后为
+`2.220/2.278 s`，平均耗时下降约 35%，吞吐约为原来的 1.55 倍；中位单条延迟约下降 57%。该数字只
+代表本地 CPU/SQLite reward 前处理，不包含 SGLang decode、HTTP 排队和 archive 写入，因此不能直接
+当作完整训练加速比。
+
+远程训练时建议同时观察三类指标，而不是只看 `nvidia-smi`：
+
+```bash
+nvidia-smi dmon -s pucm -d 1
+pidstat -dur -p ALL 1
+iostat -xz 1
+```
+
+判断方法：单个 Python 核心接近 100% 且磁盘不忙，通常是验证/JSON/shortcut CPU 长尾；`await` 很高
+或 opponent 日志有排队，是 HTTP/SGLang 服务瓶颈；`iowait`、磁盘 `await` 或 `%util` 高，则优先把
+只读 `graph.sqlite` 和 archive 放到本地 NVMe。Questioner 的 2+2 布局只能增加模型服务能力，无法
+消除训练进程中的同步 CPU/SQL 阶段；如果 SGLang 两张卡仍经常同时空闲，应先用上述指标确认是否已经
+从 GPU 瓶颈转成 CPU/I/O 瓶颈，再提高并发。

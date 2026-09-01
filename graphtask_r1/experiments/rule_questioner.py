@@ -411,6 +411,8 @@ def promote_rule_questioner_candidates(
 async def compute_rule_questioner_score(
     solution_str: str,
     info: dict[str, Any],
+    *,
+    backend: GraphBackend | None = None,
 ) -> dict[str, float]:
     values: dict[str, float] = {
         "json_valid": 0.0,
@@ -440,7 +442,8 @@ async def compute_rule_questioner_score(
     if not isinstance(raw_program, str):
         raise ValueError("rule Questioner reward requires fixed_program_json")
     program = parse_program(json.loads(raw_program))
-    backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
+    if backend is None:
+        backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
     canonical = verbalize(program, backend)
     alignment, token_f1, anchor_overlap = _question_alignment(question, canonical)
     values["question_program_alignment"] = alignment

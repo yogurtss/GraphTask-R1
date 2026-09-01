@@ -1,6 +1,8 @@
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,7 @@ from graphtask_r1.schema import (
     program_to_dict,
 )
 from graphtask_r1.utils import read_records
+from graphtask_r1.verification import verify_task
 
 
 def _write_fixture(raw_dir: Path) -> None:
@@ -492,6 +495,35 @@ def test_sqlite_task_cache_reuses_program_and_entity_queries(tmp_path: Path) -> 
             assert len(statements) == first_query_count
         backend.execute_program(program)
         assert len(statements) > first_query_count
+    finally:
+        backend.close()
+
+
+def test_sqlite_verification_uses_one_task_scoped_query_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_fixture(raw_dir)
+    output_dir = tmp_path / "processed"
+    prepare_kqapro(raw_dir, output_dir, splits=("train",), limit=0)
+    backend = SQLiteGraphBackend(output_dir / "graph.sqlite")
+    original_query_cache = backend.query_cache
+    entries = 0
+
+    @contextmanager
+    def tracked_query_cache() -> Iterator[None]:
+        nonlocal entries
+        entries += 1
+        with original_query_cache():
+            yield
+
+    monkeypatch.setattr(backend, "query_cache", tracked_query_cache)
+    program = Hop(input=Entity(entity_id="e_alice"), relation="friend")
+    try:
+        result = verify_task("Who is Alice's friend?", program, backend)
+        assert result.executable
+        assert entries == 1
+        assert backend._cache_depth == 0
     finally:
         backend.close()
 

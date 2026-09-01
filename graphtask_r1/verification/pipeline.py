@@ -20,6 +20,41 @@ def verify_task(
     reject_shortcuts: bool = True,
     shortcut_budget: int = 1000,
 ) -> VerifierResult:
+    if isinstance(backend, SQLiteGraphBackend):
+        with backend.query_cache():
+            return _verify_task(
+                question,
+                program,
+                backend,
+                min_answers=min_answers,
+                max_answers=max_answers,
+                necessity_min_threshold=necessity_min_threshold,
+                reject_shortcuts=reject_shortcuts,
+                shortcut_budget=shortcut_budget,
+            )
+    return _verify_task(
+        question,
+        program,
+        backend,
+        min_answers=min_answers,
+        max_answers=max_answers,
+        necessity_min_threshold=necessity_min_threshold,
+        reject_shortcuts=reject_shortcuts,
+        shortcut_budget=shortcut_budget,
+    )
+
+
+def _verify_task(
+    question: str,
+    program: Program,
+    backend: GraphBackend,
+    *,
+    min_answers: int,
+    max_answers: int,
+    necessity_min_threshold: float,
+    reject_shortcuts: bool,
+    shortcut_budget: int,
+) -> VerifierResult:
     started = time.perf_counter()
     reasons: list[str] = []
     try:
