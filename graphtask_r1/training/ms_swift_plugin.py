@@ -115,6 +115,7 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
     def __init__(self) -> None:
         super().__init__()
         self._metrics_sequence = 0
+        self._backends: dict[str, GraphBackend] = {}
         metrics_dir = os.environ.get("GRAPHTASK_REWARD_METRICS_DIR")
         rank = os.environ.get("RANK", "0")
         safe_rank = rank if rank.isdigit() else "unknown"
@@ -123,6 +124,11 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
             if metrics_dir
             else None
         )
+
+    def _backend(self, snapshot: str) -> GraphBackend:
+        if snapshot not in self._backends:
+            self._backends[snapshot] = backend_from_snapshot(snapshot)
+        return self._backends[snapshot]
 
     def _record_metrics(self, event: dict[str, object]) -> None:
         if self._metrics_path is None:
@@ -168,11 +174,13 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
             normalized_infos.append(info)
 
         async def score_one(index: int) -> dict[str, float]:
+            info = normalized_infos[index]
             return await compute_score(
                 str(sources[index]),
                 _reward_completion(completions[index]),
                 str(truths[index]),
-                normalized_infos[index],
+                info,
+                backend=self._backend(str(info.get("graph_snapshot", "toy-v1"))),
             )
 
         async def score_all() -> list[dict[str, float]]:

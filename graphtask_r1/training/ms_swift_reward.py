@@ -7,7 +7,7 @@ from typing import Any, cast
 from graphtask_r1.dsl import canonical_signature, program_cost
 from graphtask_r1.evaluation import answer_metrics
 from graphtask_r1.generation import validate_proposal, verbalize
-from graphtask_r1.graph import backend_from_snapshot
+from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import (
     GraphScriptError,
     execute_graphscript,
@@ -328,6 +328,7 @@ async def _compute_curriculum_questioner_score(
     info: dict[str, Any],
     *,
     role_weight: float,
+    backend: GraphBackend,
 ) -> dict[str, float]:
     raw_stage = str(info.get("curriculum_phase", "production"))
     if raw_stage not in {"production", "grounding", "frontier"}:
@@ -400,7 +401,6 @@ async def _compute_curriculum_questioner_score(
             "type_valid_fraction": 1.0,
         }
     )
-    backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
     try:
         execution = execute_graphscript(
             script,
@@ -582,6 +582,7 @@ async def _compute_curriculum_tool_questioner_score(
     info: dict[str, Any],
     *,
     role_weight: float,
+    backend: GraphBackend,
 ) -> dict[str, float]:
     raw_stage = str(info.get("curriculum_phase", "production"))
     if raw_stage not in {"production", "grounding", "frontier"}:
@@ -659,7 +660,6 @@ async def _compute_curriculum_tool_questioner_score(
             "type_valid_fraction": 1.0,
         }
     )
-    backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
     try:
         answers = backend.execute_program(proposal.program)
     except (KeyError, TypeError, ValueError, RuntimeError):
@@ -870,6 +870,7 @@ def _compute_curriculum_graphscript_solver_score(
     info: dict[str, Any],
     *,
     role_weight: float,
+    backend: GraphBackend,
 ) -> dict[str, float]:
     stage = _solver_curriculum_stage(info)
     raw_version = str(info.get("graphscript_version", "0.3"))
@@ -942,7 +943,6 @@ def _compute_curriculum_graphscript_solver_score(
             "program_structure_f1": _graphscript_structure_f1(script, info),
         }
     )
-    backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
     topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
     try:
         execution = execute_graphscript(
@@ -1074,10 +1074,13 @@ async def compute_score(
     solution_str: str,
     ground_truth: str,
     extra_info: dict[str, Any] | None = None,
+    *,
+    backend: GraphBackend | None = None,
 ) -> dict[str, float]:
     """ms-swift reward entrypoint returning the score and auditable components."""
     info = extra_info or {}
-    backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
+    if backend is None:
+        backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
     role_weight = float(info.get("role_weight", 1.0))
     raw_mode = str(info.get("interaction_mode", "tool"))
     if raw_mode not in {"tool", "graphscript"}:
@@ -1089,19 +1092,21 @@ async def compute_score(
                 compute_rule_questioner_score,
             )
 
-            return await compute_rule_questioner_score(solution_str, info)
+            return await compute_rule_questioner_score(solution_str, info, backend=backend)
         if str(info.get("questioner_reward_variant", "legacy")) == "curriculum_v3":
             return await (
                 _compute_curriculum_questioner_score(
                     solution_str,
                     info,
                     role_weight=role_weight,
+                    backend=backend,
                 )
                 if interaction_mode == "graphscript"
                 else _compute_curriculum_tool_questioner_score(
                     solution_str,
                     info,
                     role_weight=role_weight,
+                    backend=backend,
                 )
             )
         try:
@@ -1311,6 +1316,7 @@ async def compute_score(
                     gold,
                     info,
                     role_weight=role_weight,
+                    backend=backend,
                 )
                 if interaction_mode == "graphscript"
                 else _compute_curriculum_tool_solver_score(
