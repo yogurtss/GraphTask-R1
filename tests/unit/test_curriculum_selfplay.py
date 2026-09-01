@@ -768,6 +768,13 @@ def test_repository_curriculum_config_is_opt_in() -> None:
     assert rule_questioner_4b.curriculum_archive_empty_policy == "base_backfill"
     assert rule_questioner_4b.curriculum_min_solver_execution_rate == 0.1
     assert rule_questioner_4b.questioner_reward_variant == RULE_QUESTIONER_VARIANT
+    assert rule_questioner_4b.actor_gpus == "0,1,2"
+    assert rule_questioner_4b.opponent_gpus == "3"
+    assert rule_questioner_4b.questioner_actor_gpus == "0,1"
+    assert rule_questioner_4b.questioner_opponent_gpus == "2,3"
+    assert rule_questioner_4b.questioner_opponent_max_concurrency == 16
+    assert rule_questioner_4b.questioner_gradient_accumulation_steps == 6
+    assert rule_questioner_4b.questioner_steps_per_generation == 6
     assert rule_questioner_4b.opponent_backend == "sglang"
     assert rule_questioner_4b.opponent_max_concurrency == 8
     assert rule_questioner_4b.opponent_model_request_timeout_s == 240.0
@@ -776,6 +783,84 @@ def test_repository_curriculum_config_is_opt_in() -> None:
     assert rule_questioner_4b.val_data is None
     assert rule_questioner_4b.validation_samples is None
     assert rule_questioner_4b.enable_grpo_validation is False
+
+
+def test_exact_questioner_phase_uses_2_plus_2_runtime_without_changing_solver(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "curriculum.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"initial_adapter: {tmp_path / 'initial-adapter'}",
+                f"base_tasks: {tmp_path / 'tasks.parquet'}",
+                f"val_data: {tmp_path / 'val.parquet'}",
+                f"questioner_seeds: {tmp_path / 'seeds.parquet'}",
+                "selfplay_variant: curriculum_v3",
+                "rounds: 1",
+                'actor_gpus: "0,1,2"',
+                'opponent_gpus: "3"',
+                'questioner_actor_gpus: "0,1"',
+                'questioner_opponent_gpus: "2,3"',
+                "opponent_max_concurrency: 8",
+                "questioner_opponent_max_concurrency: 16",
+                "micro_batch_size: 1",
+                "eval_batch_size: 4",
+                "gradient_accumulation_steps: 4",
+                "steps_per_generation: 4",
+                "questioner_gradient_accumulation_steps: 6",
+                "questioner_steps_per_generation: 6",
+                "rollout_n: 4",
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.raises(ValueError, match="require exact phase execution"):
+        run_self_play(
+            config_path,
+            tmp_path / "combined-run",
+            resume=False,
+            dry_run=True,
+        )
+
+    questioner = run_self_play(
+        config_path,
+        tmp_path / "questioner-run",
+        resume=False,
+        dry_run=True,
+        target_round=1,
+        target_phase="questioner",
+    )["plans"][0]
+    assert questioner["actor_gpus"] == "0,1"
+    assert questioner["opponent_gpus"] == "2,3"
+    assert questioner["opponent_max_concurrency"] == 16
+    assert questioner["train_environment"]["NUM_GPUS"] == "2"
+    assert questioner["train_environment"]["GRADIENT_ACCUMULATION_STEPS"] == "6"
+    assert questioner["train_environment"]["STEPS_PER_GENERATION"] == "6"
+    sglang = questioner["commands"]["sglang"]
+    assert sglang[sglang.index("--dp-size") + 1] == "2"
+    opponent = questioner["commands"]["opponent"]
+    assert opponent[opponent.index("--max-concurrent-completions") + 1] == "16"
+
+    solver_run = tmp_path / "solver-run"
+    _write_completed_phase(solver_run / "round_001", "questioner")
+    solver = run_self_play(
+        config_path,
+        solver_run,
+        resume=False,
+        dry_run=True,
+        target_round=1,
+        target_phase="solver",
+    )["plans"][0]
+    assert solver["actor_gpus"] == "0,1,2"
+    assert solver["opponent_gpus"] == "3"
+    assert solver["opponent_max_concurrency"] == 8
+    assert solver["train_environment"]["NUM_GPUS"] == "3"
+    assert solver["train_environment"]["GRADIENT_ACCUMULATION_STEPS"] == "4"
+    assert solver["train_environment"]["STEPS_PER_GENERATION"] == "4"
+    sglang = solver["commands"]["sglang"]
+    assert sglang[sglang.index("--dp-size") + 1] == "1"
 
 
 def test_selfplay_validation_requires_an_explicit_val_dataset() -> None:

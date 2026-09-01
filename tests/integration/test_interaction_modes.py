@@ -444,6 +444,34 @@ def test_selfplay_rejects_overlapping_actor_and_opponent_gpus() -> None:
         )
 
 
+def test_selfplay_rejects_overlapping_questioner_phase_gpus() -> None:
+    with pytest.raises(ValueError, match="questioner .*must be disjoint"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "selfplay_variant": "curriculum_v3",
+                "questioner_actor_gpus": "0,1",
+                "questioner_opponent_gpus": "1,2",
+            }
+        )
+
+
+def test_questioner_runtime_overrides_require_curriculum() -> None:
+    with pytest.raises(ValueError, match="require selfplay_variant=curriculum_v3"):
+        SelfPlayConfig.model_validate(
+            {
+                "initial_adapter": "adapter",
+                "base_tasks": "tasks.parquet",
+                "val_data": "val.parquet",
+                "questioner_seeds": "seeds.parquet",
+                "questioner_actor_gpus": "0,1",
+            }
+        )
+
+
 def test_selfplay_allows_explicit_single_gpu_transformers_smoke() -> None:
     config = SelfPlayConfig.model_validate(
         {

@@ -46,16 +46,23 @@ archive_ratio: 0.10
 new_ratio: 0.25
 seed: 42
 
-# Default topology: three actor GPUs plus one independent SGLang opponent GPU.
+# Solver topology remains three actor GPUs plus one independent SGLang opponent GPU.
 actor_gpus: "0,1,2"
 opponent_gpus: "3"
+# Questioner is opponent-bound: keep the effective generation/global batch at 12,
+# but use two actor GPUs and two data-parallel SGLang opponent replicas.
+questioner_actor_gpus: "0,1"
+questioner_opponent_gpus: "2,3"
+questioner_opponent_max_concurrency: 16
+questioner_gradient_accumulation_steps: 6
+questioner_steps_per_generation: 6
 allow_gpu_overlap: false
 use_vllm: true
 opponent_backend: sglang
 sglang_port: 30000
 opponent_port: 18080
-# Bound the single-GPU frozen Solver instead of allowing each DDP rank to
-# multiply opponent_samples into an unbounded SGLang request burst.
+# Bound the default single-GPU frozen Solver; the Questioner phase override above
+# permits 16 completions across two SGLang data-parallel replicas.
 opponent_max_concurrency: 8
 opponent_model_request_timeout_s: 240
 opponent_request_timeout_s: 300
