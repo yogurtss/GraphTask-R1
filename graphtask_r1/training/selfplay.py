@@ -12,6 +12,7 @@ import time
 import urllib.request
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -61,6 +62,15 @@ def _gpu_ids(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+@dataclass(frozen=True)
+class PhaseRuntime:
+    actor_gpus: str
+    opponent_gpus: str
+    opponent_max_concurrency: int
+    gradient_accumulation_steps: int
+    steps_per_generation: int
+
+
 class SelfPlayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -106,6 +116,11 @@ class SelfPlayConfig(BaseModel):
     seed: int = 42
     actor_gpus: str = "0,1,2"
     opponent_gpus: str = "3"
+    questioner_actor_gpus: str | None = None
+    questioner_opponent_gpus: str | None = None
+    questioner_opponent_max_concurrency: int | None = Field(default=None, gt=0, le=64)
+    questioner_gradient_accumulation_steps: int | None = Field(default=None, gt=0)
+    questioner_steps_per_generation: int | None = Field(default=None, gt=0)
     allow_gpu_overlap: bool = False
     use_vllm: bool = True
     opponent_backend: Literal["sglang", "transformers"] = "sglang"
@@ -188,44 +203,130 @@ class SelfPlayConfig(BaseModel):
                 "vllm_max_model_len must exceed max_completion_tokens to leave room "
                 "for the prompt"
             )
-        actor_ids = _gpu_ids(self.actor_gpus)
-        opponent_ids = _gpu_ids(self.opponent_gpus)
-        if not actor_ids or not opponent_ids:
-            raise ValueError("actor_gpus and opponent_gpus must each select at least one GPU")
-        if len(set(actor_ids)) != len(actor_ids) or len(set(opponent_ids)) != len(
-            opponent_ids
+        if (
+            self.selfplay_variant != "curriculum_v3"
+            and _has_questioner_runtime_overrides(self)
         ):
-            raise ValueError("actor_gpus and opponent_gpus cannot contain duplicate GPU IDs")
-        overlap = sorted(set(actor_ids) & set(opponent_ids))
-        if overlap and not self.allow_gpu_overlap:
             raise ValueError(
-                "actor_gpus and opponent_gpus must be disjoint; overlap: "
-                + ", ".join(overlap)
+                "questioner phase runtime overrides require selfplay_variant=curriculum_v3"
             )
-        if overlap and (self.use_vllm or self.opponent_backend != "transformers"):
-            raise ValueError(
-                "overlapping GPUs require use_vllm=false and "
-                "opponent_backend=transformers"
-            )
-        actor_count = len(actor_ids)
-        generation_batch = actor_count * self.micro_batch_size * self.steps_per_generation
-        evaluation_batch = actor_count * self.eval_batch_size
-        if self.steps_per_generation % self.gradient_accumulation_steps:
-            raise ValueError(
-                "steps_per_generation must be an integer multiple of "
-                "gradient_accumulation_steps"
-            )
-        if generation_batch % self.rollout_n:
-            raise ValueError("self-play generation batch must be divisible by rollout_n")
-        if evaluation_batch % self.rollout_n:
-            raise ValueError("self-play evaluation batch must be divisible by rollout_n")
-        if self.enable_grpo_validation and evaluation_batch % self.eval_rollout_n:
-            raise ValueError(
-                "self-play evaluation batch must be divisible by eval_rollout_n"
+        _validate_phase_runtime(self, _phase_runtime(self, None), label="default")
+        if _has_questioner_runtime_overrides(self):
+            _validate_phase_runtime(
+                self,
+                _phase_runtime(self, "questioner"),
+                label="questioner",
             )
         if self.enable_grpo_validation and self.val_data is None:
             raise ValueError("val_data is required when enable_grpo_validation=true")
         return self
+
+
+def _has_questioner_runtime_overrides(config: SelfPlayConfig) -> bool:
+    return any(
+        value is not None
+        for value in (
+            config.questioner_actor_gpus,
+            config.questioner_opponent_gpus,
+            config.questioner_opponent_max_concurrency,
+            config.questioner_gradient_accumulation_steps,
+            config.questioner_steps_per_generation,
+        )
+    )
+
+
+def _phase_runtime(
+    config: SelfPlayConfig,
+    phase: UpdatePhase | None,
+) -> PhaseRuntime:
+    if phase == "questioner":
+        return PhaseRuntime(
+            actor_gpus=(
+                config.questioner_actor_gpus
+                if config.questioner_actor_gpus is not None
+                else config.actor_gpus
+            ),
+            opponent_gpus=(
+                config.questioner_opponent_gpus
+                if config.questioner_opponent_gpus is not None
+                else config.opponent_gpus
+            ),
+            opponent_max_concurrency=(
+                config.questioner_opponent_max_concurrency
+                if config.questioner_opponent_max_concurrency is not None
+                else config.opponent_max_concurrency
+            ),
+            gradient_accumulation_steps=(
+                config.questioner_gradient_accumulation_steps
+                if config.questioner_gradient_accumulation_steps is not None
+                else config.gradient_accumulation_steps
+            ),
+            steps_per_generation=(
+                config.questioner_steps_per_generation
+                if config.questioner_steps_per_generation is not None
+                else config.steps_per_generation
+            ),
+        )
+    return PhaseRuntime(
+        actor_gpus=config.actor_gpus,
+        opponent_gpus=config.opponent_gpus,
+        opponent_max_concurrency=config.opponent_max_concurrency,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        steps_per_generation=config.steps_per_generation,
+    )
+
+
+def _validate_phase_runtime(
+    config: SelfPlayConfig,
+    runtime: PhaseRuntime,
+    *,
+    label: str,
+) -> None:
+    actor_ids = _gpu_ids(runtime.actor_gpus)
+    opponent_ids = _gpu_ids(runtime.opponent_gpus)
+    if not actor_ids or not opponent_ids:
+        raise ValueError(
+            f"{label} actor_gpus and opponent_gpus must each select at least one GPU"
+        )
+    if len(set(actor_ids)) != len(actor_ids) or len(set(opponent_ids)) != len(
+        opponent_ids
+    ):
+        raise ValueError(
+            f"{label} actor_gpus and opponent_gpus cannot contain duplicate GPU IDs"
+        )
+    overlap = sorted(set(actor_ids) & set(opponent_ids))
+    if overlap and not config.allow_gpu_overlap:
+        raise ValueError(
+            f"{label} actor_gpus and opponent_gpus must be disjoint; overlap: "
+            + ", ".join(overlap)
+        )
+    if overlap and (config.use_vllm or config.opponent_backend != "transformers"):
+        raise ValueError(
+            f"{label} overlapping GPUs require use_vllm=false and "
+            "opponent_backend=transformers"
+        )
+    actor_count = len(actor_ids)
+    generation_batch = (
+        actor_count * config.micro_batch_size * runtime.steps_per_generation
+    )
+    evaluation_batch = actor_count * config.eval_batch_size
+    if runtime.steps_per_generation % runtime.gradient_accumulation_steps:
+        raise ValueError(
+            f"{label} steps_per_generation must be an integer multiple of "
+            "gradient_accumulation_steps"
+        )
+    if generation_batch % config.rollout_n:
+        raise ValueError(
+            f"{label} self-play generation batch must be divisible by rollout_n"
+        )
+    if evaluation_batch % config.rollout_n:
+        raise ValueError(
+            f"{label} self-play evaluation batch must be divisible by rollout_n"
+        )
+    if config.enable_grpo_validation and evaluation_batch % config.eval_rollout_n:
+        raise ValueError(
+            f"{label} self-play evaluation batch must be divisible by eval_rollout_n"
+        )
 
 
 def load_selfplay_config(path: Path) -> SelfPlayConfig:
@@ -981,7 +1082,9 @@ def _commands(
     archive_path: Path,
     mixed_data: Path,
     round_dir: Path,
+    target_phase: UpdatePhase | None = None,
 ) -> dict[str, list[str]]:
+    runtime = _phase_runtime(config, target_phase)
     merged_model = (round_dir / "opponent_merged").resolve()
     merge = [
         "swift",
@@ -1016,7 +1119,7 @@ def _commands(
         "--tp-size",
         "1",
         "--dp-size",
-        str(len(_gpu_ids(config.opponent_gpus))),
+        str(len(_gpu_ids(runtime.opponent_gpus))),
     ]
     opponent = [
         "python",
@@ -1041,7 +1144,11 @@ def _commands(
         "--request-timeout-s",
         str(config.opponent_model_request_timeout_s),
         "--max-concurrent-completions",
-        str(1 if config.opponent_backend == "transformers" else config.opponent_max_concurrency),
+        str(
+            1
+            if config.opponent_backend == "transformers"
+            else runtime.opponent_max_concurrency
+        ),
     ]
     if config.selfplay_variant in {"frontier_v2", "curriculum_v3"}:
         opponent.extend(
@@ -1083,6 +1190,11 @@ def run_self_play(
     config = load_selfplay_config(config_path)
     if (target_round is None) != (target_phase is None):
         raise ValueError("--round-index and --phase must be provided together")
+    if target_phase is None and _has_questioner_runtime_overrides(config):
+        raise ValueError(
+            "questioner phase runtime overrides require exact phase execution; "
+            "use --round-index with --phase or run the curriculum phase script"
+        )
     if target_round is not None:
         if one_round:
             raise ValueError("--one-round cannot be combined with --round-index/--phase")
@@ -1249,25 +1361,29 @@ def run_self_play(
             )
         )
         archive_size_before = 0 if dry_run else _archive_size(archive_path)
+        phase_runtime = _phase_runtime(config, target_phase)
         commands = _commands(
             config,
             adapter=(solver_adapter if config.selfplay_variant == "curriculum_v3" else adapter),
             archive_path=archive_path,
             mixed_data=mixed_data,
             round_dir=round_dir,
+            target_phase=target_phase,
         )
         train_overrides = {
-            "CUDA_VISIBLE_DEVICES": config.actor_gpus,
-            "TRAIN_CUDA_VISIBLE_DEVICES": config.actor_gpus,
+            "CUDA_VISIBLE_DEVICES": phase_runtime.actor_gpus,
+            "TRAIN_CUDA_VISIBLE_DEVICES": phase_runtime.actor_gpus,
             "MODEL_PATH": config.model_path,
             "MODEL_TYPE": config.model_type,
             "LORA_ADAPTER_PATH": str(adapter),
             "TRAIN_DATA": str(mixed_data.resolve()),
-            "NUM_GPUS": str(len(_gpu_ids(config.actor_gpus))),
+            "NUM_GPUS": str(len(_gpu_ids(phase_runtime.actor_gpus))),
             "MICRO_BATCH_SIZE": str(config.micro_batch_size),
             "EVAL_BATCH_SIZE": str(config.eval_batch_size),
-            "GRADIENT_ACCUMULATION_STEPS": str(config.gradient_accumulation_steps),
-            "STEPS_PER_GENERATION": str(config.steps_per_generation),
+            "GRADIENT_ACCUMULATION_STEPS": str(
+                phase_runtime.gradient_accumulation_steps
+            ),
+            "STEPS_PER_GENERATION": str(phase_runtime.steps_per_generation),
             "ROLLOUT_N": str(config.rollout_n),
             "MAX_COMPLETION_LENGTH": str(config.max_completion_tokens),
             "VLLM_MAX_MODEL_LEN": str(config.vllm_max_model_len),
@@ -1330,8 +1446,9 @@ def run_self_play(
             "archive_size_before": archive_size_before,
             "commands": commands,
             "train_environment": train_overrides,
-            "actor_gpus": config.actor_gpus,
-            "opponent_gpus": config.opponent_gpus,
+            "actor_gpus": phase_runtime.actor_gpus,
+            "opponent_gpus": phase_runtime.opponent_gpus,
+            "opponent_max_concurrency": phase_runtime.opponent_max_concurrency,
             "allow_gpu_overlap": config.allow_gpu_overlap,
             "use_vllm": config.use_vllm,
             "deepspeed": config.deepspeed,
@@ -1408,7 +1525,10 @@ def run_self_play(
         )
         write_json(round_dir / "plan.json", plan)
         logs.mkdir(exist_ok=True)
-        opponent_env = {**os.environ, "CUDA_VISIBLE_DEVICES": config.opponent_gpus}
+        opponent_env = {
+            **os.environ,
+            "CUDA_VISIBLE_DEVICES": phase_runtime.opponent_gpus,
+        }
         merged_model = (round_dir / "opponent_merged").resolve()
         merge_manifest_path = round_dir / "opponent_merge.json"
         opponent_adapter = (

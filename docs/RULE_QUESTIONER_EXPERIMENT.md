@@ -249,15 +249,23 @@ bash scripts/run_rule_questioner_selfplay_phases.sh \
 ```
 
 不传参数时，脚本默认就是上面的 4B 配置和输出目录。该配置每轮运行 1,024 个 Questioner
-episode、2,048 个 Solver episode，使用 4 路 opponent/rollout；默认 GPU 拓扑为 3 张 actor GPU
-加 1 张独立 SGLang opponent GPU。
+episode、2,048 个 Solver episode，使用 4 路 opponent/rollout。六阶段脚本会为 Questioner 使用
+`0,1` 两张 actor GPU 和 `2,3` 两张 SGLang opponent GPU；Solver 保持原来的 `0,1,2` 三张 actor
+GPU 和 `3` 一张 opponent GPU。两个阶段都保持 actor/opponent GPU 不重叠，适用于 NVIDIA 独占模式。
+
+Questioner 的 `gradient_accumulation_steps` 和 `steps_per_generation` 都从 4 调为 6，因此有效
+generation/global batch 仍为 `2 × 1 × 6 = 12`，与原来的 `3 × 1 × 4 = 12` 相同。Solver 仍使用
+原来的 4/4。阶段覆盖配置项为 `questioner_actor_gpus`、`questioner_opponent_gpus`、
+`questioner_opponent_max_concurrency`、`questioner_gradient_accumulation_steps` 和
+`questioner_steps_per_generation`；它们只在带 `--phase questioner` 的精确阶段调用中生效，正式六阶段
+脚本已经使用这种调用方式。配置了这些覆盖项后，直接运行不带 `--round-index/--phase` 的组合流程会
+被拒绝，以免静默退回 Solver 的 3+1 拓扑。
 
 Rule Questioner 的 opponent 请求保留 seed 中由认证程序导出的 relation 子集，不再把它覆盖为完整
-KQA Pro relation catalog。单张 opponent GPU 默认最多同时执行 8 个 completion；wrapper 到 SGLang
-的单次请求上限为 240 秒，训练 reward 到 wrapper 的上限为 300 秒。对应配置项是
-`opponent_max_concurrency`、`opponent_model_request_timeout_s` 和
-`opponent_request_timeout_s`。这些限制只控制服务容量和失败边界，不改变正式训练的
-`opponent_samples=4` 难度分布。
+KQA Pro relation catalog。Questioner 的两张 opponent GPU 通过 SGLang `tp-size=1, dp-size=2` 各自
+加载一个完整副本，总并发上限为 16，即仍按每张卡约 8 个 completion 控制负载；Solver 的默认单卡
+上限仍为 8。wrapper 到 SGLang 的单次请求上限为 240 秒，训练 reward 到 wrapper 的上限为 300 秒。
+这些限制只控制服务容量和失败边界，不改变正式训练的 `opponent_samples=4` 难度分布。
 
 4B 配置固定 `val_data: null`、`validation_samples: null` 和 `enable_grpo_validation: false`；六阶段
 wrapper 还会强制设置 `EVAL_STRATEGY=no` 并清除 `VAL_DATA/EVAL_STEPS/EVAL_ROLLOUT_N`。因此 SFT
