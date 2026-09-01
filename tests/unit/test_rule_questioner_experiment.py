@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from graphtask_r1.archive import TaskArchive
+from graphtask_r1.experiments import rule_questioner as rule_questioner_module
 from graphtask_r1.experiments.rule_questioner import (
     RULE_QUESTIONER_VARIANT,
     build_rule_questioner_mixed_sft,
@@ -130,6 +132,44 @@ def test_rule_questioner_reward_only_scores_generated_question() -> None:
     assert valid["json_valid"] == 1.0
     assert valid["question_program_alignment"] == 1.0
     assert valid["score"] > invalid["score"]
+
+
+def test_rule_questioner_uses_bounded_catalog_and_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_opponent(*args: object, **kwargs: object) -> dict[str, float]:
+        del args
+        captured.update(kwargs)
+        return {
+            "program_parse_rate": 1.0,
+            "execution_rate_given_parse": 1.0,
+            "semantic_success_given_execution": 0.5,
+            "novelty_textual": 1.0,
+        }
+
+    monkeypatch.setattr(rule_questioner_module, "request_opponent", fake_opponent)
+    program = _program()
+    question = verbalize(program, toy_graph())
+    info = {
+        "graph_snapshot": "toy-v1",
+        "topic_entity_ids": ["alice"],
+        "fixed_program_json": program.model_dump_json(),
+        "question_alignment_min": 0.4,
+        "opponent_url": "http://unused",
+        "opponent_samples": 4,
+        "opponent_request_timeout_s": 321.0,
+        "allowed_relations": ["works_at"],
+    }
+
+    asyncio.run(
+        compute_rule_questioner_score(json.dumps({"question": question}), info)
+    )
+
+    assert captured["allowed_relations"] == ("works_at",)
+    assert captured["restrict_relation_catalog"] is True
+    assert captured["timeout_s"] == 321.0
 
 
 def test_rule_questioner_reward_extracts_json_after_serving_prefix() -> None:

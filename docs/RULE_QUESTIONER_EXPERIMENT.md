@@ -252,6 +252,13 @@ bash scripts/run_rule_questioner_selfplay_phases.sh \
 episode、2,048 个 Solver episode，使用 4 路 opponent/rollout；默认 GPU 拓扑为 3 张 actor GPU
 加 1 张独立 SGLang opponent GPU。
 
+Rule Questioner 的 opponent 请求保留 seed 中由认证程序导出的 relation 子集，不再把它覆盖为完整
+KQA Pro relation catalog。单张 opponent GPU 默认最多同时执行 8 个 completion；wrapper 到 SGLang
+的单次请求上限为 240 秒，训练 reward 到 wrapper 的上限为 300 秒。对应配置项是
+`opponent_max_concurrency`、`opponent_model_request_timeout_s` 和
+`opponent_request_timeout_s`。这些限制只控制服务容量和失败边界，不改变正式训练的
+`opponent_samples=4` 难度分布。
+
 4B 配置固定 `val_data: null`、`validation_samples: null` 和 `enable_grpo_validation: false`；六阶段
 wrapper 还会强制设置 `EVAL_STRATEGY=no` 并清除 `VAL_DATA/EVAL_STEPS/EVAL_ROLLOUT_N`。因此 SFT
 和三轮 self-play 的 Questioner/Solver 更新均不执行 val。第 0 节生成的 val 只供训练结束后的独立

@@ -480,6 +480,8 @@ def test_selfplay_allows_explicit_single_gpu_transformers_smoke() -> None:
     assert commands["sglang"] == []
     assert "--local-model" in commands["opponent"]
     assert "--model-url" not in commands["opponent"]
+    concurrency_index = commands["opponent"].index("--max-concurrent-completions")
+    assert commands["opponent"][concurrency_index + 1] == "1"
 
 
 @pytest.mark.parametrize(
@@ -583,6 +585,10 @@ def test_frontier_v2_config_is_isolated_from_legacy() -> None:
     )
     assert "--candidate-archive" in commands["opponent"]
     assert "--cache-evaluations" in commands["opponent"]
+    concurrency_index = commands["opponent"].index("--max-concurrent-completions")
+    timeout_index = commands["opponent"].index("--request-timeout-s")
+    assert commands["opponent"][concurrency_index + 1] == "8"
+    assert commands["opponent"][timeout_index + 1] == "240.0"
 
 
 def test_validation_subset_is_bounded_deterministic_and_replayable(tmp_path: Path) -> None:
@@ -777,6 +783,89 @@ class _SeededCachedOpponent(FrozenSolverService):
         self.seeds.append(seed)
         script = program_to_graphscript(_task().program)
         return {"role": "assistant", "content": script.model_dump_json(by_alias=True)}
+
+
+class _ConcurrencyBoundOpponent(FrozenSolverService):
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(
+            model_url="http://unused",
+            model="concurrency-test",
+            archive_path=tmp_path / "concurrency.sqlite",
+            max_concurrent_completions=2,
+        )
+        self.active = 0
+        self.peak = 0
+
+    async def _remote_completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_tools: bool,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        del messages, use_tools, seed
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        await asyncio.sleep(0.01)
+        self.active -= 1
+        return {"role": "assistant", "content": "{}"}
+
+
+def test_remote_opponent_bounds_concurrent_model_requests(tmp_path: Path) -> None:
+    service = _ConcurrencyBoundOpponent(tmp_path)
+
+    async def complete_many() -> None:
+        await asyncio.gather(
+            *(service._completion([], use_tools=False) for _ in range(6))
+        )
+        await service.close()
+
+    asyncio.run(complete_many())
+
+    assert service.peak == 2
+
+
+class _CatalogCaptureOpponent(FrozenSolverService):
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(
+            model_url="http://unused",
+            model="catalog-test",
+            archive_path=tmp_path / "catalog.sqlite",
+            interaction_mode="graphscript",
+            graphscript_version="0.1",
+            relation_catalog=_catalog(),
+        )
+        self.messages: list[dict[str, Any]] = []
+
+    async def _completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_tools: bool,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        del use_tools, seed
+        self.messages = messages
+        return {"role": "assistant", "content": "{}"}
+
+
+def test_opponent_can_restrict_an_empty_relation_catalog(tmp_path: Path) -> None:
+    service = _CatalogCaptureOpponent(tmp_path)
+
+    async def run() -> None:
+        await service.rollout(
+            _task(),
+            toy_graph(),
+            interaction_mode="graphscript",
+            allowed_relations=(),
+            restrict_relation_catalog=True,
+        )
+        await service.close()
+
+    asyncio.run(run())
+
+    assert service.messages
+    assert "Allowed relation catalog" not in service.messages[1]["content"]
 
 
 def test_frontier_v2_opponent_seeds_caches_and_stages_without_mutating_archive(

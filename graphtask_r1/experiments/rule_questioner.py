@@ -464,6 +464,7 @@ async def compute_rule_questioner_score(
             graph_snapshot=str(info.get("graph_snapshot", "toy-v1")),
             samples=int(info.get("opponent_samples", 4)),
             round_index=int(info.get("round", 1)),
+            timeout_s=float(info.get("opponent_request_timeout_s", 180.0)),
             interaction_mode="graphscript",
             graphscript_version="0.3",
             allowed_relations=tuple(str(value) for value in info.get("allowed_relations", [])),
@@ -472,6 +473,7 @@ async def compute_rule_questioner_score(
             seed=int(info.get("opponent_seed", 42)),
             generated_question=question,
             recover_invalid_tool_calls=True,
+            restrict_relation_catalog=True,
         )
         semantic_success = float(evaluation["semantic_success_given_execution"])
         values.update(

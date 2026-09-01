@@ -94,6 +94,7 @@ async def request_opponent(
     generated_question: str | None = None,
     allowed_rejection_reasons: frozenset[str] = frozenset(),
     recover_invalid_tool_calls: bool = False,
+    restrict_relation_catalog: bool = False,
     target_alignment_components: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     try:
@@ -122,6 +123,8 @@ async def request_opponent(
         payload["allowed_rejection_reasons"] = sorted(allowed_rejection_reasons)
     if recover_invalid_tool_calls:
         payload["recover_invalid_tool_calls"] = True
+    if restrict_relation_catalog:
+        payload["restrict_relation_catalog"] = True
     if target_alignment_components is not None:
         payload["target_alignment_components"] = {
             str(key): float(value) for key, value in target_alignment_components.items()
@@ -162,6 +165,7 @@ class FrozenSolverService:
         max_follow_limit: int = 100,
         max_edge_visits: int | None = None,
         max_completion_tokens: int = 32_768,
+        max_concurrent_completions: int = 8,
         local_model: bool = False,
         device: str = "cuda:0",
     ) -> None:
@@ -171,6 +175,8 @@ class FrozenSolverService:
             raise ValueError("the local Transformers opponent supports graphscript mode only")
         if not local_model and not model_url:
             raise ValueError("model_url is required unless local_model is enabled")
+        if max_concurrent_completions < 1:
+            raise ValueError("max_concurrent_completions must be positive")
         self.model_url = model_url.rstrip("/") if model_url else None
         self.model = model
         self.archive = TaskArchive(archive_path)
@@ -189,6 +195,11 @@ class FrozenSolverService:
         self.max_completion_tokens = max_completion_tokens
         self.local_model = local_model
         self.device = device
+        self.max_concurrent_completions = (
+            1 if local_model else max_concurrent_completions
+        )
+        self._completion_semaphore = asyncio.Semaphore(self.max_concurrent_completions)
+        self._remote_session: Any | None = None
         self._local_tokenizer: Any | None = None
         self._local_generator: Any | None = None
         self.backends: dict[str, GraphBackend] = {}
@@ -205,15 +216,24 @@ class FrozenSolverService:
         use_tools: bool,
         seed: int | None = None,
     ) -> dict[str, Any]:
-        if self.local_model:
-            if use_tools:
-                raise ValueError("the local Transformers opponent does not support tools")
-            return await asyncio.to_thread(self._local_completion, messages)
+        async with self._completion_semaphore:
+            if self.local_model:
+                if use_tools:
+                    raise ValueError("the local Transformers opponent does not support tools")
+                return await asyncio.to_thread(self._local_completion, messages)
+            return await self._remote_completion(messages, use_tools=use_tools, seed=seed)
+
+    async def _remote_completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_tools: bool,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
         import aiohttp
 
         if self.model_url is None:  # guarded in __init__; keeps the type contract explicit
             raise RuntimeError("remote opponent model URL is not configured")
-        timeout = aiohttp.ClientTimeout(total=self.request_timeout_s)
         payload = {
             "model": self.model,
             "messages": messages,
@@ -225,14 +245,30 @@ class FrozenSolverService:
             payload["seed"] = seed
         if use_tools:
             payload["tools"] = TOOLS
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.post(self.model_url + "/v1/chat/completions", json=payload) as response,
-        ):
+        if self._remote_session is None or self._remote_session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.request_timeout_s)
+            connector = aiohttp.TCPConnector(
+                limit=self.max_concurrent_completions,
+                limit_per_host=self.max_concurrent_completions,
+            )
+            self._remote_session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+            )
+        async with self._remote_session.post(
+            self.model_url + "/v1/chat/completions", json=payload
+        ) as response:
             body = await response.json()
             if response.status != 200:
                 raise OpponentUnavailable(f"SGLang returned {response.status}: {body}")
             return dict(body["choices"][0]["message"])
+
+    async def close(self) -> None:
+        if self._remote_session is not None and not self._remote_session.closed:
+            await self._remote_session.close()
+        self.archive.close()
+        if self.candidate_archive is not None:
+            self.candidate_archive.close()
 
     def _load_local_model(self) -> tuple[Any, Any]:
         if self._local_tokenizer is None or self._local_generator is None:
@@ -371,11 +407,12 @@ class FrozenSolverService:
         seed: int | None = None,
         sample_index: int | None = None,
         recover_invalid_tool_calls: bool = False,
+        restrict_relation_catalog: bool = False,
     ) -> dict[str, float]:
         mode = interaction_mode or self.interaction_mode
         catalog = self.relation_catalog
         configured_relations = {value.relation_id for value in self.relation_catalog}
-        if allowed_relations:
+        if allowed_relations or restrict_relation_catalog:
             unknown = sorted(set(allowed_relations) - configured_relations)
             if configured_relations and unknown:
                 raise ValueError(
@@ -435,7 +472,10 @@ class FrozenSolverService:
                     backend,
                     seed_entity=topic_ids[0] if len(topic_ids) == 1 else None,
                     allowed_relations=frozenset(
-                        allowed_relations or (value.relation_id for value in self.relation_catalog)
+                        allowed_relations
+                        if restrict_relation_catalog
+                        else allowed_relations
+                        or (value.relation_id for value in self.relation_catalog)
                     ),
                     max_edge_visits=max_edge_visits or self.max_edge_visits or 200,
                     trace_id=(
@@ -483,6 +523,8 @@ class FrozenSolverService:
                         edge_budget = max_edge_visits or self.max_edge_visits
                         effective_relations = frozenset(
                             allowed_relations
+                            if restrict_relation_catalog
+                            else allowed_relations
                             or (value.relation_id for value in self.relation_catalog)
                         )
                         result, visited = self._execute_tool(
@@ -652,6 +694,9 @@ class FrozenSolverService:
                     recover_invalid_tool_calls=bool(
                         payload.get("recover_invalid_tool_calls", False)
                     ),
+                    restrict_relation_catalog=bool(
+                        payload.get("restrict_relation_catalog", False)
+                    ),
                 )
                 for sample_index in range(samples)
             )
@@ -770,10 +815,14 @@ def create_app(service: FrozenSolverService) -> Any:
         except (TypeError, ValueError, KeyError, RuntimeError) as exc:
             return web.json_response({"error": type(exc).__name__, "detail": str(exc)}, status=422)
 
+    async def close_service(_: Any) -> None:
+        await service.close()
+
     app = web.Application(client_max_size=2 * 1024 * 1024)
     app.router.add_get("/health", health)
     app.router.add_post("/evaluate", evaluate)
     app.router.add_post("/solve", solve)
+    app.on_cleanup.append(close_service)
     return app
 
 
@@ -795,6 +844,8 @@ def main() -> int:
     parser.add_argument("--max-follow-limit", type=int, default=100)
     parser.add_argument("--max-edge-visits", type=int)
     parser.add_argument("--max-completion-tokens", type=int, default=32_768)
+    parser.add_argument("--request-timeout-s", type=float, default=120.0)
+    parser.add_argument("--max-concurrent-completions", type=int, default=8)
     args = parser.parse_args()
     from aiohttp import web
 
@@ -811,6 +862,8 @@ def main() -> int:
         max_follow_limit=args.max_follow_limit,
         max_edge_visits=args.max_edge_visits,
         max_completion_tokens=args.max_completion_tokens,
+        request_timeout_s=args.request_timeout_s,
+        max_concurrent_completions=args.max_concurrent_completions,
         local_model=args.local_model,
         device=args.device,
     )
