@@ -112,6 +112,9 @@ class SelfPlayConfig(BaseModel):
     opponent_device: str = "cuda:0"
     sglang_port: int = 30000
     opponent_port: int = 18080
+    opponent_request_timeout_s: float = Field(default=300.0, gt=0.0)
+    opponent_model_request_timeout_s: float = Field(default=240.0, gt=0.0)
+    opponent_max_concurrency: int = Field(default=8, gt=0, le=64)
     train_script: Path = Path("scripts/train_ms_swift_grpo.sh")
     sglang_start_timeout_s: int = 300
     interaction_mode: Literal["tool", "graphscript"] = "graphscript"
@@ -176,6 +179,10 @@ class SelfPlayConfig(BaseModel):
             )
         if self.opponent_backend == "transformers" and self.opponent_samples != 1:
             raise ValueError("the deterministic Transformers opponent requires opponent_samples=1")
+        if self.opponent_request_timeout_s <= self.opponent_model_request_timeout_s:
+            raise ValueError(
+                "opponent_request_timeout_s must exceed opponent_model_request_timeout_s"
+            )
         if self.vllm_max_model_len <= self.max_completion_tokens:
             raise ValueError(
                 "vllm_max_model_len must exceed max_completion_tokens to leave room "
@@ -510,12 +517,21 @@ def _assemble_dataset(
             {
                 "opponent_url": opponent_url,
                 "opponent_samples": config.opponent_samples,
+                "opponent_request_timeout_s": config.opponent_request_timeout_s,
                 "round": round_index,
                 "interaction_mode": config.interaction_mode,
                 "graphscript_version": config.graphscript_version,
-                "allowed_relations": [
-                    value.relation_id for value in relation_catalog
-                ],
+                # Program-first Rule Questioner seeds already carry the exact
+                # relations used by their certified program.  Preserving that
+                # bounded set avoids sending the full KQA Pro catalog to every
+                # frozen-opponent sample.  Exploratory Questioners retain the
+                # full execution catalog because they may construct a new
+                # program from any observed relation.
+                "allowed_relations": (
+                    [str(value) for value in extra.get("allowed_relations", [])]
+                    if preserve_rule_prompt
+                    else [value.relation_id for value in relation_catalog]
+                ),
                 "max_follow_limit": config.max_follow_limit,
                 "max_edge_visits": config.max_edge_visits,
                 "max_returned_entities": config.max_returned_entities,
@@ -1022,6 +1038,10 @@ def _commands(
         str(config.max_follow_limit),
         "--max-completion-tokens",
         str(config.max_completion_tokens),
+        "--request-timeout-s",
+        str(config.opponent_model_request_timeout_s),
+        "--max-concurrent-completions",
+        str(1 if config.opponent_backend == "transformers" else config.opponent_max_concurrency),
     ]
     if config.selfplay_variant in {"frontier_v2", "curriculum_v3"}:
         opponent.extend(

@@ -537,6 +537,7 @@ async def _compute_curriculum_questioner_score(
             graph_snapshot=str(info.get("graph_snapshot", "toy-v1")),
             samples=int(info.get("opponent_samples", 8)),
             round_index=int(info["round"]) if info.get("round") is not None else None,
+            timeout_s=float(info.get("opponent_request_timeout_s", 180.0)),
             interaction_mode="graphscript",
             graphscript_version=graphscript_version,
             allowed_relations=tuple(allowed_relations),
@@ -749,6 +750,7 @@ async def _compute_curriculum_tool_questioner_score(
             graph_snapshot=str(info.get("graph_snapshot", "toy-v1")),
             samples=int(info.get("opponent_samples", 8)),
             round_index=int(info["round"]) if info.get("round") is not None else None,
+            timeout_s=float(info.get("opponent_request_timeout_s", 180.0)),
             interaction_mode="tool",
             graphscript_version=graphscript_version,
             allowed_relations=allowed_relations,
@@ -1207,6 +1209,7 @@ async def compute_score(
                     graph_snapshot=str(info.get("graph_snapshot", "toy-v1")),
                     samples=int(info.get("opponent_samples", 8)),
                     round_index=int(info["round"]) if info.get("round") is not None else None,
+                    timeout_s=float(info.get("opponent_request_timeout_s", 180.0)),
                     interaction_mode=interaction_mode,
                     graphscript_version=cast(
                         GraphScriptVersion, str(info.get("graphscript_version", "0.1"))

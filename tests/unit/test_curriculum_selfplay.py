@@ -24,7 +24,6 @@ from graphtask_r1.schema import (
     TaskTrainingRecord,
     VerificationSummary,
 )
-from graphtask_r1.training.relations import build_relation_catalog
 from graphtask_r1.training.selfplay import (
     SelfPlayConfig,
     _archive_growth_gate,
@@ -112,7 +111,13 @@ def test_rule_questioner_selfplay_preserves_fixed_program_prompt(tmp_path: Path)
         verification=VerificationSummary(executable=True),
     )
     write_records(base_tasks, [task.model_dump(mode="json")])
-    build_relation_catalog([task], toy_graph(), relation_catalog)
+    write_json(
+        relation_catalog,
+        [
+            toy_graph().relation_info(relation_id).model_dump(mode="json")
+            for relation_id in ("works_at", "located_in")
+        ],
+    )
     candidates.write_text(
         json.dumps(
             {
@@ -164,6 +169,8 @@ def test_rule_questioner_selfplay_preserves_fixed_program_prompt(tmp_path: Path)
         "fixed_program_json"
     ]
     assert info["opponent_url"] == "http://new-opponent"
+    assert info["allowed_relations"] == ["works_at"]
+    assert info["opponent_request_timeout_s"] == 300.0
 
 
 def test_rule_questioner_variant_rejects_legacy_selfplay() -> None:
@@ -174,6 +181,14 @@ def test_rule_questioner_variant_rejects_legacy_selfplay() -> None:
         _config(
             selfplay_variant="legacy",
             questioner_reward_variant=RULE_QUESTIONER_VARIANT,
+        )
+
+
+def test_opponent_outer_timeout_must_exceed_model_timeout() -> None:
+    with pytest.raises(ValueError, match="must exceed opponent_model_request_timeout_s"):
+        _config(
+            opponent_request_timeout_s=120,
+            opponent_model_request_timeout_s=120,
         )
 
 
@@ -754,6 +769,9 @@ def test_repository_curriculum_config_is_opt_in() -> None:
     assert rule_questioner_4b.curriculum_min_solver_execution_rate == 0.1
     assert rule_questioner_4b.questioner_reward_variant == RULE_QUESTIONER_VARIANT
     assert rule_questioner_4b.opponent_backend == "sglang"
+    assert rule_questioner_4b.opponent_max_concurrency == 8
+    assert rule_questioner_4b.opponent_model_request_timeout_s == 240.0
+    assert rule_questioner_4b.opponent_request_timeout_s == 300.0
     assert rule_questioner_4b.deepspeed == "zero2"
     assert rule_questioner_4b.val_data is None
     assert rule_questioner_4b.validation_samples is None
