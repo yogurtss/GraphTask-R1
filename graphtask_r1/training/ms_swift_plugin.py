@@ -23,6 +23,7 @@ from graphtask_r1.schema import parse_program
 from graphtask_r1.training.json_compat import to_json_compatible
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
 from graphtask_r1.training.ms_swift_reward import compute_score
+from graphtask_r1.training.opponent import OpponentUnavailable
 from graphtask_r1.training.response_normalization import normalize_reward_response
 
 try:
@@ -175,13 +176,27 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
 
         async def score_one(index: int) -> dict[str, float]:
             info = normalized_infos[index]
-            return await compute_score(
-                str(sources[index]),
-                _reward_completion(completions[index]),
-                str(truths[index]),
-                info,
-                backend=self._backend(str(info.get("graph_snapshot", "toy-v1"))),
-            )
+            try:
+                return await compute_score(
+                    str(sources[index]),
+                    _reward_completion(completions[index]),
+                    str(truths[index]),
+                    info,
+                    backend=self._backend(str(info.get("graph_snapshot", "toy-v1"))),
+                )
+            except OpponentUnavailable as exc:
+                logger.warning(
+                    "opponent unavailable; assigning neutral reward and continuing "
+                    "task_id=%s error=%s",
+                    info.get("task_id", ""),
+                    exc,
+                )
+                return {
+                    "score": 0.0,
+                    "raw_score": 0.0,
+                    "opponent_unavailable": 1.0,
+                    "reject_opponent_unavailable": 1.0,
+                }
 
         async def score_all() -> list[dict[str, float]]:
             return list(await asyncio.gather(*(score_one(index) for index in range(size))))

@@ -46,6 +46,23 @@ def test_selfplay_cli_accepts_exact_round_phase() -> None:
 
     assert args.round_index == 2
     assert args.phase == "solver"
+    assert args.resume is True
+
+
+def test_selfplay_cli_can_explicitly_disable_automatic_resume() -> None:
+    args = build_parser().parse_args(
+        [
+            "train",
+            "self-play",
+            "--config",
+            "selfplay.yaml",
+            "--output-dir",
+            "outputs/selfplay",
+            "--no-resume",
+        ]
+    )
+
+    assert args.resume is False
 
 
 def test_data_prepare_accepts_positive_worker_count() -> None:

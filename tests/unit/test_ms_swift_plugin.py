@@ -519,6 +519,35 @@ def test_ms_swift_reward_reuses_existing_gold_and_logs_components(
     assert persisted == event
 
 
+def test_ms_swift_reward_keeps_training_when_opponent_is_temporarily_unavailable(
+    plugin: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphtask_r1.training.opponent import OpponentUnavailable
+
+    async def unavailable(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise OpponentUnavailable("temporary text/plain gateway response")
+
+    caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
+    monkeypatch.setattr(plugin, "compute_score", unavailable)
+    reward = plugin.GraphTaskReward()
+
+    values = reward(
+        ["candidate"],
+        data_source=["graphtask/questioner"],
+        ground_truth=["{}"],
+        extra_info=[{"graph_snapshot": "toy-v1", "task_id": "task-1"}],
+    )
+
+    assert values == [0.0]
+    event = json.loads(caplog.records[-1].message)
+    sample = event["sample_components"][0]
+    assert sample["reason_codes"] == ["OPPONENT_UNAVAILABLE"]
+    assert sample["components"]["opponent_unavailable"] == 1.0
+
+
 def test_curriculum_solver_reward_receives_scheduler_rollout_infos(
     plugin: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

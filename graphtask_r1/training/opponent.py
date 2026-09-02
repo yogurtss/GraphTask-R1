@@ -76,6 +76,26 @@ class OpponentUnavailable(RuntimeError):
     pass
 
 
+async def _read_json_response(response: Any, *, endpoint: str) -> dict[str, Any]:
+    """Decode JSON independently of the server's often incorrect content type."""
+
+    raw_body = await response.text()
+    try:
+        body = json.loads(raw_body)
+    except (TypeError, json.JSONDecodeError) as exc:
+        content_type = response.headers.get("Content-Type", "unknown")
+        excerpt = raw_body[:500].replace("\n", "\\n")
+        raise OpponentUnavailable(
+            f"{endpoint} returned non-JSON response "
+            f"(status={response.status}, content_type={content_type}): {excerpt!r}"
+        ) from exc
+    if not isinstance(body, dict):
+        raise OpponentUnavailable(
+            f"{endpoint} returned {type(body).__name__}; expected a JSON object"
+        )
+    return body
+
+
 async def request_opponent(
     url: str,
     *,
@@ -137,10 +157,10 @@ async def request_opponent(
                 aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(url.rstrip("/") + "/evaluate", json=payload) as response,
             ):
-                body = await response.json()
+                body = await _read_json_response(response, endpoint="opponent /evaluate")
                 if response.status != 200:
                     raise OpponentUnavailable(str(body))
-                return dict(body)
+                return body
         except (aiohttp.ClientError, TimeoutError, ValueError, OpponentUnavailable) as exc:
             last_error = exc
             if attempt < retries:
@@ -166,6 +186,7 @@ class FrozenSolverService:
         max_edge_visits: int | None = None,
         max_completion_tokens: int = 32_768,
         max_concurrent_completions: int = 8,
+        model_request_retries: int = 2,
         local_model: bool = False,
         device: str = "cuda:0",
     ) -> None:
@@ -177,6 +198,8 @@ class FrozenSolverService:
             raise ValueError("model_url is required unless local_model is enabled")
         if max_concurrent_completions < 1:
             raise ValueError("max_concurrent_completions must be positive")
+        if model_request_retries < 0:
+            raise ValueError("model_request_retries cannot be negative")
         self.model_url = model_url.rstrip("/") if model_url else None
         self.model = model
         self.archive = TaskArchive(archive_path)
@@ -198,6 +221,7 @@ class FrozenSolverService:
         self.max_concurrent_completions = (
             1 if local_model else max_concurrent_completions
         )
+        self.model_request_retries = model_request_retries
         self._completion_semaphore = asyncio.Semaphore(self.max_concurrent_completions)
         self._remote_session: Any | None = None
         self._local_tokenizer: Any | None = None
@@ -255,13 +279,34 @@ class FrozenSolverService:
                 timeout=timeout,
                 connector=connector,
             )
-        async with self._remote_session.post(
-            self.model_url + "/v1/chat/completions", json=payload
-        ) as response:
-            body = await response.json()
-            if response.status != 200:
-                raise OpponentUnavailable(f"SGLang returned {response.status}: {body}")
-            return dict(body["choices"][0]["message"])
+        last_error: Exception | None = None
+        for attempt in range(self.model_request_retries + 1):
+            try:
+                async with self._remote_session.post(
+                    self.model_url + "/v1/chat/completions", json=payload
+                ) as response:
+                    body = await _read_json_response(
+                        response, endpoint="SGLang /v1/chat/completions"
+                    )
+                    if response.status != 200:
+                        raise OpponentUnavailable(
+                            f"SGLang returned {response.status}: {body}"
+                        )
+                    choices = body.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        raise OpponentUnavailable("SGLang response has no choices")
+                    message = choices[0].get("message")
+                    if not isinstance(message, dict):
+                        raise OpponentUnavailable("SGLang response has no message object")
+                    return message
+            except (aiohttp.ClientError, TimeoutError, OpponentUnavailable) as exc:
+                last_error = exc
+                if attempt < self.model_request_retries:
+                    await asyncio.sleep(min(0.5 * 2**attempt, 2.0))
+        raise OpponentUnavailable(
+            "SGLang unavailable after "
+            f"{self.model_request_retries + 1} attempts"
+        ) from last_error
 
     async def close(self) -> None:
         if self._remote_session is not None and not self._remote_session.closed:
@@ -806,12 +851,20 @@ def create_app(service: FrozenSolverService) -> Any:
     async def evaluate(request: Any) -> Any:
         try:
             return web.json_response(await service.evaluate(await request.json()))
+        except OpponentUnavailable as exc:
+            return web.json_response(
+                {"error": type(exc).__name__, "detail": str(exc)}, status=503
+            )
         except (TypeError, ValueError, KeyError, RuntimeError) as exc:
             return web.json_response({"error": type(exc).__name__, "detail": str(exc)}, status=422)
 
     async def solve(request: Any) -> Any:
         try:
             return web.json_response(await service.solve(await request.json()))
+        except OpponentUnavailable as exc:
+            return web.json_response(
+                {"error": type(exc).__name__, "detail": str(exc)}, status=503
+            )
         except (TypeError, ValueError, KeyError, RuntimeError) as exc:
             return web.json_response({"error": type(exc).__name__, "detail": str(exc)}, status=422)
 
@@ -845,6 +898,7 @@ def main() -> int:
     parser.add_argument("--max-edge-visits", type=int)
     parser.add_argument("--max-completion-tokens", type=int, default=32_768)
     parser.add_argument("--request-timeout-s", type=float, default=120.0)
+    parser.add_argument("--model-request-retries", type=int, default=2)
     parser.add_argument("--max-concurrent-completions", type=int, default=8)
     args = parser.parse_args()
     from aiohttp import web
@@ -863,6 +917,7 @@ def main() -> int:
         max_edge_visits=args.max_edge_visits,
         max_completion_tokens=args.max_completion_tokens,
         request_timeout_s=args.request_timeout_s,
+        model_request_retries=args.model_request_retries,
         max_concurrent_completions=args.max_concurrent_completions,
         local_model=args.local_model,
         device=args.device,

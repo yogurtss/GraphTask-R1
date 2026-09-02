@@ -271,10 +271,12 @@ checkpoint 和阶段 manifest 判断进度：
 - 已完成的阶段自动 no-op，不会重新训练；原脚本可以安全地整体重跑。
 - 只有 Questioner 目录而没有完整 Solver，表示该 round 尚未完成；下一步运行同轮 Solver。
 - Solver checkpoint 已完成但 round manifest 尚未写入时，会把该轮恢复为已完成并进入下一轮。
-- 同一阶段存在 `v0`、`v1` 等多个运行目录时，先选择版本号最大的目录，再从该目录选择编号最大的
-  完整 `checkpoint-xxx`；版本号和 checkpoint 编号都相同时再选择更新时间最新的一个。
-- 未完成 checkpoint 不会被误判为成功；只有完整 adapter 和已达到 `max_steps` 的旧 checkpoint
-  才能作为兼容恢复依据。
+- 同一阶段存在多个 `v*-YYYYMMDD-HHMMSS` 运行目录时，先选择时间最新的目录，再选择编号最大的
+  `checkpoint-xxx`。
+- 尚未达到 `max_steps`、但 adapter、`trainer_state.json`、scheduler 和 optimizer/DeepSpeed 状态
+  完整的 checkpoint 会通过 ms-swift `--resume_from_checkpoint` 恢复模型、优化器、随机数和训练 step。
+- 写入不完整或只有模型权重的 checkpoint 不会被选中；已达到 `max_steps` 的阶段则直接登记完成并跳过。
+- `train self-play` 默认启用恢复；只有显式传入 `--no-resume` 才会忽略已有断点。
 
 所以某条命令中断后，可以直接重新执行整个脚本，也可以复制脚本、删除已经成功的行后继续。单独
 补跑阶段的命令格式为：

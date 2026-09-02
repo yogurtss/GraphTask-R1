@@ -16,6 +16,33 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+AUTO_RESUME="${AUTO_RESUME:-true}"
+if [[ "$AUTO_RESUME" != "true" && "$AUTO_RESUME" != "false" ]]; then
+  echo "AUTO_RESUME must be true or false" >&2
+  exit 2
+fi
+RESUME_ARGS=()
+MANUAL_RESUME=false
+for argument in "$@"; do
+  if [[ "$argument" == "--resume_from_checkpoint" || "$argument" == --resume_from_checkpoint=* ]]; then
+    MANUAL_RESUME=true
+    break
+  fi
+done
+if [[ "$MANUAL_RESUME" == "false" && -z "${RESUME_FROM_CHECKPOINT:-}" && "$AUTO_RESUME" == "true" ]]; then
+  RESUME_FROM_CHECKPOINT="$(
+    python -m graphtask_r1.training.checkpointing "$OUTPUT_DIR"
+  )"
+fi
+if [[ -n "${RESUME_FROM_CHECKPOINT:-}" && "$MANUAL_RESUME" == "false" ]]; then
+  if [[ ! -d "$RESUME_FROM_CHECKPOINT" ]]; then
+    echo "Resume checkpoint directory not found: $RESUME_FROM_CHECKPOINT" >&2
+    exit 2
+  fi
+  printf '[sft] resuming from checkpoint: %s\n' "$RESUME_FROM_CHECKPOINT"
+  RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
+fi
+
 if ! command -v swift >/dev/null 2>&1; then
   echo "ms-swift CLI not found; install ms-swift==3.10.3 in the CUDA 12.4 environment" >&2
   exit 2
@@ -81,8 +108,8 @@ NPROC_PER_NODE="$NUM_GPUS" swift sft \
   --save_total_limit "${SAVE_TOTAL_LIMIT:-2}" \
   --logging_steps "${LOGGING_STEPS:-5}" \
   --warmup_ratio "${WARMUP_RATIO:-0.05}" \
-  --save_only_model true \
   --report_to none \
   --seed "${SEED:-42}" \
   --output_dir "$OUTPUT_DIR" \
+  "${RESUME_ARGS[@]}" \
   "$@"

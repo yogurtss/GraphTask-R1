@@ -99,6 +99,33 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+AUTO_RESUME="${AUTO_RESUME:-true}"
+if [[ "$AUTO_RESUME" != "true" && "$AUTO_RESUME" != "false" ]]; then
+  echo "AUTO_RESUME must be true or false" >&2
+  exit 2
+fi
+RESUME_ARGS=()
+MANUAL_RESUME=false
+for argument in "$@"; do
+  if [[ "$argument" == "--resume_from_checkpoint" || "$argument" == --resume_from_checkpoint=* ]]; then
+    MANUAL_RESUME=true
+    break
+  fi
+done
+if [[ "$MANUAL_RESUME" == "false" && -z "${RESUME_FROM_CHECKPOINT:-}" && "$AUTO_RESUME" == "true" ]]; then
+  RESUME_FROM_CHECKPOINT="$(
+    python -m graphtask_r1.training.checkpointing "$OUTPUT_DIR"
+  )"
+fi
+if [[ -n "${RESUME_FROM_CHECKPOINT:-}" && "$MANUAL_RESUME" == "false" ]]; then
+  if [[ ! -d "$RESUME_FROM_CHECKPOINT" ]]; then
+    echo "Resume checkpoint directory not found: $RESUME_FROM_CHECKPOINT" >&2
+    exit 2
+  fi
+  printf '[grpo] resuming from checkpoint: %s\n' "$RESUME_FROM_CHECKPOINT"
+  RESUME_ARGS=(--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT")
+fi
+
 if ! command -v swift >/dev/null 2>&1; then
   echo "ms-swift CLI not found; install the optional vLLM GRPO environment first" >&2
   exit 2
@@ -205,4 +232,5 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --report_to none \
   --seed "${SEED:-42}" \
   --output_dir "$OUTPUT_DIR" \
+  "${RESUME_ARGS[@]}" \
   "$@"
