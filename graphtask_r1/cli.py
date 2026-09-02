@@ -394,7 +394,20 @@ def build_parser() -> argparse.ArgumentParser:
     selfplay = train_actions.add_parser("self-play")
     selfplay.add_argument("--config", type=Path, required=True)
     selfplay.add_argument("--output-dir", type=Path, required=True)
-    selfplay.add_argument("--resume", action="store_true")
+    resume_mode = selfplay.add_mutually_exclusive_group()
+    resume_mode.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        help="resume completed rounds and the latest checkpoint (default)",
+    )
+    resume_mode.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="ignore existing progress and checkpoints",
+    )
+    selfplay.set_defaults(resume=True)
     selfplay.add_argument(
         "--one-round",
         action="store_true",

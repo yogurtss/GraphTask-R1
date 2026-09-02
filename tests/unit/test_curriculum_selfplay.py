@@ -431,6 +431,50 @@ def test_incomplete_phase_checkpoint_is_not_reused(tmp_path: Path) -> None:
     assert _completed_phase_adapter(phase_dir) is None
 
 
+def test_exact_phase_dry_run_selects_latest_incomplete_checkpoint_for_resume(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "curriculum.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"initial_adapter: {tmp_path / 'initial-adapter'}",
+                f"base_tasks: {tmp_path / 'tasks.parquet'}",
+                f"questioner_seeds: {tmp_path / 'seeds.parquet'}",
+                "selfplay_variant: curriculum_v3",
+                "rounds: 3",
+            ]
+        )
+        + "\n"
+    )
+    phase_dir = tmp_path / "run" / "round_001" / "questioner_update"
+    checkpoint = phase_dir / "v0-20260902-010000" / "checkpoint-2"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "adapter_config.json").write_text("{}")
+    (checkpoint / "adapter_model.safetensors").write_bytes(b"weights")
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer")
+    (checkpoint / "scheduler.pt").write_bytes(b"scheduler")
+    write_json(checkpoint / "trainer_state.json", {"global_step": 2, "max_steps": 4})
+
+    result = run_self_play(
+        config_path,
+        tmp_path / "run",
+        resume=False,
+        dry_run=True,
+        target_round=1,
+        target_phase="questioner",
+    )
+
+    plan = result["plans"][0]
+    assert plan["phase_resume_checkpoint"] == {
+        "questioner": str(checkpoint.resolve()),
+        "solver": None,
+    }
+    assert plan["train_environment"]["AUTO_RESUME"] == "true"
+
+    assert _completed_phase_adapter(phase_dir) is None
+
+
 def test_completed_phase_adapter_uses_highest_complete_checkpoint(tmp_path: Path) -> None:
     phase_dir = tmp_path / "questioner_update"
     checkpoint_2 = phase_dir / "v0" / "checkpoint-2"

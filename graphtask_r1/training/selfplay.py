@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from graphtask_r1.archive import TaskArchive, promote_staged_tasks
 from graphtask_r1.dsl import program_cost
 from graphtask_r1.schema import TaskCertificate, TaskTrainingRecord
+from graphtask_r1.training.checkpointing import latest_resumable_checkpoint
 from graphtask_r1.training.prompts import GraphScriptVersion, role_prompt
 from graphtask_r1.training.questioner_context import render_questioner_seed_payload
 from graphtask_r1.training.relations import load_relation_catalog
@@ -129,6 +130,7 @@ class SelfPlayConfig(BaseModel):
     opponent_port: int = 18080
     opponent_request_timeout_s: float = Field(default=300.0, gt=0.0)
     opponent_model_request_timeout_s: float = Field(default=240.0, gt=0.0)
+    opponent_model_request_retries: int = Field(default=2, ge=0, le=10)
     opponent_max_concurrency: int = Field(default=8, gt=0, le=64)
     train_script: Path = Path("scripts/train_ms_swift_grpo.sh")
     sglang_start_timeout_s: int = 300
@@ -723,22 +725,23 @@ def _adapter_from_checkpoint(
     return max(candidates, key=lambda path: _adapter_checkpoint_order(path.parent)).parent
 
 
-def _adapter_run_version(adapter: Path) -> tuple[int, str]:
+def _adapter_run_version(adapter: Path) -> tuple[str, int, str]:
     for parent in adapter.parents:
-        match = re.fullmatch(r"v(\d+)(?:-.+)?", parent.name)
+        match = re.fullmatch(r"v(\d+)(?:-(\d{8}-\d{6}).*)?", parent.name)
         if match:
-            return int(match.group(1)), parent.name
+            return match.group(2) or "", int(match.group(1)), parent.name
         if parent.name.endswith("_update") or parent.name.startswith("round_"):
             break
-    return -1, ""
+    return "", -1, ""
 
 
-def _adapter_checkpoint_order(adapter: Path) -> tuple[int, str, int, int, str]:
-    """Order adapters by run version, checkpoint number, then modification time."""
+def _adapter_checkpoint_order(adapter: Path) -> tuple[str, int, str, int, int, str]:
+    """Order adapters by run timestamp, version, checkpoint, then mtime."""
 
     weights = adapter / "adapter_model.safetensors"
-    run_version, run_name = _adapter_run_version(adapter)
+    run_timestamp, run_version, run_name = _adapter_run_version(adapter)
     return (
+        run_timestamp,
         run_version,
         run_name,
         _checkpoint_step(weights),
@@ -1143,6 +1146,8 @@ def _commands(
         str(config.max_completion_tokens),
         "--request-timeout-s",
         str(config.opponent_model_request_timeout_s),
+        "--model-request-retries",
+        str(config.opponent_model_request_retries),
         "--max-concurrent-completions",
         str(
             1
@@ -1404,9 +1409,15 @@ def run_self_play(
             "GRAPHTASK_REWARD_METRICS_DIR": str(reward_metrics_dir.resolve()),
             "SEED": str(config.seed),
             "PYTHONUNBUFFERED": "1",
+            "AUTO_RESUME": str(resume).lower(),
             # Disabled validation must override any stale parent-shell setting.
             "EVAL_STRATEGY": "no",
         }
+        round_resume_checkpoint = (
+            latest_resumable_checkpoint(round_dir) if resume else None
+        )
+        if round_resume_checkpoint is not None:
+            train_overrides["RESUME_FROM_CHECKPOINT"] = str(round_resume_checkpoint)
         if config.enable_grpo_validation:
             assert validation_path is not None
             train_overrides.update(
@@ -1429,6 +1440,20 @@ def run_self_play(
                 "questioner": _completed_phase_adapter(round_dir / "questioner_update")
                 is not None,
                 "solver": _completed_phase_adapter(round_dir / "solver_update") is not None,
+            },
+            "phase_resume_checkpoint": {
+                phase: (
+                    str(checkpoint)
+                    if (
+                        checkpoint := latest_resumable_checkpoint(
+                            round_dir / f"{phase}_update"
+                        )
+                    )
+                    is not None
+                    and resume
+                    else None
+                )
+                for phase in ("questioner", "solver")
             },
             "selfplay_variant": config.selfplay_variant,
             "adapter_in": str(adapter),
@@ -1640,6 +1665,14 @@ def run_self_play(
                                     f"graphtask-selfplay-frontier-v2-r{round_index:03d}-{phase}"
                                 ),
                             }
+                            phase_env.pop("RESUME_FROM_CHECKPOINT", None)
+                            phase_resume_checkpoint = (
+                                latest_resumable_checkpoint(phase_dir) if resume else None
+                            )
+                            if phase_resume_checkpoint is not None:
+                                phase_env["RESUME_FROM_CHECKPOINT"] = str(
+                                    phase_resume_checkpoint
+                                )
                             LOGGER.info(
                                 "selfplay_phase_training_started round=%d phase=%s data=%s log=%s",
                                 round_index,
@@ -1787,6 +1820,14 @@ def run_self_play(
                                     + (1 if phase == "questioner" else 2)
                                 ),
                             }
+                            phase_env.pop("RESUME_FROM_CHECKPOINT", None)
+                            phase_resume_checkpoint = (
+                                latest_resumable_checkpoint(phase_dir) if resume else None
+                            )
+                            if phase_resume_checkpoint is not None:
+                                phase_env["RESUME_FROM_CHECKPOINT"] = str(
+                                    phase_resume_checkpoint
+                                )
                             LOGGER.info(
                                 "selfplay_phase_training_started round=%d phase=%s data=%s log=%s",
                                 round_index,
