@@ -43,6 +43,7 @@ from graphtask_r1.schema.task import (
 )
 from graphtask_r1.schema.trajectory import (
     EpisodeInput,
+    EvidenceProvenance,
     Observation,
     PassageHit,
     StepResult,
@@ -58,6 +59,7 @@ __all__ = [
     "Count",
     "Entity",
     "EntityInfo",
+    "EvidenceProvenance",
     "EpisodeInput",
     "FilterLiteral",
     "FilterQualifier",

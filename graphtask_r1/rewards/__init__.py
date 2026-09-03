@@ -14,6 +14,22 @@ from graphtask_r1.rewards.curriculum import (
     questioner_curriculum_reward,
     solver_curriculum_reward,
 )
+from graphtask_r1.rewards.evidence_flow import (
+    EvidencePotentialTrace,
+    EvidenceResidual,
+    classify_evidence_residual,
+    evidence_causal_curriculum_trace,
+    evidence_ecp_answer_gated_reward,
+    evidence_ecp_causal_reward,
+    evidence_ecp_curriculum_reward,
+    evidence_ecp_protocol_gated_reward,
+    evidence_ecp_solver_reward,
+    evidence_frontier_reward,
+    evidence_proof_potential_trace,
+    evidence_questioner_reward,
+    evidence_search_r1_em_reward,
+    evidence_solver_reward,
+)
 from graphtask_r1.rewards.frontier import frontier_reward
 from graphtask_r1.rewards.normalization import normalize_advantages
 from graphtask_r1.rewards.solver import (
@@ -24,6 +40,20 @@ from graphtask_r1.rewards.solver import (
 
 __all__ = [
     "challenger_reward",
+    "classify_evidence_residual",
+    "evidence_causal_curriculum_trace",
+    "evidence_ecp_answer_gated_reward",
+    "evidence_ecp_causal_reward",
+    "evidence_ecp_curriculum_reward",
+    "evidence_ecp_protocol_gated_reward",
+    "evidence_ecp_solver_reward",
+    "evidence_frontier_reward",
+    "evidence_proof_potential_trace",
+    "evidence_questioner_reward",
+    "evidence_search_r1_em_reward",
+    "evidence_solver_reward",
+    "EvidencePotentialTrace",
+    "EvidenceResidual",
     "frontier_gated_challenger_reward",
     "frontier_reward",
     "normalize_advantages",

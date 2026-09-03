@@ -292,6 +292,84 @@ def test_curriculum_solver_scheduler_counts_malformed_calls(plugin: Any) -> None
     assert error["reason_code"] == "INVALID_TOOL_CALL"
 
 
+def test_evidence_scheduler_continues_after_an_early_answer(plugin: Any) -> None:
+    scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=4)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "evidence_solver",
+                "graph_snapshot": "kilt-2019-08-01-v1",
+                "topic_entity_ids": [],
+            }
+        },
+    )
+
+    assert scheduler.check_finished(request, _choice(None), 1) is False
+    result = scheduler.step(request, _choice(None), 1)
+
+    assert result["rollout_infos"]["early_answer_attempts"] == 1
+    assert request.messages[-1] == {
+        "role": "user",
+        "content": "Evidence protocol incomplete. Call text_search before answering.",
+    }
+    state = request.data_dict["_graphtask_session"]
+    state["selected_passage_keys"] = ["1:0"]
+    assert scheduler.check_finished(request, _choice(None), 2) is False
+    state["evidence_actions"] = [
+        {"op": "retrieve"},
+        {"op": "expand"},
+        {"op": "select_evidence", "passage_keys": ["1:0"]},
+    ]
+    assert scheduler.check_finished(request, _choice(None), 2) is True
+
+
+@pytest.mark.parametrize("reward_variant", ["ecp_v4", "ecp_v5"])
+def test_causal_ecp_scheduler_requires_two_stage_selection(
+    plugin: Any, reward_variant: str
+) -> None:
+    scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=4)
+    request = SimpleNamespace(
+        messages=[],
+        data_dict={
+            "extra_info": {
+                "role": "evidence_solver",
+                "graph_snapshot": "kilt-2019-08-01-v1",
+                "evidence_reward_variant": reward_variant,
+            },
+            "_graphtask_session": {
+                "calls": 3,
+                "valid_calls": 3,
+                "invalid_calls": 0,
+                "visible_entities": [],
+                "observed_passages": [],
+                "selected_passage_keys": ["1:0", "2:0"],
+                "evidence_actions": [
+                    {
+                        "op": "retrieve",
+                        "passages": [{"passage_key": "1:0"}],
+                    },
+                    {
+                        "op": "select_evidence",
+                        "passage_keys": ["1:0", "2:0"],
+                    },
+                    {
+                        "op": "expand",
+                        "passages": [{"passage_key": "2:0"}],
+                    },
+                ],
+            },
+        },
+    )
+
+    assert scheduler.check_finished(request, _choice(None), 3) is False
+    state = request.data_dict["_graphtask_session"]
+    state["evidence_actions"].append(
+        {"op": "select_evidence", "passage_keys": ["1:0", "2:0"]}
+    )
+    assert scheduler.check_finished(request, _choice(None), 3) is True
+
+
 def test_curriculum_scheduler_allows_questioner_graph_search(plugin: Any) -> None:
     scheduler = plugin.GraphTaskCurriculumSolverScheduler(max_turns=8)
     request = SimpleNamespace(
@@ -452,6 +530,7 @@ def test_solver_scheduler_executes_bounded_text_search(plugin: Any) -> None:
 
     payload = json.loads(request.messages[-1]["content"])
     assert payload[0]["page_id"] == "123"
+    assert payload[0]["passage_key"] == "123:0"
     assert request.data_dict["_graphtask_session"]["visible_entities"] == ["123"]
 
 

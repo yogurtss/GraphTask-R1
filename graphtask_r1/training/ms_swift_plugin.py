@@ -19,7 +19,12 @@ from typing import Any
 from graphtask_r1.envs.graph_query import execute_compact_query
 from graphtask_r1.envs.text_search import execute_text_search
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
-from graphtask_r1.schema import parse_program
+from graphtask_r1.graphscript import (
+    BackendEvidenceRetriever,
+    CounterfactualEvidenceRetriever,
+    EvidenceRetriever,
+)
+from graphtask_r1.schema import PassageHit, parse_program
 from graphtask_r1.training.json_compat import to_json_compatible
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
 from graphtask_r1.training.ms_swift_reward import compute_score
@@ -121,9 +126,7 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
         rank = os.environ.get("RANK", "0")
         safe_rank = rank if rank.isdigit() else "unknown"
         self._metrics_path = (
-            Path(metrics_dir) / f"reward_components.rank-{safe_rank}.jsonl"
-            if metrics_dir
-            else None
+            Path(metrics_dir) / f"reward_components.rank-{safe_rank}.jsonl" if metrics_dir else None
         )
 
     def _backend(self, snapshot: str) -> GraphBackend:
@@ -160,7 +163,7 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
             if (
                 str(sources[index]) == "graphtask/solver"
                 and info.get("solver_reward_variant") == "curriculum_v3"
-            ):
+            ) or str(sources[index]) == "graphtask/evidence_solver":
                 rollout = to_json_compatible(rollout_infos[index])
                 if not isinstance(rollout, dict):
                     raise ValueError("rollout_infos reward column must contain objects")
@@ -293,6 +296,35 @@ def _string_list(value: object) -> list[str]:
     return [str(item) for item in value]
 
 
+def _record_evidence_passages(
+    state: dict[str, object], op: str, passages: list[dict[str, object]]
+) -> None:
+    existing = state.get("observed_passages", [])
+    if not isinstance(existing, list):
+        raise ValueError("invalid observed passage state")
+    merged = {
+        f"{value['page_id']}:{value['paragraph_id']}": value
+        for value in existing
+        if isinstance(value, dict)
+    }
+    merged.update({f"{value['page_id']}:{value['paragraph_id']}": value for value in passages})
+    state["observed_passages"] = list(merged.values())
+    actions = state.get("evidence_actions", [])
+    if not isinstance(actions, list):
+        raise ValueError("invalid evidence action state")
+    actions.append({"op": op, "passages": passages})
+
+
+def _passage_payload(passages: Sequence[PassageHit]) -> list[dict[str, object]]:
+    """Expose the canonical follow-up action argument alongside every observation."""
+    payload: list[dict[str, object]] = []
+    for passage in passages:
+        value = passage.model_dump(mode="json")
+        value["passage_key"] = f"{passage.page_id}:{passage.paragraph_id}"
+        payload.append(value)
+    return payload
+
+
 class GraphTaskSolverScheduler:
     """Instance-scoped Hermes tool scheduler for Solver-only graph and passage rollout."""
 
@@ -300,11 +332,29 @@ class GraphTaskSolverScheduler:
         del args, kwargs
         self.max_turns = max_turns
         self._backends: dict[str, GraphBackend] = {}
+        self._evidence_retrievers: dict[tuple[str, str], EvidenceRetriever] = {}
 
     def _backend(self, snapshot: str) -> GraphBackend:
         if snapshot not in self._backends:
             self._backends[snapshot] = backend_from_snapshot(snapshot)
         return self._backends[snapshot]
+
+    def _evidence_retriever(
+        self, snapshot: str, info: Mapping[str, object]
+    ) -> EvidenceRetriever:
+        path_value = str(
+            info.get("evidence_reranker_path")
+            or os.environ.get("EVIDENCE_RERANKER_PATH", "")
+        )
+        key = (snapshot, path_value)
+        if key not in self._evidence_retrievers:
+            backend = self._backend(snapshot)
+            self._evidence_retrievers[key] = (
+                CounterfactualEvidenceRetriever.from_path(backend, Path(path_value))
+                if path_value
+                else BackendEvidenceRetriever(backend)
+            )
+        return self._evidence_retrievers[key]
 
     @staticmethod
     def _info(infer_request: Any) -> dict[str, object]:
@@ -326,6 +376,9 @@ class GraphTaskSolverScheduler:
                 "invalid_calls": 0,
                 "edge_visits": 0,
                 "visible_entities": _string_list(info.get("topic_entity_ids", [])),
+                "observed_passages": [],
+                "selected_passage_keys": [],
+                "evidence_actions": [],
             }
             data_dict["_graphtask_session"] = state
         if not isinstance(state, dict):
@@ -430,8 +483,65 @@ class GraphTaskSolverScheduler:
             visible = set(_string_list(state.get("visible_entities", [])))
             visible.update(passage.page_id for passage in passages)
             state["visible_entities"] = sorted(visible)
+            payload = _passage_payload(passages)
+            _record_evidence_passages(state, "retrieve", payload)
             return json.dumps(
-                [passage.model_dump(mode="json") for passage in passages],
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        if name == "expand_evidence":
+            raw_observed = state.get("observed_passages", [])
+            if not isinstance(raw_observed, list):
+                raise ValueError("invalid observed passage state")
+            observed = tuple(PassageHit.model_validate(value) for value in raw_observed)
+            if not observed:
+                raise ValueError("expand_evidence requires a prior text_search result")
+            snapshot = str(info.get("graph_snapshot", "kilt-2019-08-01-v1"))
+            expansion_query = str(parameters["query"])
+            if str(info.get("evidence_reward_variant")) in {"ecp_v4", "ecp_v5"}:
+                expansion_query = f"{info.get('question', '')} {expansion_query}".strip()
+            passages = self._evidence_retriever(snapshot, info).expand(
+                observed,
+                expansion_query,
+                limit=min(max(1, _int_value(parameters.get("limit", 3))), 10),
+                trace_id=f"{info.get('task_id', 'solver')}:{state.get('calls', 0)}",
+            )
+            payload = _passage_payload(passages)
+            _record_evidence_passages(state, "expand", payload)
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if name == "select_evidence":
+            requested = _string_list(parameters.get("passage_keys", []))
+            raw_observed = state.get("observed_passages", [])
+            if not isinstance(raw_observed, list):
+                raise ValueError("invalid observed passage state")
+            observed_keys = {
+                f"{value['page_id']}:{value['paragraph_id']}"
+                for value in raw_observed
+                if isinstance(value, dict)
+            }
+            selected = list(dict.fromkeys(key for key in requested if key in observed_keys))
+            if not selected:
+                raise ValueError("no selected passage key was observed")
+            if str(info.get("evidence_reward_variant")) in {"ecp_v4", "ecp_v5"}:
+                actions = state.get("evidence_actions", [])
+                if not isinstance(actions, list):
+                    raise ValueError("invalid evidence action state")
+                retrieve_keys = _action_passage_keys(actions, "retrieve")
+                expand_keys = _action_passage_keys(actions, "expand")
+                selected_set = set(selected)
+                if not expand_keys:
+                    raise ValueError("select_evidence must causally follow expand_evidence")
+                if not selected_set & retrieve_keys or not selected_set & expand_keys:
+                    raise ValueError(
+                        "selection must cover passages from both retrieve and expand"
+                    )
+            state["selected_passage_keys"] = selected
+            actions = state.get("evidence_actions", [])
+            if isinstance(actions, list):
+                actions.append({"op": "select_evidence", "passage_keys": selected})
+            return json.dumps(
+                {"selected_passage_keys": selected},
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -471,6 +581,7 @@ class GraphTaskCurriculumSolverScheduler(GraphTaskSolverScheduler, MultiTurnSche
     def __init__(self, *args: object, max_turns: int | None = None, **kwargs: object) -> None:
         MultiTurnScheduler.__init__(self, *args, max_turns=max_turns, **kwargs)
         self._backends: dict[str, GraphBackend] = {}
+        self._evidence_retrievers: dict[tuple[str, str], EvidenceRetriever] = {}
 
     def _execute_tool(
         self,
@@ -491,15 +602,86 @@ class GraphTaskCurriculumSolverScheduler(GraphTaskSolverScheduler, MultiTurnSche
             return self._backend(snapshot).execute_program(program).model_dump_json()
         return super()._execute_tool(name, parameters, info, state)
 
+    def check_finished(self, infer_request: Any, response_choice: Any, current_turn: int) -> bool:
+        info = self._info(infer_request)
+        if str(info.get("role")) != "evidence_solver":
+            return super().check_finished(infer_request, response_choice, current_turn)
+        if getattr(response_choice, "finish_reason", None) == "length":
+            return True
+        if self.max_turns is not None and current_turn >= self.max_turns:
+            return True
+        if _tool_calls(response_choice):
+            return False
+        state = self._state(infer_request, info)
+        actions = state.get("evidence_actions", [])
+        operation_types = (
+            {
+                str(value.get("op"))
+                for value in actions
+                if isinstance(value, Mapping)
+            }
+            if isinstance(actions, list)
+            else set()
+        )
+        protocol_complete = bool(
+            _string_list(state.get("selected_passage_keys", []))
+            and {"retrieve", "expand", "select_evidence"} <= operation_types
+        )
+        if not protocol_complete:
+            return False
+        if str(info.get("evidence_reward_variant")) not in {"ecp_v4", "ecp_v5"}:
+            return True
+        return _causal_selection_complete(actions if isinstance(actions, list) else [])
+
     def step(
         self, infer_request: Any, response_choice: Any, current_turn: int
     ) -> dict[str, object]:
         del current_turn
         info = self._info(infer_request)
-        if str(info.get("role", "solver")) not in {"questioner", "solver"}:
+        if str(info.get("role", "solver")) not in {
+            "questioner",
+            "solver",
+            "evidence_solver",
+        }:
             raise ValueError("curriculum scheduler requires a Questioner or Solver role")
         state = self._state(infer_request, info)
-        for call in _tool_calls(response_choice):
+        tool_calls = _tool_calls(response_choice)
+        if str(info.get("role")) == "evidence_solver" and not tool_calls:
+            state["early_answer_attempts"] = (
+                _int_value(state.get("early_answer_attempts", 0)) + 1
+            )
+            actions = state.get("evidence_actions", [])
+            operation_types = (
+                {
+                    str(value.get("op"))
+                    for value in actions
+                    if isinstance(value, Mapping)
+                }
+                if isinstance(actions, list)
+                else set()
+            )
+            if "retrieve" not in operation_types:
+                instruction = "Call text_search before answering."
+            elif "expand" not in operation_types:
+                instruction = (
+                    "Call expand_evidence for the linked second hop before answering."
+                )
+            elif not _causal_selection_complete(
+                actions if isinstance(actions, list) else []
+            ):
+                instruction = (
+                    "After expand_evidence, call select_evidence with exact observed "
+                    "passage_key values from both the retrieve and expand results."
+                )
+            else:
+                instruction = "Complete the evidence protocol before answering."
+            infer_request.messages.append(
+                {
+                    "role": "user",
+                    "content": f"Evidence protocol incomplete. {instruction}",
+                }
+            )
+        for call in tool_calls:
             function = getattr(call, "function", None)
             name = str(getattr(function, "name", ""))
             calls_before = _int_value(state.get("calls", 0))
@@ -525,14 +707,69 @@ class GraphTaskCurriculumSolverScheduler(GraphTaskSolverScheduler, MultiTurnSche
 
         initial_entities = set(_string_list(info.get("topic_entity_ids", [])))
         visible_entities = set(_string_list(state.get("visible_entities", [])))
-        rollout_infos = {
+        rollout_infos: dict[str, object] = {
             "calls": _int_value(state.get("calls", 0)),
             "valid_calls": _int_value(state.get("valid_calls", 0)),
             "invalid_calls": _int_value(state.get("invalid_calls", 0)),
             "edge_visits": _int_value(state.get("edge_visits", 0)),
             "new_visible_entities": len(visible_entities - initial_entities),
         }
+        if str(info.get("role")) == "evidence_solver":
+            rollout_infos.update(
+                {
+                    "observed_passages": state.get("observed_passages", []),
+                    "selected_passage_keys": state.get("selected_passage_keys", []),
+                    "evidence_actions": state.get("evidence_actions", []),
+                    "early_answer_attempts": _int_value(
+                        state.get("early_answer_attempts", 0)
+                    ),
+                }
+            )
         return {"infer_request": infer_request, "rollout_infos": rollout_infos}
+
+
+def _action_passage_keys(actions: Sequence[object], operation: str) -> set[str]:
+    keys: set[str] = set()
+    for action in actions:
+        if not isinstance(action, Mapping) or str(action.get("op")) != operation:
+            continue
+        passages = action.get("passages", [])
+        if not isinstance(passages, Sequence) or isinstance(passages, str | bytes):
+            continue
+        for passage in passages:
+            if not isinstance(passage, Mapping):
+                continue
+            key = passage.get("passage_key")
+            if isinstance(key, str):
+                keys.add(key)
+    return keys
+
+
+def _causal_selection_complete(actions: Sequence[object]) -> bool:
+    expand_indices = [
+        index
+        for index, action in enumerate(actions)
+        if isinstance(action, Mapping) and str(action.get("op")) == "expand"
+    ]
+    select_indices = [
+        index
+        for index, action in enumerate(actions)
+        if isinstance(action, Mapping) and str(action.get("op")) == "select_evidence"
+    ]
+    if not expand_indices or not select_indices or select_indices[-1] < expand_indices[-1]:
+        return False
+    selected = next(
+        (
+            set(_string_list(action.get("passage_keys", [])))
+            for action in reversed(actions)
+            if isinstance(action, Mapping) and str(action.get("op")) == "select_evidence"
+        ),
+        set(),
+    )
+    return bool(
+        selected & _action_passage_keys(actions, "retrieve")
+        and selected & _action_passage_keys(actions, "expand")
+    )
 
 
 _register_data()

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from graphtask_r1.schema import Answer, AnswerSet, BenchmarkExample
+from graphtask_r1.schema import Answer, AnswerSet, BenchmarkExample, EvidenceProvenance
 from graphtask_r1.utils import (
     ProgressLogger,
     file_hash,
@@ -238,6 +238,44 @@ def _provenance_ids(outputs: Any) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
+def _kilt_provenance_sets(outputs: Any) -> tuple[tuple[EvidenceProvenance, ...], ...]:
+    if not isinstance(outputs, list):
+        return ()
+    evidence_sets: list[tuple[EvidenceProvenance, ...]] = []
+    for output in outputs:
+        if not isinstance(output, dict):
+            continue
+        raw_provenance = output.get("provenance")
+        if not isinstance(raw_provenance, list):
+            continue
+        evidence: list[EvidenceProvenance] = []
+        for value in raw_provenance:
+            if not isinstance(value, dict) or value.get("wikipedia_id") is None:
+                continue
+            paragraph_id = value.get("start_paragraph_id", value.get("paragraph_id", 0))
+            evidence.append(
+                EvidenceProvenance(
+                    page_id=str(value["wikipedia_id"]),
+                    paragraph_id=int(paragraph_id or 0),
+                    title=str(value.get("title", "")),
+                    start_character=(
+                        int(value["start_character"])
+                        if value.get("start_character") is not None
+                        else None
+                    ),
+                    end_character=(
+                        int(value["end_character"])
+                        if value.get("end_character") is not None
+                        else None
+                    ),
+                )
+            )
+        canonical = tuple(dict.fromkeys(evidence))
+        if canonical and canonical not in evidence_sets:
+            evidence_sets.append(canonical)
+    return tuple(evidence_sets)
+
+
 def _openqa_rows(
     dataset: OpenQADataset, payload: Any, split: str, workers: int
 ) -> list[BenchmarkExample]:
@@ -262,6 +300,7 @@ def _openqa_rows(
             ]
             question = str(row.get("input", ""))
             topic_ids = _provenance_ids(outputs)
+            gold_provenance = _kilt_provenance_sets(outputs)
             source_format = "kilt"
         elif dataset == "triviaqa" and isinstance(row.get("Answer"), dict):
             answer = row["Answer"]
@@ -270,11 +309,13 @@ def _openqa_rows(
             )
             question = str(row.get("Question", row.get("question", "")))
             topic_ids = ()
+            gold_provenance = ()
             source_format = "official"
         else:
             answer_values = row.get("answers", row.get("answer", []))
             question = str(row.get("question", row.get("Question", "")))
             topic_ids = tuple(str(value) for value in row.get("topic_entity_ids", []))
+            gold_provenance = ()
             source_format = "official"
         answers, aliases = _alias_answers(answer_values)
         raw_id = row.get("id", row.get("_id", row.get("QuestionId", index)))
@@ -286,6 +327,7 @@ def _openqa_rows(
             topic_entity_ids=topic_ids,
             gold_answers=answers,
             answer_aliases=aliases,
+            gold_provenance=gold_provenance,
             metadata={"source_format": source_format, "raw_index": index},
         )
 

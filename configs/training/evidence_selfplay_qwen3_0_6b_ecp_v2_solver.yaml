@@ -1,0 +1,30 @@
+# Solver-only ECP-v2 round: answer-gated proof credit, no SFT.
+# Data rows select ecp_v2; ms-swift remains pinned at 3.10.3.
+model_path: ${EVIDENCE_MODEL_PATH}
+model_type: qwen3
+initial_adapter: null
+questioner_initial_adapter: null
+existing_solver_adapter: null
+policy_topology: role_separated
+train_solver: true
+train_questioner: false
+graph_db: ${GRAPHTASK_KILT_DB}
+round_data: ${EVIDENCE_RL_DATA}
+output_dir: ${EVIDENCE_RL_OUTPUT}
+train_script: scripts/train_ms_swift_grpo.sh
+actor_gpus: "0"
+use_vllm: false
+seed: 71
+epochs: 1
+micro_batch_size: 4
+gradient_accumulation_steps: 1
+steps_per_generation: 1
+solver_rollouts: 4
+questioner_rollouts: 4
+solver_max_completion_length: 256
+questioner_max_completion_length: 128
+response_prefix: '<think>\n\n</think>\n\n'
+solver_learning_rate: 0.000001
+questioner_learning_rate: 0.000002
+solver_algorithm: grpo
+questioner_algorithm: reinforce_plus_plus

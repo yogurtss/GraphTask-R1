@@ -997,6 +997,58 @@ class SQLiteGraphBackend:
             self._text_search_cache[cache_key] = result
         return [dict(value) for value in result]
 
+    def get_passage(
+        self,
+        page_id: str,
+        paragraph_id: int,
+        *,
+        max_chars: int = 4_000,
+    ) -> dict[str, Any]:
+        """Return one addressable KILT passage for ProofScript execution."""
+
+        row = self.connection.execute(
+            "SELECT page_id, paragraph_id, title, substr(text, 1, ?) "
+            "FROM passage_fts WHERE page_id = ? AND paragraph_id = ? LIMIT 1",
+            (max_chars, page_id, paragraph_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown passage: {page_id}:{paragraph_id}")
+        return {
+            "page_id": str(row[0]),
+            "paragraph_id": int(row[1]),
+            "title": str(row[2]),
+            "text": str(row[3]),
+            "score": 0.0,
+        }
+
+    def page_passages(
+        self,
+        page_ids: list[str],
+        *,
+        max_chars: int = 2_000,
+        limit_per_page: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return bounded passages for graph-expanded KILT pages."""
+
+        rows: list[dict[str, Any]] = []
+        for page_id in dict.fromkeys(page_ids):
+            page_rows = self.connection.execute(
+                "SELECT page_id, paragraph_id, title, substr(text, 1, ?) "
+                "FROM passage_fts WHERE page_id = ? ORDER BY paragraph_id LIMIT ?",
+                (max_chars, page_id, limit_per_page),
+            ).fetchall()
+            rows.extend(
+                {
+                    "page_id": str(value[0]),
+                    "paragraph_id": int(value[1]),
+                    "title": str(value[2]),
+                    "text": str(value[3]),
+                    "score": 0.0,
+                }
+                for value in page_rows
+            )
+        return rows
+
     def extract_witness(self, program: Program, answers: AnswerSet) -> list[Witness]:
         graph_slice = self.materialize(program)
         return [

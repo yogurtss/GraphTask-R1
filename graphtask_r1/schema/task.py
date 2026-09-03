@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from graphtask_r1.schema.entity import AnswerSet, EntityInfo, Triple
 from graphtask_r1.schema.program import Program
+from graphtask_r1.schema.trajectory import EvidenceProvenance
 
 
 class VerificationSummary(BaseModel):
@@ -56,6 +57,8 @@ class BenchmarkExample(BaseModel):
     # Each inner tuple is an equivalence class: matching any alias is correct.
     # Graph benchmarks leave this empty and retain exact entity-set scoring.
     answer_aliases: tuple[tuple[str, ...], ...] = ()
+    # Each inner tuple is one alternative complete KILT evidence set.
+    gold_provenance: tuple[tuple[EvidenceProvenance, ...], ...] = ()
     logical_form: str | None = None
     sparql: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
