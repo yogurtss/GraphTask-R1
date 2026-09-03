@@ -91,6 +91,17 @@ def test_kilt_hotpot_and_official_trivia_formats(tmp_path: Path) -> None:
     hotpot_example = read_records(hotpot_output / "dev" / "examples.parquet")[0]
     assert hotpot_example["topic_entity_ids"] == ["22989"]
     assert hotpot_example["answer_aliases"] == [["Paris", "City of Paris"]]
+    assert hotpot_example["gold_provenance"] == [
+        [
+            {
+                "end_character": None,
+                "page_id": "22989",
+                "paragraph_id": 0,
+                "start_character": None,
+                "title": "Paris",
+            }
+        ]
+    ]
 
     trivia_raw = tmp_path / "trivia"
     trivia_raw.mkdir()

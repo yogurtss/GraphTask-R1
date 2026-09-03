@@ -117,8 +117,7 @@ def _graphscript_structure_f1(script: object, info: dict[str, Any]) -> float:
     predicted = {
         mapped
         for operation in raw_ops
-        if (mapped := _GRAPHSCRIPT_TO_PROGRAM_OPERATOR.get(str(operation.op)))
-        is not None
+        if (mapped := _GRAPHSCRIPT_TO_PROGRAM_OPERATOR.get(str(operation.op))) is not None
     }
     return _set_f1(predicted, reference)
 
@@ -129,9 +128,7 @@ def _question_alignment(generated: str, canonical: str) -> tuple[float, float, f
     overlap = len(generated_tokens.intersection(canonical_tokens))
     precision = _fraction(overlap, len(generated_tokens))
     recall = _fraction(overlap, len(canonical_tokens))
-    token_f1 = (
-        2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
-    )
+    token_f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
     anchors = canonical_tokens - _QUESTION_STOPWORDS
     anchor_overlap = _fraction(len(anchors.intersection(generated_tokens)), len(anchors))
     return 0.5 * token_f1 + 0.5 * anchor_overlap, token_f1, anchor_overlap
@@ -179,9 +176,7 @@ def _truncated_graphscript_shape(
 
 
 def _truncated_question_present(text: str) -> float:
-    return float(
-        bool(re.search(r'"question"\s*:\s*"(?:[^"\\]|\\.)+"', text))
-    )
+    return float(bool(re.search(r'"question"\s*:\s*"(?:[^"\\]|\\.)+"', text)))
 
 
 def _questioner_program_shape(
@@ -257,9 +252,7 @@ def _seed_coverage(raw_program: object, topic_ids: tuple[str, ...]) -> float:
     roots = {
         str(op.get("query"))
         for op in raw_ops
-        if isinstance(op, dict)
-        and op.get("op") == "resolve_entity"
-        and op.get("match") == "id"
+        if isinstance(op, dict) and op.get("op") == "resolve_entity" and op.get("match") == "id"
     }
     return _fraction(len(roots.intersection(topic_ids)), len(set(topic_ids)))
 
@@ -315,10 +308,7 @@ def _curriculum_questioner_result(
         "cardinality_valid": values.get("cardinality_valid", 0.0),
         "certified": values.get("certified", 0.0),
         **reward.components,
-        **{
-            f"reject_{reason.lower()}": 1.0
-            for reason in rejection_reasons
-        },
+        **{f"reject_{reason.lower()}": 1.0 for reason in rejection_reasons},
         **(extra_components or {}),
     }
 
@@ -366,13 +356,9 @@ async def _compute_curriculum_questioner_score(
         )
     values["json_valid"] = 1.0
     values["question_present"] = float(decoded.question is not None)
-    values.update(
-        _questioner_program_shape(decoded.program, expected_version=graphscript_version)
-    )
+    values.update(_questioner_program_shape(decoded.program, expected_version=graphscript_version))
     values["seed_coverage"] = _seed_coverage(decoded.program, topic_ids)
-    values["relation_valid_fraction"] = _relation_valid_fraction(
-        decoded.program, allowed_relations
-    )
+    values["relation_valid_fraction"] = _relation_valid_fraction(decoded.program, allowed_relations)
     try:
         question, script = parse_questioner_graphscript_output(
             solution_str,
@@ -554,9 +540,7 @@ async def _compute_curriculum_questioner_score(
         opponent = OpponentSignals(
             parse_rate=float(evaluation["program_parse_rate"]),
             execution_rate_given_parse=float(evaluation["execution_rate_given_parse"]),
-            semantic_success_given_execution=float(
-                evaluation["semantic_success_given_execution"]
-            ),
+            semantic_success_given_execution=float(evaluation["semantic_success_given_execution"]),
         )
         extra_components.update(
             {
@@ -622,9 +606,7 @@ async def _compute_curriculum_tool_questioner_score(
     values.update(
         {
             "json_valid": 1.0,
-            "question_present": float(
-                isinstance(raw_question, str) and bool(raw_question.strip())
-            ),
+            "question_present": float(isinstance(raw_question, str) and bool(raw_question.strip())),
             "code_present": float(isinstance(raw_program, dict)),
             "schema_fraction": (
                 float(isinstance(raw_program, dict))
@@ -690,9 +672,7 @@ async def _compute_curriculum_tool_questioner_score(
             "target_structure_alignment": structure_alignment["target_alignment"],
         }
     )
-    extra_components.update(
-        {"program_cost": program_cost(proposal.program), **structure_alignment}
-    )
+    extra_components.update({"program_cost": program_cost(proposal.program), **structure_alignment})
     question = proposal.paraphrase.strip() if proposal.paraphrase is not None else None
     if not question:
         return _curriculum_questioner_result(
@@ -767,9 +747,7 @@ async def _compute_curriculum_tool_questioner_score(
         opponent = OpponentSignals(
             parse_rate=float(evaluation["program_parse_rate"]),
             execution_rate_given_parse=float(evaluation["execution_rate_given_parse"]),
-            semantic_success_given_execution=float(
-                evaluation["semantic_success_given_execution"]
-            ),
+            semantic_success_given_execution=float(evaluation["semantic_success_given_execution"]),
         )
         extra_components.update(
             {
@@ -840,16 +818,10 @@ def _curriculum_solver_result(
 ) -> dict[str, float]:
     reward = solver_curriculum_reward(_solver_milestones(values), stage=stage)
     rejection_penalty = (
-        solver_rejection_reward(rejection_reason).total
-        if rejection_reason is not None
-        else 0.0
+        solver_rejection_reward(rejection_reason).total if rejection_reason is not None else 0.0
     )
     total = reward.total + rejection_penalty
-    rejection = (
-        {f"reject_{rejection_reason.lower()}": 1.0}
-        if rejection_reason is not None
-        else {}
-    )
+    rejection = {f"reject_{rejection_reason.lower()}": 1.0} if rejection_reason is not None else {}
     return {
         "score": total * role_weight,
         "raw_score": total,
@@ -949,9 +921,7 @@ def _compute_curriculum_graphscript_solver_score(
             script,
             backend,
             seed_entity=topic_ids[0] if len(topic_ids) == 1 else None,
-            allowed_relations=frozenset(
-                str(value) for value in info.get("allowed_relations", [])
-            ),
+            allowed_relations=frozenset(str(value) for value in info.get("allowed_relations", [])),
             max_edge_visits=int(info.get("max_edge_visits", 200)),
             max_returned_entities=int(info.get("max_returned_entities", 1_000)),
             trace_id=str(info.get("task_id", "solver")),
@@ -972,8 +942,7 @@ def _compute_curriculum_graphscript_solver_score(
     if isinstance(raw_reference_program, dict):
         reference_program = parse_program(raw_reference_program)
         program_exact_match = float(
-            canonical_signature(execution.program)
-            == canonical_signature(reference_program)
+            canonical_signature(execution.program) == canonical_signature(reference_program)
         )
     values.update(
         {
@@ -1081,6 +1050,18 @@ async def compute_score(
     info = extra_info or {}
     if backend is None:
         backend = backend_from_snapshot(str(info.get("graph_snapshot", "toy-v1")))
+    if data_source == "graphtask/evidence_solver":
+        from graphtask_r1.training.evidence_selfplay_rl import (
+            compute_evidence_solver_score,
+        )
+
+        return compute_evidence_solver_score(solution_str, info, backend=backend)
+    if data_source == "graphtask/evidence_questioner":
+        from graphtask_r1.training.evidence_selfplay_rl import (
+            compute_evidence_questioner_score,
+        )
+
+        return compute_evidence_questioner_score(solution_str, info, backend=backend)
     role_weight = float(info.get("role_weight", 1.0))
     raw_mode = str(info.get("interaction_mode", "tool"))
     if raw_mode not in {"tool", "graphscript"}:
@@ -1277,10 +1258,7 @@ async def compute_score(
                 "opponent_success_rate": pass_rate,
                 **alignment_components,
                 **reward.components,
-                **{
-                    f"reject_{reason.lower()}": 1.0
-                    for reason in result.rejection_reasons
-                },
+                **{f"reject_{reason.lower()}": 1.0 for reason in result.rejection_reasons},
                 **graph_usage,
             }
         except GraphScriptError as exc:

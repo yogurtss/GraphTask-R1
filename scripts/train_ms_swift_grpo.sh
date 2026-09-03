@@ -7,7 +7,6 @@ LORA_ADAPTER_PATH="${LORA_ADAPTER_PATH:-${MS_SWIFT_SFT_ADAPTER:-}}"
 TRAIN_DATA="${TRAIN_DATA:-${SOLVER_RL_TRAIN_DATA:-}}"
 VAL_DATA="${VAL_DATA:-${SOLVER_RL_VAL_DATA:-${TRAIN_DATA:-}}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SOLVER_GRPO_OUTPUT_DIR:-outputs/ms-swift-solver-grpo-cu124}}"
-: "${LORA_ADAPTER_PATH:?Set LORA_ADAPTER_PATH to an ms-swift LoRA checkpoint (SFT by default)}"
 : "${TRAIN_DATA:?Set TRAIN_DATA to a Solver RL parquet file}"
 
 MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-32768}"
@@ -138,9 +137,13 @@ if [[ "$DEEPSPEED" != "none" ]] && ! python -c 'import deepspeed' >/dev/null 2>&
   echo "deepspeed is required when DEEPSPEED=$DEEPSPEED" >&2
   exit 2
 fi
-if [[ ! -d "$LORA_ADAPTER_PATH" ]]; then
-  echo "SFT adapter directory not found: $LORA_ADAPTER_PATH" >&2
-  exit 2
+ADAPTER_ARGS=()
+if [[ -n "$LORA_ADAPTER_PATH" ]]; then
+  if [[ ! -d "$LORA_ADAPTER_PATH" ]]; then
+    echo "LoRA adapter directory not found: $LORA_ADAPTER_PATH" >&2
+    exit 2
+  fi
+  ADAPTER_ARGS=(--adapters "$LORA_ADAPTER_PATH")
 fi
 if [[ ! -f "$TRAIN_DATA" ]]; then
   echo "Solver RL parquet not found; generate it or fix TRAIN_DATA" >&2
@@ -188,7 +191,7 @@ NPROC_PER_NODE="$NUM_GPUS" swift rlhf \
   --model "$MODEL_PATH" \
   --model_type "$MODEL_TYPE" \
   --template "${TEMPLATE:-qwen3}" \
-  --adapters "$LORA_ADAPTER_PATH" \
+  "${ADAPTER_ARGS[@]}" \
   --train_type lora \
   --dataset graphtask-train \
   "${EVAL_ARGS[@]}" \

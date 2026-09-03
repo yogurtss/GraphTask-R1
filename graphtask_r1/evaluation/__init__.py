@@ -4,6 +4,7 @@ from graphtask_r1.evaluation.answer_metrics import (
     openqa_alias_metrics,
 )
 from graphtask_r1.evaluation.benchmark import evaluate_benchmark
+from graphtask_r1.evaluation.kilt import KILTQAMetrics, kilt_qa_metrics
 from graphtask_r1.evaluation.kqapro_val import (
     KQAProValConfig,
     assess_kqapro_promotion,
@@ -21,6 +22,8 @@ __all__ = [
     "evaluate_kqapro_val",
     "inspect_kqapro_val",
     "KQAProValConfig",
+    "KILTQAMetrics",
+    "kilt_qa_metrics",
     "normalize_openqa_answer",
     "openqa_alias_metrics",
     "visualize_kqapro_val",

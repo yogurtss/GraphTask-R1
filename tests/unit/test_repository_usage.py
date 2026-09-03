@@ -171,9 +171,7 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
     assert colocate[colocate.index("--beta") + 1] == "0.001"
 
     reinforce = launch("colocate", algorithm="reinforce_plus_plus")
-    assert reinforce[reinforce.index("--advantage_estimator") + 1] == (
-        "reinforce_plus_plus"
-    )
+    assert reinforce[reinforce.index("--advantage_estimator") + 1] == ("reinforce_plus_plus")
     assert reinforce[reinforce.index("--scale_rewards") + 1] == "batch"
     assert reinforce[reinforce.index("--kl_in_reward") + 1] == "true"
     assert reinforce[reinforce.index("--beta") + 1] == "0.001"
@@ -209,14 +207,50 @@ def test_ms_swift_grpo_only_passes_server_address_in_server_mode(tmp_path: Path)
         "OUTPUT_DIR": str(tmp_path / "output-no-vllm"),
         "USE_VLLM": "false",
     }
-    subprocess.run(
-        ["bash", str(script)], cwd=PROJECT_ROOT, env=no_vllm_environment, check=True
-    )
+    subprocess.run(["bash", str(script)], cwd=PROJECT_ROOT, env=no_vllm_environment, check=True)
     no_vllm = no_vllm_capture.read_text().splitlines()
     assert no_vllm[no_vllm.index("--use_vllm") + 1] == "false"
     assert "--vllm_mode" not in no_vllm
     assert "--vllm_server_host" not in no_vllm
     assert "--vllm_gpu_memory_utilization" not in no_vllm
+
+
+def test_ms_swift_grpo_can_start_directly_from_base_without_sft_adapter(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "args.txt"
+    fake_swift = fake_bin / "swift"
+    fake_swift.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE_ARGS"\n')
+    fake_swift.chmod(0o755)
+    fake_python = fake_bin / "python"
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_python.chmod(0o755)
+    train_data = tmp_path / "train.parquet"
+    train_data.touch()
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "CAPTURE_ARGS": str(capture),
+        "TRAIN_DATA": str(train_data),
+        "OUTPUT_DIR": str(tmp_path / "output"),
+        "USE_VLLM": "false",
+        "AUTO_RESUME": "false",
+    }
+    environment.pop("LORA_ADAPTER_PATH", None)
+    environment.pop("MS_SWIFT_SFT_ADAPTER", None)
+
+    subprocess.run(
+        ["bash", str(PROJECT_ROOT / "scripts/train_ms_swift_grpo.sh")],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+    )
+
+    arguments = capture.read_text().splitlines()
+    assert "--adapters" not in arguments
+    assert arguments[arguments.index("--train_type") + 1] == "lora"
 
 
 def test_main_readme_links_dedicated_ms_swift_cuda124_guide() -> None:
@@ -266,7 +300,7 @@ def test_rule_questioner_guide_builds_required_snapshot_before_sampling() -> Non
     sampler = guide.index("python scripts/experiment_path_sampler.py")
     assert data_prepare < sampler
     assert "kqapro-v03-full-audit/graph.sqlite" in guide
-    assert "--output-dir \"$KQAPRO_DIR\"" in guide
+    assert '--output-dir "$KQAPRO_DIR"' in guide
     prerequisite_section = guide[guide.index("## 0.") : guide.index("## 1.")]
     assert "--train-sample-size 5000" in prerequisite_section
     assert "--train-sample-size 20000" not in prerequisite_section

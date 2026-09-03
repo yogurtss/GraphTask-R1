@@ -101,9 +101,52 @@ EXECUTE_PROGRAM_TOOL = {
     },
 }
 
+EXPAND_EVIDENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "expand_evidence",
+        "description": (
+            "Follow Wikipedia links from all passages observed so far and return ranked "
+            "second-hop passages with exact passage keys."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+SELECT_EVIDENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "select_evidence",
+        "description": "Select exact passage keys previously returned by evidence tools.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "passage_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                }
+            },
+            "required": ["passage_keys"],
+        },
+    },
+}
+
 
 def tool_schemas(role: str, *, text_search_enabled: bool = False) -> list[dict[str, object]]:
     """Return a fresh, JSON-native tool list for one GraphTask role."""
+    if role == "evidence_solver":
+        return cast(
+            list[dict[str, object]],
+            to_json_compatible([TEXT_SEARCH_TOOL, EXPAND_EVIDENCE_TOOL, SELECT_EVIDENCE_TOOL]),
+        )
     tools = [GRAPH_SEARCH_TOOL, INSPECT_ENTITY_TOOL]
     if role == "solver" and text_search_enabled:
         tools.append(TEXT_SEARCH_TOOL)

@@ -17,6 +17,22 @@ class PassageHit(BaseModel):
     score: float
 
 
+class EvidenceProvenance(BaseModel):
+    """A passage/span reference in the shared KILT knowledge source."""
+
+    model_config = ConfigDict(frozen=True)
+
+    page_id: str = Field(min_length=1)
+    paragraph_id: int = Field(ge=0)
+    title: str = ""
+    start_character: int | None = Field(default=None, ge=0)
+    end_character: int | None = Field(default=None, ge=0)
+
+    @property
+    def passage_key(self) -> str:
+        return f"{self.page_id}:{self.paragraph_id}"
+
+
 class ToolCall(BaseModel):
     model_config = ConfigDict(frozen=True)
     name: Literal["search", "text_search", "inspect_entity", "final_answer"]

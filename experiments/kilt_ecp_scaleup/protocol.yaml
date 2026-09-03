@@ -1,0 +1,46 @@
+schema_version: kilt-ecp-scaleup-v1
+framework:
+  name: ms-swift
+  version: 3.10.3
+  uses_sft: false
+comparison:
+  baseline: search_r1_em
+  candidate: ecp_v4
+  paired_fields:
+    - model
+    - train_split
+    - validation_split
+    - seed
+    - epochs
+    - rollout_count
+    - tool_budget
+    - learning_rate
+seeds: [71, 113, 191]
+stages:
+  - name: qwen3_4b_scale_only
+    model: Qwen/Qwen3-4B
+    train_examples: 48
+    validation_examples: 16
+    seeds: [71]
+  - name: qwen3_4b_data_scale
+    model: Qwen/Qwen3-4B
+    target_train_examples: 384
+    target_validation_examples: 128
+    seeds: [71, 113, 191]
+  - name: qwen3_8b_confirmation
+    model: Qwen/Qwen3-8B
+    target_train_examples: 384
+    target_validation_examples: 128
+    seeds: [71, 113, 191]
+    run_only_after: qwen3_4b_data_scale_passes
+evaluation:
+  max_turns: 6
+  primary_metric: kilt_f1
+  secondary_metrics:
+    - provenance_rprecision
+    - answer_f1
+acceptance:
+  mean_kilt_f1_delta_gt: 0.0
+  positive_seed_deltas_at_least: 2
+  provenance_rprecision_delta_gte: 0.0
+  maximum_answer_f1_regression: 0.05

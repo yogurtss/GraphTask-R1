@@ -1,5 +1,42 @@
 """Isolated research utilities that are not wired into production workflows."""
 
+from graphtask_r1.experiments.ecp_selfplay import (
+    CounterfactualProofError,
+    CounterfactualProofPair,
+    CounterfactualRetrievalExample,
+    certify_counterfactual_pair,
+    counterfactual_retrieval_examples,
+    generate_counterfactual_proof_pairs,
+    train_counterfactual_reranker,
+)
+from graphtask_r1.experiments.evidence_selfplay import (
+    EvidenceChallenge,
+    EvidenceSelfPlayConfig,
+    EvidenceSelfPlayRecord,
+    EvidenceSelfPlayRound,
+    export_evidence_selfplay_round,
+    generate_evidence_challenges,
+    run_evidence_selfplay_round,
+)
+from graphtask_r1.experiments.interactive_evidence import (
+    EvidenceAgentDecision,
+    EvidenceAgentToolCall,
+    InteractiveEvidencePolicy,
+    InteractiveEvidenceReport,
+    InteractiveEvidenceRun,
+    evaluate_interactive_evidence,
+    run_interactive_evidence_policy,
+)
+from graphtask_r1.experiments.kilt_evidence_ab import (
+    AnswerPrediction,
+    EvidenceABConfig,
+    EvidenceABReport,
+    EvidenceAnswerer,
+    HyperlinkEvidenceFlow,
+    SingleRetrievalBaseline,
+    benchmark_examples_from_records,
+    evaluate_evidence_ab,
+)
 from graphtask_r1.experiments.path_sampling import (
     ExperimentalPathSampler,
     PathSamplingConfig,
@@ -7,11 +44,54 @@ from graphtask_r1.experiments.path_sampling import (
     SamplingExperiment,
     load_reference_profile,
 )
+from graphtask_r1.experiments.transformers_answerer import (
+    EvidenceAnswerError,
+    TransformersEvidenceAnswerer,
+    TransformersInteractiveEvidencePolicy,
+    evidence_answer_prompt,
+    parse_answer_prediction,
+    parse_evidence_agent_decision,
+)
 
 __all__ = [
+    "AnswerPrediction",
+    "benchmark_examples_from_records",
+    "certify_counterfactual_pair",
+    "counterfactual_retrieval_examples",
+    "train_counterfactual_reranker",
+    "CounterfactualProofError",
+    "CounterfactualProofPair",
+    "CounterfactualRetrievalExample",
+    "EvidenceABConfig",
+    "EvidenceABReport",
+    "EvidenceChallenge",
+    "EvidenceAnswerer",
+    "EvidenceAnswerError",
+    "EvidenceAgentDecision",
+    "EvidenceAgentToolCall",
+    "EvidenceSelfPlayConfig",
+    "EvidenceSelfPlayRecord",
+    "EvidenceSelfPlayRound",
     "ExperimentalPathSampler",
+    "HyperlinkEvidenceFlow",
+    "InteractiveEvidencePolicy",
+    "InteractiveEvidenceReport",
+    "InteractiveEvidenceRun",
     "PathSamplingConfig",
     "ReferenceProfile",
     "SamplingExperiment",
+    "SingleRetrievalBaseline",
+    "TransformersEvidenceAnswerer",
+    "TransformersInteractiveEvidencePolicy",
+    "evaluate_evidence_ab",
+    "evaluate_interactive_evidence",
+    "evidence_answer_prompt",
+    "export_evidence_selfplay_round",
+    "generate_evidence_challenges",
+    "generate_counterfactual_proof_pairs",
     "load_reference_profile",
+    "parse_answer_prediction",
+    "parse_evidence_agent_decision",
+    "run_evidence_selfplay_round",
+    "run_interactive_evidence_policy",
 ]
