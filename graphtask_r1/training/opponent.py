@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -76,6 +77,34 @@ class OpponentUnavailable(RuntimeError):
     pass
 
 
+class OpponentTimeout(OpponentUnavailable):
+    """A bounded opponent operation exhausted its end-to-end deadline."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        attempts: int,
+        trace_id: str,
+    ) -> None:
+        self.message = message
+        self.stage = stage
+        self.attempts = attempts
+        self.trace_id = trace_id
+        super().__init__(
+            f"{message} (stage={stage}, attempts={attempts}, trace_id={trace_id})"
+        )
+
+
+class _OpponentResponseError(OpponentUnavailable):
+    """A response body that could not satisfy the expected JSON-object protocol."""
+
+    def __init__(self, message: str, *, status: int) -> None:
+        self.status = status
+        super().__init__(message)
+
+
 async def _read_json_response(response: Any, *, endpoint: str) -> dict[str, Any]:
     """Decode JSON independently of the server's often incorrect content type."""
 
@@ -85,14 +114,14 @@ async def _read_json_response(response: Any, *, endpoint: str) -> dict[str, Any]
     except (TypeError, json.JSONDecodeError) as exc:
         content_type = response.headers.get("Content-Type", "unknown")
         excerpt = raw_body[:500].replace("\n", "\\n")
-        raise OpponentUnavailable(
+        message = (
             f"{endpoint} returned non-JSON response "
             f"(status={response.status}, content_type={content_type}): {excerpt!r}"
-        ) from exc
-    if not isinstance(body, dict):
-        raise OpponentUnavailable(
-            f"{endpoint} returned {type(body).__name__}; expected a JSON object"
         )
+        raise _OpponentResponseError(message, status=int(response.status)) from exc
+    if not isinstance(body, dict):
+        message = f"{endpoint} returned {type(body).__name__}; expected a JSON object"
+        raise _OpponentResponseError(message, status=int(response.status))
     return body
 
 
@@ -116,6 +145,7 @@ async def request_opponent(
     recover_invalid_tool_calls: bool = False,
     restrict_relation_catalog: bool = False,
     target_alignment_components: dict[str, float] | None = None,
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     try:
         import aiohttp
@@ -123,6 +153,20 @@ async def request_opponent(
         raise ImportError(
             "install aiohttp from requirements.txt for async opponent rewards"
         ) from exc
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("timeout_s must be a finite positive number")
+    if retries < 0:
+        raise ValueError("retries cannot be negative")
+    request_trace_id = trace_id or (
+        "opponent:"
+        + stable_hash(
+            {
+                "proposal": proposal.model_dump(mode="json"),
+                "graph_snapshot": graph_snapshot,
+                "round": round_index,
+            }
+        )[:16]
+    )
     payload = {
         "proposal": proposal.model_dump(mode="json"),
         "graph_snapshot": graph_snapshot,
@@ -132,6 +176,7 @@ async def request_opponent(
         "graphscript_version": graphscript_version,
         "allowed_relations": list(allowed_relations),
         "max_follow_limit": max_follow_limit,
+        "trace_id": request_trace_id,
     }
     if max_edge_visits is not None:
         payload["max_edge_visits"] = max_edge_visits
@@ -149,23 +194,98 @@ async def request_opponent(
         payload["target_alignment_components"] = {
             str(key): float(value) for key, value in target_alignment_components.items()
         }
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
     last_error: Exception | None = None
+    attempts = 0
     for attempt in range(retries + 1):
+        remaining_s = deadline - loop.time()
+        if remaining_s <= 0:
+            raise OpponentTimeout(
+                "opponent request exhausted its total deadline",
+                stage="client_deadline",
+                attempts=attempts,
+                trace_id=request_trace_id,
+            ) from last_error
+        attempts = attempt + 1
         try:
-            timeout = aiohttp.ClientTimeout(total=timeout_s)
+            attempt_payload = dict(payload)
+            attempt_payload["evaluation_timeout_s"] = remaining_s - min(
+                5.0, remaining_s * 0.1
+            )
+            timeout = aiohttp.ClientTimeout(total=remaining_s)
             async with (
                 aiohttp.ClientSession(timeout=timeout) as session,
-                session.post(url.rstrip("/") + "/evaluate", json=payload) as response,
+                session.post(
+                    url.rstrip("/") + "/evaluate",
+                    json=attempt_payload,
+                    headers={"X-Trace-ID": request_trace_id},
+                ) as response,
             ):
-                body = await _read_json_response(response, endpoint="opponent /evaluate")
+                try:
+                    body = await _read_json_response(
+                        response,
+                        endpoint="opponent /evaluate",
+                    )
+                except _OpponentResponseError as exc:
+                    if exc.status in {408, 504}:
+                        raise OpponentTimeout(
+                            str(exc),
+                            stage="server_response",
+                            attempts=attempts,
+                            trace_id=request_trace_id,
+                        ) from exc
+                    if exc.status in {200, 429, 502, 503}:
+                        raise OpponentUnavailable(str(exc)) from exc
+                    if exc.status >= 500:
+                        raise RuntimeError(str(exc)) from exc
+                    raise ValueError(str(exc)) from exc
                 if response.status != 200:
-                    raise OpponentUnavailable(str(body))
+                    if body.get("error") == "OpponentTimeout" or response.status in {
+                        408,
+                        504,
+                    }:
+                        raise OpponentTimeout(
+                            str(body.get("message") or body.get("detail") or "opponent timed out"),
+                            stage=str(body.get("stage") or "server_evaluation"),
+                            attempts=attempts,
+                            trace_id=str(body.get("trace_id") or request_trace_id),
+                        )
+                    if response.status in {429, 502, 503}:
+                        raise OpponentUnavailable(str(body))
+                    if response.status >= 500:
+                        raise RuntimeError(
+                            f"opponent evaluation failed with status {response.status}: {body}"
+                        )
+                    raise ValueError(
+                        f"opponent rejected evaluation with status {response.status}: {body}"
+                    )
                 return body
-        except (aiohttp.ClientError, TimeoutError, ValueError, OpponentUnavailable) as exc:
+        except OpponentTimeout:
+            raise
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+            raise OpponentTimeout(
+                "opponent request exhausted its total deadline",
+                stage="client_request",
+                attempts=attempts,
+                trace_id=request_trace_id,
+            ) from exc
+        except (aiohttp.ClientError, OpponentUnavailable) as exc:
             last_error = exc
             if attempt < retries:
-                await asyncio.sleep(min(0.5 * 2**attempt, 2.0))
-    raise OpponentUnavailable(f"opponent unavailable after {retries + 1} attempts") from last_error
+                delay_s = min(0.5 * 2**attempt, 2.0)
+                remaining_s = deadline - loop.time()
+                if remaining_s <= delay_s:
+                    if remaining_s > 0:
+                        await asyncio.sleep(remaining_s)
+                    raise OpponentTimeout(
+                        "opponent request exhausted its total deadline during retry backoff",
+                        stage="client_backoff",
+                        attempts=attempts,
+                        trace_id=request_trace_id,
+                    ) from exc
+                await asyncio.sleep(delay_s)
+    raise OpponentUnavailable(f"opponent unavailable after {attempts} attempts") from last_error
 
 
 class FrozenSolverService:
@@ -299,7 +419,12 @@ class FrozenSolverService:
                     if not isinstance(message, dict):
                         raise OpponentUnavailable("SGLang response has no message object")
                     return message
-            except (aiohttp.ClientError, TimeoutError, OpponentUnavailable) as exc:
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                TimeoutError,
+                OpponentUnavailable,
+            ) as exc:
                 last_error = exc
                 if attempt < self.model_request_retries:
                     await asyncio.sleep(min(0.5 * 2**attempt, 2.0))
@@ -667,21 +792,77 @@ class FrozenSolverService:
         }
 
     async def evaluate(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not self.cache_evaluations:
-            return await self._evaluate_uncached(payload)
-        cache_key = stable_hash(payload)
-        task = self._evaluation_cache.get(cache_key)
+        raw_timeout = payload.get("evaluation_timeout_s")
+        timeout_s: float | None = None
+        if raw_timeout is not None:
+            timeout_s = float(raw_timeout)
+            if not math.isfinite(timeout_s) or timeout_s <= 0:
+                raise ValueError("evaluation_timeout_s must be a finite positive number")
+        trace_id = str(payload.get("trace_id") or "opponent:server")
+        deadline = (
+            asyncio.get_running_loop().time() + timeout_s
+            if timeout_s is not None
+            else None
+        )
+        cache_key: str | None = None
+        task: asyncio.Task[dict[str, Any]] | None = None
+        if self.cache_evaluations:
+            cache_payload = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"evaluation_timeout_s", "trace_id"}
+            }
+            cache_key = stable_hash(cache_payload)
+            task = self._evaluation_cache.get(cache_key)
         if task is None:
-            task = asyncio.create_task(self._evaluate_uncached(payload))
-            self._evaluation_cache[cache_key] = task
+            task = asyncio.create_task(
+                self._evaluate_uncached(payload, deadline=deadline, trace_id=trace_id)
+            )
+            if cache_key is not None:
+                self._evaluation_cache[cache_key] = task
         try:
-            return await task
+            done, _ = await asyncio.wait((task,), timeout=timeout_s)
+            if task not in done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                if cache_key is not None and self._evaluation_cache.get(cache_key) is task:
+                    self._evaluation_cache.pop(cache_key, None)
+                raise OpponentTimeout(
+                    "opponent evaluation exceeded its server deadline",
+                    stage="server_evaluation",
+                    attempts=1,
+                    trace_id=trace_id,
+                )
+            return task.result()
+        except asyncio.CancelledError as exc:
+            shared_task_was_cancelled = task.cancelled()
+            current_task = asyncio.current_task()
+            cancelling = getattr(current_task, "cancelling", None)
+            caller_was_cancelled = bool(cancelling()) if callable(cancelling) else False
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if cache_key is not None and self._evaluation_cache.get(cache_key) is task:
+                self._evaluation_cache.pop(cache_key, None)
+            if caller_was_cancelled or not shared_task_was_cancelled:
+                raise
+            raise OpponentTimeout(
+                "shared opponent evaluation was cancelled before completion",
+                stage="server_evaluation",
+                attempts=1,
+                trace_id=trace_id,
+            ) from exc
         except Exception:
-            if self._evaluation_cache.get(cache_key) is task:
+            if cache_key is not None and self._evaluation_cache.get(cache_key) is task:
                 self._evaluation_cache.pop(cache_key, None)
             raise
 
-    async def _evaluate_uncached(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _evaluate_uncached(
+        self,
+        payload: dict[str, Any],
+        *,
+        deadline: float | None = None,
+        trace_id: str = "opponent:server",
+    ) -> dict[str, Any]:
         proposal = TaskProposal.model_validate(payload["proposal"])
         snapshot = str(payload["graph_snapshot"])
         samples = max(1, min(int(payload.get("samples", 8)), 64))
@@ -713,8 +894,8 @@ class FrozenSolverService:
         structural, textual = self.archive.novelty(task.program_signature, task.question)
         raw_seed = payload.get("seed")
         base_seed = int(raw_seed) if raw_seed is not None else None
-        results = await asyncio.gather(
-            *(
+        rollout_tasks = [
+            asyncio.create_task(
                 self.rollout(
                     task,
                     backend,
@@ -743,9 +924,21 @@ class FrozenSolverService:
                         payload.get("restrict_relation_catalog", False)
                     ),
                 )
-                for sample_index in range(samples)
             )
-        )
+            for sample_index in range(samples)
+        ]
+        try:
+            results = await asyncio.gather(*rollout_tasks)
+        except asyncio.CancelledError:
+            for rollout_task in rollout_tasks:
+                rollout_task.cancel()
+            await asyncio.gather(*rollout_tasks, return_exceptions=True)
+            raise
+        except Exception:
+            for rollout_task in rollout_tasks:
+                rollout_task.cancel()
+            await asyncio.gather(*rollout_tasks, return_exceptions=True)
+            raise
         parsed = sum(value.get("program_parse", 0.0) for value in results)
         executable = sum(value.get("program_executable", 0.0) for value in results)
         semantic_f1 = sum(
@@ -797,6 +990,13 @@ class FrozenSolverService:
                 "generation": {**task.generation, "interaction_mode": mode},
             }
         )
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            raise OpponentTimeout(
+                "opponent evaluation completed after its server deadline",
+                stage="server_evaluation",
+                attempts=1,
+                trace_id=trace_id,
+            )
         (self.candidate_archive or self.archive).add(task)
         return summary
 
@@ -851,6 +1051,18 @@ def create_app(service: FrozenSolverService) -> Any:
     async def evaluate(request: Any) -> Any:
         try:
             return web.json_response(await service.evaluate(await request.json()))
+        except OpponentTimeout as exc:
+            return web.json_response(
+                {
+                    "error": type(exc).__name__,
+                    "message": exc.message,
+                    "detail": str(exc),
+                    "stage": exc.stage,
+                    "attempts": exc.attempts,
+                    "trace_id": exc.trace_id,
+                },
+                status=504,
+            )
         except OpponentUnavailable as exc:
             return web.json_response(
                 {"error": type(exc).__name__, "detail": str(exc)}, status=503

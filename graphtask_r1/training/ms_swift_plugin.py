@@ -10,11 +10,12 @@ import asyncio
 import atexit
 import json
 import logging
+import math
 import os
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from graphtask_r1.envs.graph_query import execute_compact_query
 from graphtask_r1.envs.text_search import execute_text_search
@@ -28,7 +29,7 @@ from graphtask_r1.schema import PassageHit, parse_program
 from graphtask_r1.training.json_compat import to_json_compatible
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
 from graphtask_r1.training.ms_swift_reward import compute_score
-from graphtask_r1.training.opponent import OpponentUnavailable
+from graphtask_r1.training.opponent import OpponentTimeout, OpponentUnavailable
 from graphtask_r1.training.response_normalization import normalize_reward_response
 
 try:
@@ -115,6 +116,109 @@ def _batch(value: object, size: int, *, default: object) -> list[object]:
     return [value for _ in range(size)]
 
 
+def _reward_group_key(prompt_id: object, info: Mapping[str, object], index: int) -> str:
+    """Return ms-swift's GRPO group id, with stable fallbacks for older rows."""
+
+    if prompt_id is not None and str(prompt_id):
+        return str(prompt_id)
+    task_id = info.get("task_id")
+    if task_id is not None and str(task_id):
+        return str(task_id)
+    # Old/custom datasets may provide neither identifier. Keep those samples
+    # independent instead of accidentally neutralizing every anonymous row.
+    return f"__graphtask_ungrouped__:{os.environ.get('RANK', '0')}:{index}"
+
+
+def _score_parallelism(infos: Sequence[Mapping[str, object]], size: int) -> int:
+    """Bound in-flight reward calls by the frozen-opponent completion budget."""
+
+    limits: list[int] = []
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 0:
+        raise ValueError("WORLD_SIZE must be positive")
+    for info in infos:
+        raw_max_concurrency = info.get("opponent_max_concurrency")
+        if raw_max_concurrency is None:
+            continue
+        max_concurrency = int(cast(Any, raw_max_concurrency))
+        samples = int(cast(Any, info.get("opponent_samples", 4)))
+        if max_concurrency <= 0:
+            raise ValueError("opponent_max_concurrency must be positive")
+        if samples <= 0:
+            raise ValueError("opponent_samples must be positive")
+        limits.append(max(1, max_concurrency // (world_size * samples)))
+    # Rows produced before the concurrency field was introduced retain the
+    # previous batch-wide behavior.
+    return min(limits) if limits else max(1, size)
+
+
+def _distributed_reward_state(
+    local_groups: set[str],
+    local_error: Exception | None,
+) -> tuple[set[str], str | None]:
+    """Synchronize failed groups and scorer errors without stranding another rank."""
+
+    try:
+        import torch.distributed as distributed
+    except ImportError:  # pragma: no cover - torch is required by ms-swift
+        return set(local_groups), None
+    if not distributed.is_available() or not distributed.is_initialized():
+        return set(local_groups), None
+    payload: dict[str, object] = {
+        "error": (
+            {
+                "rank": os.environ.get("RANK", "unknown"),
+                "type": type(local_error).__name__,
+                "message": str(local_error),
+            }
+            if local_error is not None
+            else None
+        ),
+        "unavailable_groups": sorted(local_groups),
+    }
+    gathered: list[object] = [None] * distributed.get_world_size()
+    distributed.all_gather_object(gathered, payload)
+    merged = set(local_groups)
+    remote_error: str | None = None
+    for rank_index, rank_state in enumerate(gathered):
+        if not isinstance(rank_state, dict):
+            raise TypeError("distributed reward state must be an object")
+        rank_groups = rank_state.get("unavailable_groups")
+        if not isinstance(rank_groups, list | tuple | set | frozenset):
+            raise TypeError("distributed reward timeout groups must be a sequence")
+        merged.update(str(group) for group in rank_groups)
+        error = rank_state.get("error")
+        if error is not None and not isinstance(error, dict):
+            raise TypeError("distributed reward error state must be an object")
+        if error is not None and remote_error is None:
+            remote_error = (
+                "reward scoring failed on rank "
+                f"{error.get('rank', rank_index)}: "
+                f"{error.get('type', 'Exception')}: {error.get('message', '')}"
+            )
+    return merged, remote_error
+
+
+def _distributed_is_active() -> bool:
+    try:
+        import torch.distributed as distributed
+    except ImportError:  # pragma: no cover - torch is required by ms-swift
+        return False
+    return bool(distributed.is_available() and distributed.is_initialized())
+
+
+def _float_components(result: Mapping[str, object]) -> dict[str, float]:
+    """Normalize component types while surfacing invalid scorer output."""
+
+    components = {str(name): float(cast(Any, value)) for name, value in result.items()}
+    non_finite = [name for name, value in components.items() if not math.isfinite(value)]
+    if non_finite:
+        raise ValueError(f"reward components must be finite: {sorted(non_finite)}")
+    if "score" not in components:
+        raise ValueError("reward result must contain score")
+    return components
+
+
 class GraphTaskReward(ORM):  # type: ignore[misc]
     """Return the total reward and emit all auditable components as structured logs."""
 
@@ -149,62 +253,237 @@ class GraphTaskReward(ORM):  # type: ignore[misc]
         extra_info: object = None,
         **kwargs: object,
     ) -> list[float]:
-        size = len(completions)
-        sources = _batch(data_source, size, default="graphtask/solver")
-        truths = _batch(ground_truth, size, default="")
-        infos = _batch(extra_info, size, default={})
-        rollout_infos = _batch(kwargs.get("rollout_infos"), size, default={})
+        raw_group_mode = os.environ.get("GRAPHTASK_RULE_GROUP_NEUTRALIZATION")
+        if raw_group_mode not in {None, "true", "false"}:
+            raise ValueError(
+                "GRAPHTASK_RULE_GROUP_NEUTRALIZATION must be 'true' or 'false'"
+            )
+        configured_group_mode = (
+            raw_group_mode == "true" if raw_group_mode is not None else None
+        )
+        try:
+            size = len(completions)
+            sources = _batch(data_source, size, default="graphtask/solver")
+            truths = _batch(ground_truth, size, default="")
+            infos = _batch(extra_info, size, default={})
+            rollout_infos = _batch(kwargs.get("rollout_infos"), size, default={})
+            prompt_ids = _batch(kwargs.get("prompt_id"), size, default=None)
 
-        normalized_infos: list[dict[str, Any]] = []
-        for index, raw_info in enumerate(infos):
-            info = to_json_compatible(raw_info)
-            if not isinstance(info, dict):
-                raise ValueError("extra_info reward column must contain objects")
+            normalized_infos: list[dict[str, Any]] = []
+            for index, raw_info in enumerate(infos):
+                info = to_json_compatible(raw_info)
+                if not isinstance(info, dict):
+                    raise ValueError("extra_info reward column must contain objects")
+                if (
+                    str(sources[index]) == "graphtask/solver"
+                    and info.get("solver_reward_variant") == "curriculum_v3"
+                ) or str(sources[index]) == "graphtask/evidence_solver":
+                    rollout = to_json_compatible(rollout_infos[index])
+                    if not isinstance(rollout, dict):
+                        raise ValueError(
+                            "rollout_infos reward column must contain objects"
+                        )
+                    info["solver_rollout"] = {
+                        "calls": 0,
+                        "valid_calls": 0,
+                        "invalid_calls": 0,
+                        "edge_visits": 0,
+                        "new_visible_entities": 0,
+                        **rollout,
+                    }
+                normalized_infos.append(info)
+
+            group_keys = [
+                _reward_group_key(prompt_ids[index], normalized_infos[index], index)
+                for index in range(size)
+            ]
+            rule_indices = {
+                index
+                for index, info in enumerate(normalized_infos)
+                if str(sources[index]) == "graphtask/questioner"
+                and info.get("questioner_reward_variant")
+                == "rule_program_question_v1"
+            }
             if (
-                str(sources[index]) == "graphtask/solver"
-                and info.get("solver_reward_variant") == "curriculum_v3"
-            ) or str(sources[index]) == "graphtask/evidence_solver":
-                rollout = to_json_compatible(rollout_infos[index])
-                if not isinstance(rollout, dict):
-                    raise ValueError("rollout_infos reward column must contain objects")
-                info["solver_rollout"] = {
-                    "calls": 0,
-                    "valid_calls": 0,
-                    "invalid_calls": 0,
-                    "edge_visits": 0,
-                    "new_visible_entities": 0,
-                    **rollout,
-                }
-            normalized_infos.append(info)
+                configured_group_mode is None
+                and rule_indices
+                and _distributed_is_active()
+            ):
+                raise ValueError(
+                    "distributed Rule Questioner requires "
+                    "GRAPHTASK_RULE_GROUP_NEUTRALIZATION=true"
+                )
+            group_mode = (
+                configured_group_mode
+                if configured_group_mode is not None
+                else bool(rule_indices)
+            )
+            if configured_group_mode is False and rule_indices:
+                raise ValueError(
+                    "Rule Questioner rows require group neutralization to be enabled"
+                )
+        except Exception as exc:
+            # Healthy ranks reach this same collective after local scoring. Reporting
+            # preflight failures here prevents them from waiting forever at the group
+            # neutralization collective.
+            if configured_group_mode is True:
+                _distributed_reward_state(set(), exc)
+            raise
 
-        async def score_one(index: int) -> dict[str, float]:
+        async def score_one(index: int, semaphore: asyncio.Semaphore) -> dict[str, float]:
             info = normalized_infos[index]
-            try:
+            acquired = False
+            bounded_opponent = (
+                str(sources[index]) == "graphtask/questioner"
+                and info.get("questioner_reward_variant") == "rule_program_question_v1"
+            )
+            timeout_s: float | None = None
+            deadline: float | None = None
+            if bounded_opponent:
+                timeout_s = float(info.get("opponent_request_timeout_s", 180.0))
+                if not math.isfinite(timeout_s) or timeout_s <= 0.0:
+                    raise ValueError(
+                        "opponent_request_timeout_s must be finite and positive"
+                    )
+                deadline = asyncio.get_running_loop().time() + timeout_s
+
+            async def run_scoring() -> dict[str, float]:
+                nonlocal acquired
+                scoring_info = info
+                if bounded_opponent:
+                    async with semaphore:
+                        acquired = True
+                        assert deadline is not None
+                        scoring_info = dict(info)
+                        scoring_info["opponent_request_timeout_s"] = max(
+                            1e-6,
+                            deadline - asyncio.get_running_loop().time(),
+                        )
+                        scoring_info["_opponent_reward_deadline_monotonic_s"] = deadline
+                        return await compute_score(
+                            str(sources[index]),
+                            _reward_completion(completions[index]),
+                            str(truths[index]),
+                            scoring_info,
+                            backend=self._backend(
+                                str(info.get("graph_snapshot", "toy-v1"))
+                            ),
+                        )
                 return await compute_score(
                     str(sources[index]),
                     _reward_completion(completions[index]),
                     str(truths[index]),
-                    info,
+                    scoring_info,
                     backend=self._backend(str(info.get("graph_snapshot", "toy-v1"))),
                 )
+
+            scoring_task = asyncio.create_task(run_scoring())
+            try:
+                if bounded_opponent:
+                    assert timeout_s is not None
+                    try:
+                        done, _ = await asyncio.wait((scoring_task,), timeout=timeout_s)
+                    except BaseException:
+                        scoring_task.cancel()
+                        await asyncio.gather(scoring_task, return_exceptions=True)
+                        raise
+                else:
+                    done = {scoring_task}
+                    await scoring_task
+                if bounded_opponent and scoring_task not in done:
+                    stage = "scoring" if acquired else "queue"
+                    scoring_task.cancel()
+                    await asyncio.gather(scoring_task, return_exceptions=True)
+                    logger.warning(
+                        "reward deadline exceeded; assigning neutral reward and continuing "
+                        "task_id=%s stage=%s timeout_s=%s",
+                        info.get("task_id", ""),
+                        stage,
+                        timeout_s,
+                    )
+                    result = {
+                        "score": 0.0,
+                        "raw_score": 0.0,
+                        "opponent_required": 1.0,
+                        "opponent_evaluated": 0.0,
+                        "opponent_timeout": 1.0,
+                        "opponent_unavailable": 1.0,
+                        "reward_fallback": 1.0,
+                        "reward_group_neutralized": 0.0,
+                        "reject_opponent_timeout": 1.0,
+                        f"opponent_timeout_stage_reward_{stage}": 1.0,
+                    }
+                else:
+                    # Reading a completed task's result separately from the deadline
+                    # lets an application-raised TimeoutError propagate as a code/runtime
+                    # error instead of being mistaken for our scheduling deadline.
+                    result = scoring_task.result()
             except OpponentUnavailable as exc:
+                timed_out = isinstance(exc, OpponentTimeout)
                 logger.warning(
                     "opponent unavailable; assigning neutral reward and continuing "
-                    "task_id=%s error=%s",
+                    "task_id=%s timeout=%s error=%s",
                     info.get("task_id", ""),
+                    timed_out,
                     exc,
                 )
-                return {
+                result = {
                     "score": 0.0,
                     "raw_score": 0.0,
+                    "opponent_required": 1.0,
+                    "opponent_evaluated": 0.0,
+                    "opponent_timeout": float(timed_out),
                     "opponent_unavailable": 1.0,
-                    "reject_opponent_unavailable": 1.0,
+                    "reward_fallback": 1.0,
+                    "reward_group_neutralized": 0.0,
+                    (
+                        "reject_opponent_timeout"
+                        if timed_out
+                        else "reject_opponent_unavailable"
+                    ): 1.0,
                 }
+            return _float_components(result)
 
         async def score_all() -> list[dict[str, float]]:
-            return list(await asyncio.gather(*(score_one(index) for index in range(size))))
+            semaphore = asyncio.Semaphore(_score_parallelism(normalized_infos, size))
+            return list(
+                await asyncio.gather(*(score_one(index, semaphore) for index in range(size)))
+            )
 
-        results = asyncio.run(score_all())
+        results: list[dict[str, float]] = []
+        local_error: Exception | None = None
+        try:
+            results = asyncio.run(score_all())
+        except Exception as exc:
+            local_error = exc
+        local_unavailable_groups = {
+            group_keys[index]
+            for index, result in enumerate(results)
+            if index in rule_indices
+            and (
+                result.get("opponent_timeout", 0.0) > 0.0
+                or result.get("opponent_unavailable", 0.0) > 0.0
+            )
+        }
+        unavailable_groups: set[str] = set()
+        distributed_error: str | None = None
+        if group_mode:
+            unavailable_groups, distributed_error = _distributed_reward_state(
+                local_unavailable_groups,
+                local_error,
+            )
+        if local_error is not None:
+            raise local_error
+        if distributed_error is not None:
+            raise RuntimeError(distributed_error)
+        for index, result in enumerate(results):
+            if index not in rule_indices or group_keys[index] not in unavailable_groups:
+                continue
+            result["score_before_neutralization"] = float(result["score"])
+            result["score"] = 0.0
+            result["raw_score"] = 0.0
+            result["reward_group_neutralized"] = 1.0
+            result["reward_fallback"] = 1.0
         sums: dict[str, float] = defaultdict(float)
         counts: dict[str, int] = defaultdict(int)
         role_sums: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
