@@ -1,5 +1,11 @@
 # GraphTask-R1
 
+当前工作分支为 `experiment/kilt`。KILT 实验从
+[KILT ECP 启动与扩展协议](experiments/kilt_ecp_scaleup/README.md) 开始：
+先运行 4B、48/16 冻结划分的 Search-R1 / ECP-v4 对照，再进行数据扩展。
+KQA Pro 实验位于 `experiment/kqapro` 分支，本机目录为 `/home/yogurts/projects/GraphTask`。
+以下保留项目共享说明与 KQA Pro 流程供参考。
+
 GraphTask-R1 训练模型把自然语言问题编译为 GraphScript，再由有界图执行器生成答案。训练统一使用
 `ms-swift==3.10.3`，主线为：
 

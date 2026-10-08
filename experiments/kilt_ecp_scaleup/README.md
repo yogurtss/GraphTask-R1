@@ -3,6 +3,30 @@
 本目录只保存扩展实验的配置和协议，不复用或覆盖此前 0.6B smoke test 的输出目录。
 训练框架固定为 `ms-swift==3.10.3`，直接从同一模型初始化进行 GRPO，不做 SFT。
 
+## 独立工作目录启动
+
+本机已按数据集建立两个 Git 分支和工作目录：
+
+| 数据集 | Git 分支 | 工作目录 |
+| --- | --- | --- |
+| KILT | `experiment/kilt` | `/home/yogurts/projects/GraphTask-kilt` |
+| KQA Pro | `experiment/kqapro` | `/home/yogurts/projects/GraphTask` |
+
+两个分支从 `21d719f` 起步。拆分时已有的未提交修改保留在 KQA Pro 工作目录。
+两个分支保留共享代码，后续各自在对应目录提交；公共修复可通过 `git cherry-pick` 同步。
+Git worktree 不会复制未跟踪的数据、模型和训练输出，因此先指定已有数据所在目录：
+
+```bash
+cd /home/yogurts/projects/GraphTask-kilt
+export GRAPHTASK_ASSET_ROOT=/home/yogurts/projects/GraphTask
+export PYTHONPATH="$PWD"
+```
+
+在其他机器上将 `GRAPHTASK_ASSET_ROOT` 改为实际数据根目录；未设置时默认使用当前目录。
+以下步骤从该目录读取冻结数据，新的数据导出和训练结果写入 KILT 工作目录的 `outputs/`。
+训练环境依赖见 [ms-swift 安装说明](../../docs/MS_SWIFT_CUDA_12_4.md)。
+按下文依次设置变量、导出两个训练臂、执行 dry-run，最后去掉 `--dry-run` 启动训练。
+
 ## 研究问题
 
 需要分别回答两个问题，不能把模型规模和数据规模同时改变后只报告一个结果：
@@ -42,9 +66,10 @@ adapter。
 当前可直接复用的冻结数据为：
 
 ```bash
-export GRAPHTASK_KILT_DB=data/processed/kilt/kilt-2019-08-01-500/graph.sqlite
-export FROZEN_RECORDS=outputs/kilt-evidence-selfplay-0.6b/direct_rl_round_500_seed71/records.parquet
-export FROZEN_SPLIT=outputs/kilt-evidence-selfplay-0.6b/direct_rl_round_500_seed71/split.json
+export GRAPHTASK_ASSET_ROOT="${GRAPHTASK_ASSET_ROOT:-$PWD}"
+export GRAPHTASK_KILT_DB="$GRAPHTASK_ASSET_ROOT/data/processed/kilt/kilt-2019-08-01-500/graph.sqlite"
+export FROZEN_RECORDS="$GRAPHTASK_ASSET_ROOT/outputs/kilt-evidence-selfplay-0.6b/direct_rl_round_500_seed71/records.parquet"
+export FROZEN_SPLIT="$GRAPHTASK_ASSET_ROOT/outputs/kilt-evidence-selfplay-0.6b/direct_rl_round_500_seed71/split.json"
 export SCALE_ROOT=outputs/kilt_ecp_scaleup/qwen3_4b_scale_only/seed71
 export EVIDENCE_SEED=71
 ```
@@ -76,7 +101,7 @@ PYTHONPATH=. python scripts/export_evidence_rl_records.py \
 
 ```bash
 export EVIDENCE_MODEL_PATH=Qwen/Qwen3-4B
-export EVIDENCE_RERANKER_PATH=outputs/kilt-evidence-selfplay-0.6b/ecp_counterfactual_seed71/reranker.json
+export EVIDENCE_RERANKER_PATH="$GRAPHTASK_ASSET_ROOT/outputs/kilt-evidence-selfplay-0.6b/ecp_counterfactual_seed71/reranker.json"
 
 EVIDENCE_RL_DATA="$SCALE_ROOT/data/search_r1" \
 EVIDENCE_RL_OUTPUT="$SCALE_ROOT/train/search_r1" \
