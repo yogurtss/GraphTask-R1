@@ -154,20 +154,38 @@ def _observation_content(observation: object) -> str:
     return value.model_dump_json(exclude={"step"})
 
 
-def _entity_reference(
+def observable_entity_reference(
     backend: GraphBackend, entity_id: str
 ) -> tuple[str, Literal["id", "exact", "search"]]:
     """Prefer a unique human-readable label; retain the ID when labels are ambiguous."""
 
     label = backend.entity_info(entity_id).label
     resolve = getattr(backend, "resolve_entities", None)
-    if callable(resolve):
-        try:
-            if tuple(resolve(label, match="exact", limit=2)) == (entity_id,):
-                return label, "exact"
-        except (TypeError, ValueError):
-            pass
+    if callable(resolve) and tuple(resolve(label, match="exact", limit=2)) == (
+        entity_id,
+    ):
+        return label, "exact"
     return entity_id, "id"
+
+
+def observable_entity_set_reference(
+    backend: GraphBackend, entity_ids: tuple[str, ...]
+) -> tuple[str, Literal["exact"]] | None:
+    """Return an exact label only when it denotes the complete requested entity set."""
+
+    count = len(entity_ids)
+    if not 2 <= count < 20 or len(set(entity_ids)) != count:
+        return None
+    labels = tuple(backend.entity_info(entity_id).label for entity_id in entity_ids)
+    if len(set(labels)) != 1:
+        return None
+    resolve = getattr(backend, "resolve_entities", None)
+    if not callable(resolve):
+        return None
+    resolved = tuple(resolve(labels[0], match="exact", limit=count + 1))
+    if len(resolved) == count and set(resolved) == set(entity_ids):
+        return labels[0], "exact"
+    return None
 
 
 def _solver_messages(
@@ -179,6 +197,9 @@ def _solver_messages(
     graphscript_version: GraphScriptVersion,
     relation_catalog: tuple[RelationInfo, ...],
     entity_reference_cache: dict[str, tuple[str, Literal["id", "exact", "search"]]],
+    entity_set_reference_cache: dict[
+        tuple[str, ...], tuple[str, Literal["exact"]] | None
+    ],
 ) -> list[dict[str, object]]:
     topic_ids = tuple(entity.entity_id for entity in task.topic_entities)
     messages: list[dict[str, object]] = [
@@ -202,13 +223,26 @@ def _solver_messages(
             entity_id: str,
         ) -> tuple[str, Literal["id", "exact", "search"]]:
             if entity_id not in entity_reference_cache:
-                entity_reference_cache[entity_id] = _entity_reference(backend, entity_id)
+                entity_reference_cache[entity_id] = observable_entity_reference(
+                    backend, entity_id
+                )
             return entity_reference_cache[entity_id]
+
+        def cached_entity_set_reference(
+            entity_ids: tuple[str, ...],
+        ) -> tuple[str, Literal["exact"]] | None:
+            cache_key = tuple(sorted(entity_ids))
+            if cache_key not in entity_set_reference_cache:
+                entity_set_reference_cache[cache_key] = observable_entity_set_reference(
+                    backend, entity_ids
+                )
+            return entity_set_reference_cache[cache_key]
 
         script = program_to_graphscript(
             task.program,
             version=graphscript_version,
             entity_reference=cached_entity_reference,
+            entity_set_reference=cached_entity_set_reference,
         )
         messages.append({"role": "assistant", "content": script.model_dump_json(by_alias=True)})
         return messages
@@ -279,6 +313,13 @@ def export_sft_dataset(
     entity_reference_caches: dict[
         str, dict[str, tuple[str, Literal["id", "exact", "search"]]]
     ] = {}
+    entity_set_reference_caches: dict[
+        str,
+        dict[
+            tuple[str, ...],
+            tuple[str, Literal["exact"]] | None,
+        ],
+    ] = {}
     progress = ProgressLogger("data.export_sft", total=total)
     progress.start(interaction_mode=interaction_mode)
     with ParquetRowWriter(output_path, schema=SFT_SCHEMA, batch_size=256) as writer:
@@ -316,6 +357,7 @@ def export_sft_dataset(
             if (include_solver or needs_questioner_context) and task.graph_snapshot not in backends:
                 backends[task.graph_snapshot] = backend_from_snapshot(task.graph_snapshot)
                 entity_reference_caches[task.graph_snapshot] = {}
+                entity_set_reference_caches[task.graph_snapshot] = {}
             if include_questioner and task.topic_entities:
                 writer.write(
                     {
@@ -347,6 +389,9 @@ def export_sft_dataset(
                             graphscript_version=graphscript_version,
                             relation_catalog=task_catalog,
                             entity_reference_cache=entity_reference_caches[
+                                task.graph_snapshot
+                            ],
+                            entity_set_reference_cache=entity_set_reference_caches[
                                 task.graph_snapshot
                             ],
                         ),

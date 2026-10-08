@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import math
 import random
 import re
@@ -18,12 +20,17 @@ from graphtask_r1.generation import verbalize
 from graphtask_r1.graph import GraphBackend, backend_from_snapshot
 from graphtask_r1.graphscript import program_to_graphscript
 from graphtask_r1.schema import Program, TaskProposal, TaskTrainingRecord, parse_program
-from graphtask_r1.training.opponent import request_opponent
+from graphtask_r1.training.opponent import (
+    OpponentTimeout,
+    OpponentUnavailable,
+    request_opponent,
+)
 from graphtask_r1.training.sft_dataset import SFT_SCHEMA
 from graphtask_r1.utils import ParquetRowWriter, iter_record_json, stable_hash, write_json
 from graphtask_r1.verification import verify_task
 
 RULE_QUESTIONER_VARIANT = "rule_program_question_v1"
+LOGGER = logging.getLogger(__name__)
 RULE_QUESTIONER_SYSTEM_PROMPT = """You are the linguistic Questioner in graph self-play. The
 system has already sampled and certified the executable GraphScript. Write one natural-language
 question whose denotation is exactly that program. Return exactly one JSON object in the shape
@@ -425,6 +432,13 @@ async def compute_rule_questioner_score(
         "opponent_semantic_success_given_execution": 0.0,
         "frontier_reward": 0.0,
         "novelty_textual": 0.0,
+        "opponent_required": 0.0,
+        "opponent_evaluated": 0.0,
+        "opponent_timeout": 0.0,
+        "opponent_timeout_attempts": 0.0,
+        "opponent_unavailable": 0.0,
+        "reward_fallback": 0.0,
+        "reward_group_neutralized": 0.0,
     }
     rejection_reasons: list[str] = []
     payload = _extract_question_payload(solution_str)
@@ -459,28 +473,106 @@ async def compute_rule_questioner_score(
     )
     opponent_url = str(info.get("opponent_url") or "")
     if eligible and opponent_url:
+        values["opponent_required"] = 1.0
         topic_ids = tuple(str(value) for value in info.get("topic_entity_ids", []))
         proposal = TaskProposal(topic_entities=topic_ids, program=program, paraphrase=question)
-        evaluation = await request_opponent(
-            opponent_url,
-            proposal=proposal,
-            graph_snapshot=str(info.get("graph_snapshot", "toy-v1")),
-            samples=int(info.get("opponent_samples", 4)),
-            round_index=int(info.get("round", 1)),
-            timeout_s=float(info.get("opponent_request_timeout_s", 180.0)),
-            interaction_mode="graphscript",
-            graphscript_version="0.3",
-            allowed_relations=tuple(str(value) for value in info.get("allowed_relations", [])),
-            max_follow_limit=int(info.get("max_follow_limit", 100)),
-            max_edge_visits=int(info.get("max_edge_visits", 200)),
-            seed=int(info.get("opponent_seed", 42)),
-            generated_question=question,
-            recover_invalid_tool_calls=True,
-            restrict_relation_catalog=True,
+        trace_id = stable_hash(
+            [
+                "rule-questioner-opponent",
+                str(info.get("round", 1)),
+                str(info.get("task_id", "")),
+                question,
+            ]
         )
+        try:
+            request_timeout_s = float(
+                info.get("opponent_request_timeout_s", 180.0)
+            )
+            raw_reward_deadline = info.get(
+                "_opponent_reward_deadline_monotonic_s"
+            )
+            if raw_reward_deadline is not None:
+                reward_deadline = float(raw_reward_deadline)
+                if not math.isfinite(reward_deadline):
+                    raise ValueError(
+                        "opponent reward deadline must be finite when provided"
+                    )
+                remaining_s = reward_deadline - asyncio.get_running_loop().time()
+                if remaining_s <= 0.0:
+                    raise OpponentTimeout(
+                        "opponent reward budget expired before request dispatch",
+                        stage="reward_queue",
+                        attempts=0,
+                        trace_id=trace_id,
+                    )
+                request_timeout_s = min(request_timeout_s, remaining_s)
+            evaluation = await request_opponent(
+                opponent_url,
+                proposal=proposal,
+                graph_snapshot=str(info.get("graph_snapshot", "toy-v1")),
+                samples=int(info.get("opponent_samples", 4)),
+                round_index=int(info.get("round", 1)),
+                timeout_s=request_timeout_s,
+                retries=int(info.get("opponent_request_retries", 0)),
+                interaction_mode="graphscript",
+                graphscript_version="0.3",
+                allowed_relations=tuple(
+                    str(value) for value in info.get("allowed_relations", [])
+                ),
+                max_follow_limit=int(info.get("max_follow_limit", 100)),
+                max_edge_visits=int(info.get("max_edge_visits", 200)),
+                seed=int(info.get("opponent_seed", 42)),
+                generated_question=question,
+                recover_invalid_tool_calls=True,
+                restrict_relation_catalog=True,
+                trace_id=trace_id,
+            )
+        except OpponentTimeout as exc:
+            timeout_stage_key = re.sub(r"[^a-z0-9]+", "_", exc.stage.casefold())
+            values.update(
+                {
+                    "opponent_timeout": 1.0,
+                    "opponent_timeout_attempts": float(exc.attempts),
+                    "opponent_unavailable": 1.0,
+                    "reward_fallback": 1.0,
+                    f"opponent_timeout_stage_{timeout_stage_key}": 1.0,
+                }
+            )
+            LOGGER.warning(
+                "rule_questioner_opponent_timeout task_id=%s stage=%s attempts=%d trace_id=%s",
+                info.get("task_id", ""),
+                exc.stage,
+                exc.attempts,
+                exc.trace_id,
+            )
+            rejection_reasons.append("OPPONENT_TIMEOUT")
+            return _rule_score(
+                values,
+                info,
+                tuple(dict.fromkeys(rejection_reasons)),
+            )
+        except OpponentUnavailable as exc:
+            values.update(
+                {
+                    "opponent_unavailable": 1.0,
+                    "reward_fallback": 1.0,
+                }
+            )
+            LOGGER.warning(
+                "rule_questioner_opponent_unavailable task_id=%s error=%s",
+                info.get("task_id", ""),
+                exc,
+            )
+            rejection_reasons.append("OPPONENT_UNAVAILABLE")
+            return _rule_score(
+                values,
+                info,
+                tuple(dict.fromkeys(rejection_reasons)),
+            )
         semantic_success = float(evaluation["semantic_success_given_execution"])
         values.update(
             {
+                "opponent_evaluated": 1.0,
                 "opponent_parse_rate": float(evaluation["program_parse_rate"]),
                 "opponent_execution_rate_given_parse": float(
                     evaluation["execution_rate_given_parse"]

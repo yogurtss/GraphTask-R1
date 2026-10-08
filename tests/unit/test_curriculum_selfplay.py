@@ -149,6 +149,9 @@ def test_rule_questioner_selfplay_preserves_fixed_program_prompt(tmp_path: Path)
         relation_catalog=relation_catalog,
         curriculum_max_seed_entities_start=1,
         curriculum_max_seed_entities_end=1,
+        opponent_request_retries=1,
+        opponent_max_concurrency=8,
+        questioner_opponent_max_concurrency=16,
     )
 
     counts = _assemble_dataset(
@@ -171,6 +174,8 @@ def test_rule_questioner_selfplay_preserves_fixed_program_prompt(tmp_path: Path)
     assert info["opponent_url"] == "http://new-opponent"
     assert info["allowed_relations"] == ["works_at"]
     assert info["opponent_request_timeout_s"] == 300.0
+    assert info["opponent_request_retries"] == 1
+    assert info["opponent_max_concurrency"] == 16
 
 
 def test_rule_questioner_variant_rejects_legacy_selfplay() -> None:
@@ -184,12 +189,32 @@ def test_rule_questioner_variant_rejects_legacy_selfplay() -> None:
         )
 
 
+def test_rule_questioner_variant_requires_grpo() -> None:
+    with pytest.raises(
+        ValueError,
+        match="rule_program_question_v1 requires rl_algorithm=grpo",
+    ):
+        _config(
+            questioner_reward_variant=RULE_QUESTIONER_VARIANT,
+            rl_algorithm="reinforce_plus_plus",
+        )
+
+
 def test_opponent_outer_timeout_must_exceed_model_timeout() -> None:
     with pytest.raises(ValueError, match="must exceed opponent_model_request_timeout_s"):
         _config(
             opponent_request_timeout_s=120,
             opponent_model_request_timeout_s=120,
         )
+
+
+def test_opponent_request_retries_are_bounded() -> None:
+    assert _config().opponent_request_retries == 0
+    assert _config(opponent_request_retries=10).opponent_request_retries == 10
+    with pytest.raises(ValueError, match="opponent_request_retries"):
+        _config(opponent_request_retries=-1)
+    with pytest.raises(ValueError, match="opponent_request_retries"):
+        _config(opponent_request_retries=11)
 
 
 def test_solver_syntax_stage_can_use_a_bounded_maintenance_budget() -> None:
@@ -823,6 +848,8 @@ def test_repository_curriculum_config_is_opt_in() -> None:
     assert rule_questioner_4b.opponent_max_concurrency == 8
     assert rule_questioner_4b.opponent_model_request_timeout_s == 240.0
     assert rule_questioner_4b.opponent_request_timeout_s == 300.0
+    assert rule_questioner_4b.opponent_request_retries == 0
+    assert rule_questioner_4b.rl_algorithm == "grpo"
     assert rule_questioner_4b.deepspeed == "zero2"
     assert rule_questioner_4b.val_data is None
     assert rule_questioner_4b.validation_samples is None
@@ -841,6 +868,7 @@ def test_exact_questioner_phase_uses_2_plus_2_runtime_without_changing_solver(
                 f"val_data: {tmp_path / 'val.parquet'}",
                 f"questioner_seeds: {tmp_path / 'seeds.parquet'}",
                 "selfplay_variant: curriculum_v3",
+                "questioner_reward_variant: rule_program_question_v1",
                 "rounds: 1",
                 'actor_gpus: "0,1,2"',
                 'opponent_gpus: "3"',
@@ -882,6 +910,10 @@ def test_exact_questioner_phase_uses_2_plus_2_runtime_without_changing_solver(
     assert questioner["train_environment"]["NUM_GPUS"] == "2"
     assert questioner["train_environment"]["GRADIENT_ACCUMULATION_STEPS"] == "6"
     assert questioner["train_environment"]["STEPS_PER_GENERATION"] == "6"
+    assert (
+        questioner["train_environment"]["GRAPHTASK_RULE_GROUP_NEUTRALIZATION"]
+        == "true"
+    )
     sglang = questioner["commands"]["sglang"]
     assert sglang[sglang.index("--dp-size") + 1] == "2"
     opponent = questioner["commands"]["opponent"]
@@ -903,6 +935,10 @@ def test_exact_questioner_phase_uses_2_plus_2_runtime_without_changing_solver(
     assert solver["train_environment"]["NUM_GPUS"] == "3"
     assert solver["train_environment"]["GRADIENT_ACCUMULATION_STEPS"] == "4"
     assert solver["train_environment"]["STEPS_PER_GENERATION"] == "4"
+    assert (
+        solver["train_environment"]["GRAPHTASK_RULE_GROUP_NEUTRALIZATION"]
+        == "false"
+    )
     sglang = solver["commands"]["sglang"]
     assert sglang[sglang.index("--dp-size") + 1] == "1"
 

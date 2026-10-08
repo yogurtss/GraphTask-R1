@@ -1,0 +1,41 @@
+# Same optimizer contract as ERE mini128; only the pair source changes.
+repo_root: ../../..
+seed: 4242
+
+paths:
+  model: outputs/experiments/rule-questioner-contract-large/selfplay-reward-fix/merged-step56
+  dataset: outputs/experiments/kqapro-graph-residual-replay/mini/pairs/train.jsonl
+  output_dir: outputs/experiments/kqapro-graph-residual-replay/dpo-mini
+
+runtime:
+  swift: .conda/ms-swift-debug/bin/swift
+  cuda_visible_devices: "0"
+  nproc_per_node: 1
+  dataset_num_proc: 1
+  dataloader_num_workers: 1
+
+model:
+  model_type: qwen3
+  template: qwen3
+  response_prefix: "<think>\n\n</think>\n\n"
+  torch_dtype: bfloat16
+  attn_impl: sdpa
+  max_length: 32768
+
+training:
+  loss_type: sigmoid
+  beta: 0.1
+  epochs: 1
+  micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-7
+  weight_decay: 0.0
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  target_modules: all-linear
+  save_steps: 16
+  save_total_limit: 2
+  logging_steps: 1
+  warmup_ratio: 0.05
+  extra_args: []

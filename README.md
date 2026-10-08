@@ -1,5 +1,11 @@
 # GraphTask-R1
 
+当前工作分支为 `experiment/kqapro`，本机工作目录为 `/home/yogurts/projects/GraphTask`。
+KILT 实验独立维护在 `experiment/kilt` 分支，本机工作目录为
+`/home/yogurts/projects/GraphTask-kilt`，启动入口为该分支的
+`experiments/kilt_ecp_scaleup/README.md`。两个分支保留共享框架，分别提交数据集相关改动；
+公共修复可通过 `git cherry-pick` 同步。
+
 GraphTask-R1 训练模型把自然语言问题编译为 GraphScript，再由有界图执行器生成答案。训练统一使用
 `ms-swift==3.10.3`，主线为：
 
@@ -66,6 +72,8 @@ make test
 
 - [KQAPro：从原始数据到 SFT、GRPO、self-play](docs/KQAPRO_TRAINING.md)
 - [Program-first Rule Questioner：数据、SFT 与六阶段 self-play](docs/RULE_QUESTIONER_EXPERIMENT.md)
+- [KQA Pro execution residual evolution](experiments/kqapro_execution_residual_evolution/README.md)
+- [KQA Pro graph residual replay](experiments/kqapro_graph_residual_replay/README.md)
 - [Curriculum v3 设计与 A/B](docs/SELFPLAY_CURRICULUM_V3.md)
 - [模型评测与路径可视化](docs/KQAPRO_EVAL_VIS_README.md)
 - [GraphScript 与 tool 模式](docs/INTERACTION_MODES.md)

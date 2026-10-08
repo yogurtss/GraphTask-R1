@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 from pathlib import Path
 
 import pyarrow as pa
@@ -30,6 +31,7 @@ from graphtask_r1.schema import (
     VerificationSummary,
 )
 from graphtask_r1.training.ms_swift_data import convert_rl_row, convert_sft_row
+from graphtask_r1.training.opponent import OpponentTimeout, OpponentUnavailable
 from graphtask_r1.utils import write_records
 
 
@@ -163,13 +165,161 @@ def test_rule_questioner_uses_bounded_catalog_and_configured_timeout(
         "allowed_relations": ["works_at"],
     }
 
-    asyncio.run(
+    result = asyncio.run(
         compute_rule_questioner_score(json.dumps({"question": question}), info)
     )
 
     assert captured["allowed_relations"] == ("works_at",)
     assert captured["restrict_relation_catalog"] is True
     assert captured["timeout_s"] == 321.0
+    assert captured["retries"] == 0
+    assert isinstance(captured["trace_id"], str)
+    assert captured["trace_id"]
+    assert result["opponent_required"] == 1.0
+    assert result["opponent_evaluated"] == 1.0
+    assert result["opponent_timeout"] == 0.0
+    assert result["opponent_unavailable"] == 0.0
+    assert result["reward_fallback"] == 0.0
+    assert result["raw_score"] == pytest.approx(1.0)
+    assert result["score"] == pytest.approx(1.0)
+
+
+def test_rule_questioner_timeout_preserves_finite_local_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def timeout(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise OpponentTimeout(
+            "slow frozen Solver",
+            stage="server_evaluation",
+            attempts=1,
+            trace_id="trace-timeout",
+        )
+
+    caplog.set_level("WARNING", logger=rule_questioner_module.__name__)
+    monkeypatch.setattr(rule_questioner_module, "request_opponent", timeout)
+    program = _program()
+    question = verbalize(program, toy_graph())
+    info = {
+        "task_id": "task-timeout",
+        "graph_snapshot": "toy-v1",
+        "topic_entity_ids": ["alice"],
+        "fixed_program_json": program.model_dump_json(),
+        "question_alignment_min": 0.4,
+        "opponent_url": "http://unused",
+        "role_weight": 0.25,
+    }
+
+    result = asyncio.run(
+        compute_rule_questioner_score(json.dumps({"question": question}), info)
+    )
+
+    assert result["raw_score"] == pytest.approx(0.5)
+    assert result["score"] == pytest.approx(0.125)
+    assert result["json_valid"] == 1.0
+    assert result["question_present"] == 1.0
+    assert result["question_program_alignment"] == 1.0
+    assert result["no_answer_leak"] == 1.0
+    assert result["certified"] == 1.0
+    assert result["opponent_required"] == 1.0
+    assert result["opponent_evaluated"] == 0.0
+    assert result["opponent_timeout"] == 1.0
+    assert result["opponent_timeout_attempts"] == 1.0
+    assert result["opponent_timeout_stage_server_evaluation"] == 1.0
+    assert result["opponent_unavailable"] == 1.0
+    assert result["reward_fallback"] == 1.0
+    assert result["reject_opponent_timeout"] == 1.0
+    assert all(math.isfinite(value) for value in result.values())
+    assert "trace_id=trace-timeout" in caplog.text
+
+
+def test_rule_questioner_only_catches_typed_opponent_unavailability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unavailable(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise OpponentUnavailable("temporary gateway failure")
+
+    monkeypatch.setattr(rule_questioner_module, "request_opponent", unavailable)
+    program = _program()
+    question = verbalize(program, toy_graph())
+    info = {
+        "graph_snapshot": "toy-v1",
+        "topic_entity_ids": ["alice"],
+        "fixed_program_json": program.model_dump_json(),
+        "question_alignment_min": 0.4,
+        "opponent_url": "http://unused",
+    }
+
+    result = asyncio.run(
+        compute_rule_questioner_score(json.dumps({"question": question}), info)
+    )
+
+    assert result["raw_score"] == pytest.approx(0.5)
+    assert result["opponent_timeout"] == 0.0
+    assert result["opponent_unavailable"] == 1.0
+    assert result["reward_fallback"] == 1.0
+    assert result["reject_opponent_unavailable"] == 1.0
+
+
+def test_rule_questioner_honors_reward_deadline_before_request_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def forbidden(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise AssertionError("expired reward must not dispatch opponent request")
+
+    monkeypatch.setattr(rule_questioner_module, "request_opponent", forbidden)
+    program = _program()
+    question = verbalize(program, toy_graph())
+
+    result = asyncio.run(
+        compute_rule_questioner_score(
+            json.dumps({"question": question}),
+            {
+                "task_id": "already-expired",
+                "graph_snapshot": "toy-v1",
+                "topic_entity_ids": ["alice"],
+                "fixed_program_json": program.model_dump_json(),
+                "question_alignment_min": 0.4,
+                "opponent_url": "http://unused",
+                "_opponent_reward_deadline_monotonic_s": 0.0,
+            },
+        )
+    )
+
+    assert result["raw_score"] == pytest.approx(0.5)
+    assert result["opponent_timeout"] == 1.0
+    assert result["opponent_timeout_attempts"] == 0.0
+    assert result["opponent_timeout_stage_reward_queue"] == 1.0
+    assert result["reject_opponent_timeout"] == 1.0
+
+
+def test_rule_questioner_does_not_hide_programming_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise RuntimeError("reward implementation bug")
+
+    monkeypatch.setattr(rule_questioner_module, "request_opponent", broken)
+    program = _program()
+    question = verbalize(program, toy_graph())
+
+    with pytest.raises(RuntimeError, match="reward implementation bug"):
+        asyncio.run(
+            compute_rule_questioner_score(
+                json.dumps({"question": question}),
+                {
+                    "graph_snapshot": "toy-v1",
+                    "topic_entity_ids": ["alice"],
+                    "fixed_program_json": program.model_dump_json(),
+                    "question_alignment_min": 0.4,
+                    "opponent_url": "http://unused",
+                },
+            )
+        )
 
 
 def test_rule_questioner_reward_extracts_json_after_serving_prefix() -> None:

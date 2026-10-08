@@ -1,0 +1,30 @@
+# Frozen 256-task train probe for task-local on-policy residual replay.
+repo_root: ../../..
+seed: 4242
+
+paths:
+  tasks: data/processed/kqapro/kqapro-v03-full-audit/train/tasks.parquet
+  relation_catalog: data/processed/kqapro/kqapro-v03-full-audit/relation_catalog.json
+  graph_db: data/processed/kqapro/kqapro-v03-full-audit/graph.sqlite
+  model_artifact: outputs/experiments/rule-questioner-contract-large/selfplay-reward-fix/merged-step56/model.safetensors
+  output_dir: outputs/experiments/kqapro-graph-residual-replay/mini
+
+model:
+  url: ${GRR_MODEL_URL}
+  name: ${GRR_MODEL}
+  max_completion_tokens: 512
+  enable_thinking: false
+
+rollout:
+  probe_count: 256
+  concurrency: 2
+  request_timeout_s: 180
+  request_retries: 1
+
+pairs:
+  count: 128
+
+execution:
+  max_follow_limit: 100
+  max_edge_visits: 200
+  max_returned_entities: 1000

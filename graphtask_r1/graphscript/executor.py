@@ -326,6 +326,10 @@ def program_to_graphscript(
     follow_limit: int = 100,
     version: str = "0.1",
     entity_reference: Callable[[str], tuple[str, Literal["id", "exact", "search"]]] | None = None,
+    entity_set_reference: Callable[
+        [tuple[str, ...]], tuple[str, Literal["exact"]] | None
+    ]
+    | None = None,
 ) -> GraphScript:
     if version == "0.1":
         if not isinstance(program, Hop) or not isinstance(program.input, Hop):
@@ -415,6 +419,26 @@ def program_to_graphscript(
                 }
             )
             return output
+        if isinstance(node, Union) and entity_set_reference is not None:
+            direct_entities = tuple(
+                branch for branch in node.inputs if isinstance(branch, Entity)
+            )
+            if len(direct_entities) == len(node.inputs):
+                entity_ids = tuple(branch.entity_id for branch in direct_entities)
+                reference = entity_set_reference(entity_ids)
+                if reference is not None:
+                    output = allocate()
+                    query, match = reference
+                    ops.append(
+                        {
+                            "op": "resolve_entity",
+                            "query": query,
+                            "match": match,
+                            "limit": len(entity_ids),
+                            "out": output,
+                        }
+                    )
+                    return output
         if isinstance(node, Intersect | Union):
             inputs = [compile_node(branch) for branch in node.inputs]
             output = allocate()

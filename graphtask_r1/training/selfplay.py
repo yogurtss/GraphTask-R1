@@ -129,6 +129,7 @@ class SelfPlayConfig(BaseModel):
     sglang_port: int = 30000
     opponent_port: int = 18080
     opponent_request_timeout_s: float = Field(default=300.0, gt=0.0)
+    opponent_request_retries: int = Field(default=0, ge=0, le=10)
     opponent_model_request_timeout_s: float = Field(default=240.0, gt=0.0)
     opponent_model_request_retries: int = Field(default=2, ge=0, le=10)
     opponent_max_concurrency: int = Field(default=8, gt=0, le=64)
@@ -185,6 +186,11 @@ class SelfPlayConfig(BaseModel):
             raise ValueError(
                 "rule_program_question_v1 requires selfplay_variant=curriculum_v3"
             )
+        if (
+            self.questioner_reward_variant == "rule_program_question_v1"
+            and self.rl_algorithm != "grpo"
+        ):
+            raise ValueError("rule_program_question_v1 requires rl_algorithm=grpo")
         if abs(self.base_ratio + self.archive_ratio + self.new_ratio - 1.0) > 1e-9:
             raise ValueError("base_ratio, archive_ratio, and new_ratio must sum to 1")
         if self.archive_min_pass_rate > self.archive_max_pass_rate:
@@ -542,6 +548,7 @@ def _assemble_dataset(
     opponent_url: str,
 ) -> dict[str, int]:
     relation_catalog = load_relation_catalog(config.relation_catalog)
+    questioner_runtime = _phase_runtime(config, "questioner")
     solver_path = output_path.with_name("solver.parquet")
     solver_count = _write_solver_dataset(
         config,
@@ -621,6 +628,8 @@ def _assemble_dataset(
                 "opponent_url": opponent_url,
                 "opponent_samples": config.opponent_samples,
                 "opponent_request_timeout_s": config.opponent_request_timeout_s,
+                "opponent_request_retries": config.opponent_request_retries,
+                "opponent_max_concurrency": questioner_runtime.opponent_max_concurrency,
                 "round": round_index,
                 "interaction_mode": config.interaction_mode,
                 "graphscript_version": config.graphscript_version,
@@ -1407,6 +1416,10 @@ def run_self_play(
             "SAVE_STEPS": str(config.save_steps),
             "SAVE_TOTAL_LIMIT": str(config.save_total_limit),
             "GRAPHTASK_REWARD_METRICS_DIR": str(reward_metrics_dir.resolve()),
+            "GRAPHTASK_RULE_GROUP_NEUTRALIZATION": str(
+                target_phase == "questioner"
+                and config.questioner_reward_variant == "rule_program_question_v1"
+            ).lower(),
             "SEED": str(config.seed),
             "PYTHONUNBUFFERED": "1",
             "AUTO_RESUME": str(resume).lower(),
@@ -1819,6 +1832,11 @@ def run_self_play(
                                     + round_index * 1_000
                                     + (1 if phase == "questioner" else 2)
                                 ),
+                                "GRAPHTASK_RULE_GROUP_NEUTRALIZATION": str(
+                                    phase == "questioner"
+                                    and config.questioner_reward_variant
+                                    == "rule_program_question_v1"
+                                ).lower(),
                             }
                             phase_env.pop("RESUME_FROM_CHECKPOINT", None)
                             phase_resume_checkpoint = (

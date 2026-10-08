@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -625,6 +626,529 @@ def test_ms_swift_reward_keeps_training_when_opponent_is_temporarily_unavailable
     sample = event["sample_components"][0]
     assert sample["reason_codes"] == ["OPPONENT_UNAVAILABLE"]
     assert sample["components"]["opponent_unavailable"] == 1.0
+    assert sample["components"]["opponent_required"] == 1.0
+    assert sample["components"]["opponent_evaluated"] == 0.0
+    assert sample["components"]["opponent_timeout"] == 0.0
+    assert sample["components"]["reward_fallback"] == 1.0
+    assert sample["components"]["reward_group_neutralized"] == 0.0
+
+
+def test_ms_swift_reward_final_safety_net_preserves_timeout_reason(
+    plugin: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphtask_r1.training.opponent import OpponentTimeout
+
+    async def unavailable(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise OpponentTimeout(
+            "opponent request deadline exceeded",
+            stage="request",
+            attempts=1,
+            trace_id="task-timeout",
+        )
+
+    caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
+    monkeypatch.setattr(plugin, "compute_score", unavailable)
+    reward = plugin.GraphTaskReward()
+
+    assert reward(
+        ["candidate"],
+        data_source=["graphtask/questioner"],
+        ground_truth=["{}"],
+        extra_info=[
+            {
+                "graph_snapshot": "toy-v1",
+                "task_id": "task-timeout",
+                "questioner_reward_variant": "rule_program_question_v1",
+            }
+        ],
+    ) == [0.0]
+
+    event = json.loads(caplog.records[-1].message)
+    sample = event["sample_components"][0]
+    assert sample["reason_codes"] == ["OPPONENT_TIMEOUT"]
+    assert sample["components"]["opponent_timeout"] == 1.0
+    assert sample["components"]["opponent_unavailable"] == 1.0
+    assert sample["components"]["reward_group_neutralized"] == 1.0
+
+
+def test_ms_swift_reward_neutralizes_only_failed_prompt_group(
+    plugin: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_compute_score(
+        data_source: str,
+        solution_str: str,
+        ground_truth: str,
+        extra_info: dict[str, object],
+        *,
+        backend: object | None = None,
+    ) -> dict[str, float]:
+        del data_source, ground_truth, extra_info, backend
+        if solution_str == "timed-out":
+            return {
+                "score": 0.2,
+                "raw_score": 0.4,
+                "opponent_timeout": 1.0,
+                "opponent_unavailable": 1.0,
+                "reject_opponent_timeout": 1.0,
+            }
+        score = 0.6 if solution_str == "same-group" else 0.9
+        return {"score": score, "raw_score": score}
+
+    caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+    reward = plugin.GraphTaskReward()
+    common_info = {
+        "graph_snapshot": "toy-v1",
+        "task_id": "shared-task",
+        "questioner_reward_variant": "rule_program_question_v1",
+    }
+
+    values = reward(
+        ["same-group", "timed-out", "healthy-group"],
+        data_source=["graphtask/questioner"] * 3,
+        ground_truth=["{}"] * 3,
+        extra_info=[common_info, common_info, common_info],
+        prompt_id=["prompt-a", "prompt-a", "prompt-b"],
+    )
+
+    assert values == [0.0, 0.0, 0.9]
+    event = json.loads(caplog.records[-1].message)
+    first, second, third = event["sample_components"]
+    assert first["components"]["score_before_neutralization"] == 0.6
+    assert first["components"]["raw_score"] == 0.0
+    assert first["components"]["reward_group_neutralized"] == 1.0
+    assert first["components"]["reward_fallback"] == 1.0
+    assert second["components"]["score_before_neutralization"] == 0.2
+    assert second["reason_codes"] == ["OPPONENT_TIMEOUT"]
+    assert "reward_group_neutralized" not in third["components"]
+    assert third["components"]["score"] == 0.9
+
+
+def test_ms_swift_reward_falls_back_to_task_id_for_group_neutralization(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_compute_score(
+        data_source: str,
+        solution_str: str,
+        ground_truth: str,
+        extra_info: dict[str, object],
+        *,
+        backend: object | None = None,
+    ) -> dict[str, float]:
+        del data_source, ground_truth, extra_info, backend
+        return {
+            "score": 0.5,
+            "raw_score": 0.5,
+            "opponent_unavailable": float(solution_str == "unavailable"),
+        }
+
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+    reward = plugin.GraphTaskReward()
+
+    values = reward(
+        ["healthy-sibling", "unavailable", "other-task"],
+        data_source=["graphtask/questioner"] * 3,
+        ground_truth=["{}"] * 3,
+        extra_info=[
+            {
+                "graph_snapshot": "toy-v1",
+                "task_id": "task-a",
+                "questioner_reward_variant": "rule_program_question_v1",
+            },
+            {
+                "graph_snapshot": "toy-v1",
+                "task_id": "task-a",
+                "questioner_reward_variant": "rule_program_question_v1",
+            },
+            {
+                "graph_snapshot": "toy-v1",
+                "task_id": "task-b",
+                "questioner_reward_variant": "rule_program_question_v1",
+            },
+        ],
+    )
+
+    assert values == [0.0, 0.0, 0.5]
+
+
+def test_ms_swift_reward_merges_unavailable_groups_across_ranks(
+    plugin: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_compute_score(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        return {"score": 0.75, "raw_score": 0.75}
+
+    gathered_payloads: list[dict[str, object]] = []
+    distributed = types.ModuleType("torch.distributed")
+    distributed.is_available = lambda: True
+    distributed.is_initialized = lambda: True
+    distributed.get_world_size = lambda: 2
+
+    def all_gather_object(output: list[object], payload: dict[str, object]) -> None:
+        gathered_payloads.append(payload)
+        output[:] = [
+            payload,
+            {"error": None, "unavailable_groups": ["remote-timeout"]},
+        ]
+
+    distributed.all_gather_object = all_gather_object
+    torch = types.ModuleType("torch")
+    torch.distributed = distributed
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", distributed)
+    monkeypatch.setenv("GRAPHTASK_RULE_GROUP_NEUTRALIZATION", "true")
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+    caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
+    reward = plugin.GraphTaskReward()
+
+    values = reward(
+        ["remote sibling", "healthy"],
+        data_source=["graphtask/questioner"] * 2,
+        ground_truth=["{}", "{}"],
+        extra_info=[
+            {
+                "graph_snapshot": "toy-v1",
+                "task_id": "one",
+                "questioner_reward_variant": "rule_program_question_v1",
+            },
+            {
+                "graph_snapshot": "toy-v1",
+                "task_id": "two",
+                "questioner_reward_variant": "rule_program_question_v1",
+            },
+        ],
+        prompt_id=["remote-timeout", "healthy"],
+    )
+
+    assert gathered_payloads == [{"error": None, "unavailable_groups": []}]
+    assert values == [0.0, 0.75]
+    event = json.loads(caplog.records[-1].message)
+    remote_sibling = event["sample_components"][0]["components"]
+    assert remote_sibling["score_before_neutralization"] == 0.75
+    assert remote_sibling["reward_group_neutralized"] == 1.0
+    assert remote_sibling["reward_fallback"] == 1.0
+
+
+def test_ms_swift_reward_propagates_remote_rank_error_without_entering_group_collective(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_compute_score(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        return {"score": 0.75, "raw_score": 0.75}
+
+    distributed = types.ModuleType("torch.distributed")
+    distributed.is_available = lambda: True
+    distributed.is_initialized = lambda: True
+    distributed.get_world_size = lambda: 2
+
+    def all_gather_object(output: list[object], payload: dict[str, object]) -> None:
+        output[:] = [
+            payload,
+            {
+                "error": {
+                    "rank": "1",
+                    "type": "ValueError",
+                    "message": "bad reward config",
+                },
+                "unavailable_groups": [],
+            },
+        ]
+
+    distributed.all_gather_object = all_gather_object
+    torch = types.ModuleType("torch")
+    torch.distributed = distributed
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", distributed)
+    monkeypatch.setenv("GRAPHTASK_RULE_GROUP_NEUTRALIZATION", "true")
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+    reward = plugin.GraphTaskReward()
+
+    with pytest.raises(
+        RuntimeError,
+        match="reward scoring failed on rank 1: ValueError: bad reward config",
+    ):
+        reward(
+            ["candidate"],
+            data_source=["graphtask/questioner"],
+            ground_truth=["{}"],
+            extra_info=[
+                {
+                    "graph_snapshot": "toy-v1",
+                    "questioner_reward_variant": "rule_program_question_v1",
+                }
+            ],
+            prompt_id=["prompt-a"],
+        )
+
+
+def test_ms_swift_reward_syncs_rule_preflight_error_across_ranks(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gathered_payloads: list[dict[str, object]] = []
+    distributed = types.ModuleType("torch.distributed")
+    distributed.is_available = lambda: True
+    distributed.is_initialized = lambda: True
+    distributed.get_world_size = lambda: 2
+
+    def all_gather_object(output: list[object], payload: dict[str, object]) -> None:
+        gathered_payloads.append(payload)
+        output[:] = [payload, payload]
+
+    distributed.all_gather_object = all_gather_object
+    torch = types.ModuleType("torch")
+    torch.distributed = distributed
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", distributed)
+    monkeypatch.setenv("GRAPHTASK_RULE_GROUP_NEUTRALIZATION", "true")
+    reward = plugin.GraphTaskReward()
+
+    with pytest.raises(ValueError, match="reward column has 2 rows; expected 1"):
+        reward(
+            ["candidate"],
+            data_source=["graphtask/questioner", "extra"],
+        )
+
+    assert len(gathered_payloads) == 1
+    error = gathered_payloads[0]["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "ValueError"
+
+
+def test_ms_swift_reward_does_not_add_collective_to_non_rule_batches(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_compute_score(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        return {"score": 0.5, "raw_score": 0.5}
+
+    collective_calls = 0
+    distributed = types.ModuleType("torch.distributed")
+    distributed.is_available = lambda: True
+    distributed.is_initialized = lambda: True
+
+    def all_gather_object(*_: object) -> None:
+        nonlocal collective_calls
+        collective_calls += 1
+
+    distributed.all_gather_object = all_gather_object
+    torch = types.ModuleType("torch")
+    torch.distributed = distributed
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", distributed)
+    monkeypatch.setenv("GRAPHTASK_RULE_GROUP_NEUTRALIZATION", "false")
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+
+    assert plugin.GraphTaskReward()(
+        ["solver"],
+        data_source=["graphtask/solver"],
+        ground_truth=["{}"],
+        extra_info=[{"graph_snapshot": "toy-v1"}],
+    ) == [0.5]
+    assert collective_calls == 0
+
+
+def test_ms_swift_reward_limits_score_concurrency_per_rank(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = 0
+    peak_active = 0
+
+    async def fake_compute_score(*args: object, **kwargs: object) -> dict[str, float]:
+        nonlocal active, peak_active
+        del args, kwargs
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            active -= 1
+        return {"score": 0.25, "raw_score": 0.25}
+
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(plugin, "compute_score", fake_compute_score)
+    reward = plugin.GraphTaskReward()
+    info = {
+        "graph_snapshot": "toy-v1",
+        "questioner_reward_variant": "rule_program_question_v1",
+        "opponent_max_concurrency": 8,
+        "opponent_samples": 2,
+        "opponent_request_timeout_s": 1.0,
+    }
+
+    values = reward(
+        [str(index) for index in range(6)],
+        data_source=["graphtask/questioner"] * 6,
+        ground_truth=["{}"] * 6,
+        extra_info=[info] * 6,
+        prompt_id=[f"prompt-{index}" for index in range(6)],
+    )
+
+    assert values == [0.25] * 6
+    assert peak_active == 2
+
+
+def test_ms_swift_reward_queue_wait_uses_request_deadline(
+    plugin: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[str] = []
+
+    async def slow_compute_score(
+        data_source: str,
+        solution_str: str,
+        *args: object,
+        **kwargs: object,
+    ) -> dict[str, float]:
+        del data_source, args, kwargs
+        started.append(solution_str)
+        await asyncio.sleep(1.0)
+        return {"score": 0.5, "raw_score": 0.5}
+
+    caplog.set_level("INFO", logger="graphtask_r1.training.ms_swift_plugin")
+    monkeypatch.setattr(plugin, "compute_score", slow_compute_score)
+    reward = plugin.GraphTaskReward()
+    info = {
+        "graph_snapshot": "toy-v1",
+        "questioner_reward_variant": "rule_program_question_v1",
+        "opponent_max_concurrency": 1,
+        "opponent_samples": 1,
+        "opponent_request_timeout_s": 0.02,
+    }
+
+    values = reward(
+        ["first", "queued"],
+        data_source=["graphtask/questioner"] * 2,
+        ground_truth=["{}", "{}"],
+        extra_info=[info, info],
+        prompt_id=["first", "queued"],
+    )
+
+    assert values == [0.0, 0.0]
+    assert started == ["first"]
+    event = json.loads(caplog.records[-1].message)
+    queued = event["sample_components"][1]["components"]
+    assert queued["opponent_timeout_stage_reward_queue"] == 1.0
+    assert queued["opponent_timeout"] == 1.0
+
+
+def test_ms_swift_reward_passes_queue_adjusted_timeout_to_rule_scorer(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_timeouts: list[float] = []
+    observed_deadlines: list[float] = []
+
+    async def capture_timeout(
+        data_source: str,
+        solution_str: str,
+        ground_truth: str,
+        extra_info: dict[str, object],
+        *,
+        backend: object | None = None,
+    ) -> dict[str, float]:
+        del data_source, solution_str, ground_truth, backend
+        observed_timeouts.append(float(extra_info["opponent_request_timeout_s"]))
+        observed_deadlines.append(
+            float(extra_info["_opponent_reward_deadline_monotonic_s"])
+        )
+        await asyncio.sleep(0.03)
+        return {"score": 0.5, "raw_score": 0.5}
+
+    monkeypatch.setattr(plugin, "compute_score", capture_timeout)
+    reward = plugin.GraphTaskReward()
+    info = {
+        "graph_snapshot": "toy-v1",
+        "questioner_reward_variant": "rule_program_question_v1",
+        "opponent_max_concurrency": 1,
+        "opponent_samples": 1,
+        "opponent_request_timeout_s": 0.2,
+    }
+
+    assert reward(
+        ["first", "second"],
+        data_source=["graphtask/questioner"] * 2,
+        ground_truth=["{}", "{}"],
+        extra_info=[info, info],
+        prompt_id=["first", "second"],
+    ) == [0.5, 0.5]
+
+    assert len(observed_timeouts) == 2
+    assert 0.0 < observed_timeouts[1] < observed_timeouts[0] <= 0.2
+    assert len(observed_deadlines) == 2
+    assert observed_deadlines[0] == pytest.approx(observed_deadlines[1], abs=0.01)
+
+
+def test_ms_swift_reward_does_not_misclassify_application_timeout_error(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise TimeoutError("local scorer bug")
+
+    monkeypatch.setattr(plugin, "compute_score", broken)
+    reward = plugin.GraphTaskReward()
+
+    with pytest.raises(TimeoutError, match="local scorer bug"):
+        reward(
+            ["candidate"],
+            data_source=["graphtask/solver"],
+            ground_truth=["{}"],
+            extra_info=[{"graph_snapshot": "toy-v1"}],
+        )
+
+
+def test_ms_swift_reward_rejects_non_finite_components(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def non_finite(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        return {"score": float("nan"), "raw_score": float("nan")}
+
+    monkeypatch.setattr(plugin, "compute_score", non_finite)
+    reward = plugin.GraphTaskReward()
+
+    with pytest.raises(ValueError, match="reward components must be finite"):
+        reward(
+            ["candidate"],
+            data_source=["graphtask/solver"],
+            ground_truth=["{}"],
+            extra_info=[{"graph_snapshot": "toy-v1"}],
+        )
+
+
+def test_ms_swift_reward_does_not_swallow_external_cancellation(
+    plugin: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def cancelled(*args: object, **kwargs: object) -> dict[str, float]:
+        del args, kwargs
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(plugin, "compute_score", cancelled)
+    reward = plugin.GraphTaskReward()
+
+    with pytest.raises(asyncio.CancelledError):
+        reward(
+            ["candidate"],
+            data_source=["graphtask/questioner"],
+            ground_truth=["{}"],
+            extra_info=[{"graph_snapshot": "toy-v1"}],
+        )
 
 
 def test_curriculum_solver_reward_receives_scheduler_rollout_infos(

@@ -1,0 +1,51 @@
+"""Execution Residual Evolution primitives for the isolated KQAPro experiment."""
+
+from kqapro_ere.residual import (
+    AlignmentPair,
+    Denotation,
+    DenotationAlignment,
+    ExecutionBudget,
+    ExecutionResidual,
+    OperationFields,
+    PrefixDenotation,
+    ResidualAnalysis,
+    ResidualError,
+    TerminalExecution,
+    align_prefix_denotations,
+    analyze_execution_residual,
+    execute_output_prefixes,
+    locate_earliest_divergence,
+    parse_reference_graphscript,
+)
+from kqapro_ere.reward import (
+    ERERewardComponents,
+    ERERewardConfig,
+    ERERewardResult,
+    RewardRejection,
+    compute_ere_reward,
+    reward_from_analysis,
+)
+
+__all__ = [
+    "AlignmentPair",
+    "Denotation",
+    "DenotationAlignment",
+    "ERERewardComponents",
+    "ERERewardConfig",
+    "ERERewardResult",
+    "ExecutionBudget",
+    "ExecutionResidual",
+    "OperationFields",
+    "PrefixDenotation",
+    "ResidualAnalysis",
+    "ResidualError",
+    "RewardRejection",
+    "TerminalExecution",
+    "align_prefix_denotations",
+    "analyze_execution_residual",
+    "compute_ere_reward",
+    "execute_output_prefixes",
+    "locate_earliest_divergence",
+    "parse_reference_graphscript",
+    "reward_from_analysis",
+]

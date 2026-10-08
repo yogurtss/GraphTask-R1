@@ -1,0 +1,19 @@
+# Frozen-contract evaluation for the independent GRR experiment.
+input_path: ${GRR_EVAL_INPUT}
+relation_catalog: ${KQAPRO_DIR}/relation_catalog.json
+graph_snapshot: kqapro-v1
+graphscript_version: "0.3"
+model:
+  model_url: ${KQAPRO_MODEL_URL}
+  api_key: null
+  model: ${KQAPRO_MODEL}
+  max_completion_tokens: 512
+  chat_template_kwargs:
+    enable_thinking: false
+seed: 42
+concurrency: 2
+request_timeout_s: 180
+request_retries: 1
+max_follow_limit: 100
+max_edge_visits: 200
+max_returned_entities: 1000
